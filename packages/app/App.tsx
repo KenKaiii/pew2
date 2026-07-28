@@ -276,7 +276,9 @@ function Working({ color }: { color?: string }) {
   }, [reduceMotion, one, two, three]);
 
   return (
-    <View style={styles.workingRow} accessibilityLabel="Agent is working">
+    // `accessible` groups the orb and dots into one node; without it the label
+    // is attached to a container VoiceOver never focuses.
+    <View style={styles.workingRow} accessible accessibilityLabel="Agent is working">
       <View style={styles.agentOrbSlot}>
         <Orb color={color} size={22} busy />
       </View>
@@ -360,7 +362,6 @@ const styles = StyleSheet.create({
     borderRadius: 3,
     backgroundColor: theme.color.textDim,
   },
-
 
   // One consistent gap between the thread and the composer, kept when the
   // keyboard is open so the last message never hides behind the input.
