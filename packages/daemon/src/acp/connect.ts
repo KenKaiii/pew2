@@ -58,6 +58,24 @@ export async function connectProvider(options: ConnectOptions): Promise<AcpSessi
     env: process.env,
   }) as ChildProcessWithoutNullStreams;
 
+  // A missing executable surfaces asynchronously as an 'error' event. Without a
+  // listener Node treats it as unhandled and takes the whole daemon down, so one
+  // uninstalled provider would kill every other session. Convert it to a
+  // rejection of this call instead.
+  const spawned = new Promise<void>((resolve, reject) => {
+    child.once("spawn", resolve);
+    child.once("error", (error: NodeJS.ErrnoException) => {
+      reject(
+        error.code === "ENOENT"
+          ? new Error(
+              `'${provider.command}' was not found on PATH. Install it, or point the manifest at an absolute path.`,
+            )
+          : error,
+      );
+    });
+  });
+  await spawned;
+
   child.on("exit", (code, signal) => options.onExit?.(code, signal));
 
   if (options.onStderr) {

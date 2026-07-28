@@ -6,7 +6,8 @@
  * rebuild — the daemon rescans and re-announces to connected phones.
  */
 import { readdir, readFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { join, resolve, isAbsolute, delimiter } from "node:path";
+import { existsSync } from "node:fs";
 import {
   ProviderManifest,
   formatManifestError,
@@ -22,6 +23,19 @@ export interface LoadedProvider {
   args: string[];
   /** Env var names declared required but missing from the daemon's environment. */
   missingEnv: string[];
+  /** True when `command` could not be found on PATH. */
+  commandMissing: boolean;
+}
+
+/**
+ * Whether an executable is resolvable. Checked up front so an uninstalled agent
+ * is shown as unavailable in the app rather than failing at spawn time.
+ * `npx`/`uvx` are assumed present; they fetch their own packages on demand.
+ */
+function canResolveCommand(command: string, env: NodeJS.ProcessEnv): boolean {
+  if (isAbsolute(command) || command.includes("/")) return existsSync(command);
+  const paths = (env.PATH ?? "").split(delimiter).filter(Boolean);
+  return paths.some((dir) => existsSync(join(dir, command)));
 }
 
 export interface LoadResult {
@@ -93,18 +107,24 @@ export async function loadProviders(
     const missingEnv = manifest.pew.env
       .filter((v) => v.required && !env[v.name])
       .map((v) => v.name);
+    const commandMissing = !canResolveCommand(command, env);
 
-    providers.push({ manifest, source, command, args, missingEnv });
+    providers.push({ manifest, source, command, args, missingEnv, commandMissing });
   }
 
   return { providers, errors };
 }
 
 export function isAvailable(provider: LoadedProvider): boolean {
-  return provider.missingEnv.length === 0;
+  return provider.missingEnv.length === 0 && !provider.commandMissing;
 }
 
 export function unavailableReason(provider: LoadedProvider): string | undefined {
-  if (provider.missingEnv.length === 0) return undefined;
-  return `Missing required environment ${provider.missingEnv.length === 1 ? "variable" : "variables"}: ${provider.missingEnv.join(", ")}`;
+  if (provider.commandMissing) {
+    return `Not installed: '${provider.command}' is not on PATH`;
+  }
+  if (provider.missingEnv.length > 0) {
+    return `Missing required environment ${provider.missingEnv.length === 1 ? "variable" : "variables"}: ${provider.missingEnv.join(", ")}`;
+  }
+  return undefined;
 }

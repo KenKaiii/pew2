@@ -25,6 +25,7 @@ export class Daemon {
 
   constructor(
     private readonly machine: { id: string; name: string },
+    private readonly includeExperimental = false,
   ) {}
 
   /** Point the daemon at a transport. Called with the relay socket's `send`. */
@@ -46,7 +47,9 @@ export class Daemon {
       t: "providers",
       machine: this.machine,
       providers: this.providers
-        .filter((p) => !p.manifest.pew.experimental)
+        // Test fixtures are hidden unless explicitly asked for, so a demo or a
+        // local run can still exercise the pipeline without any API keys.
+        .filter((p) => !p.manifest.pew.experimental || this.includeExperimental)
         .map((p) => ({
           id: p.manifest.id,
           name: p.manifest.name,
