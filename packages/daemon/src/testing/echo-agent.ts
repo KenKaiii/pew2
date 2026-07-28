@@ -62,7 +62,13 @@ const app = agent({ name: "pew2-echo" })
   .onRequest("session/set_config_option", async (ctx: any) => {
     const { configId, value } = ctx.params as { configId: string; value: string };
     const option = configOptions.find((entry) => entry.id === configId);
-    if (option) option.currentValue = value;
+    if (!option) throw new Error(`Unknown config option '${configId}'`);
+    // Reject values outside the advertised set, as a real agent would; silently
+    // accepting anything would let a broken client pass its tests.
+    if (!option.options.some((entry) => entry.value === value)) {
+      throw new Error(`Invalid value '${value}' for '${configId}'`);
+    }
+    option.currentValue = value;
     // The spec requires replying with the complete list, not just the change.
     return { configOptions };
   })

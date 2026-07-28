@@ -14,9 +14,13 @@ export function useReducedMotion(): boolean {
   useEffect(() => {
     let active = true;
 
-    AccessibilityInfo.isReduceMotionEnabled().then((value) => {
-      if (active) setReduced(value);
-    });
+    AccessibilityInfo.isReduceMotionEnabled()
+      .then((value) => {
+        if (active) setReduced(value);
+      })
+      // If the platform cannot report the setting, keep animations on rather
+      // than letting an unhandled rejection surface as a redbox.
+      .catch(() => {});
 
     const subscription = AccessibilityInfo.addEventListener(
       "reduceMotionChanged",

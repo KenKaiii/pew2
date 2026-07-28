@@ -60,6 +60,20 @@ const applied = inbox
   ?.configOptions?.find((o) => o.id === "model");
 check("changing the model round-trips", applied?.currentValue === "echo-max");
 
+// A value outside the advertised set must be refused, not silently stored.
+inbox.length = 0;
+send({
+  t: "session.config",
+  sessionId: started.sessionId,
+  configId: "model",
+  value: "not-a-real-model",
+});
+await wait(1200);
+check(
+  "invalid model value is rejected",
+  inbox.some((m) => m.t === "error") && !inbox.some((m) => m.t === "session.config"),
+);
+
 inbox.length = 0;
 send({ t: "session.prompt", sessionId: started.sessionId, text: "hello from the simulator" });
 await wait(2000);
