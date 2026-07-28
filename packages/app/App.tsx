@@ -212,21 +212,25 @@ function Pew2() {
       />
 
       {daemon.permission && (
-        <View style={styles.sheetBackdrop}>
+        // Blocking on purpose: an approval must not be scrollable away.
+        // accessibilityViewIsModal keeps VoiceOver inside the sheet too.
+        <View style={styles.sheetBackdrop} accessibilityViewIsModal>
           <View style={styles.sheet}>
             <Text style={styles.sheetLabel}>APPROVAL NEEDED</Text>
             <Text style={styles.sheetTitle}>{daemon.permission.title}</Text>
             <View style={styles.sheetActions}>
               {daemon.permission.options.map((option) => {
                 const deny = /reject|deny|no/i.test(option.optionId);
+                // Capture the id now. Another device watching this session can
+                // answer first and clear `permission`; dereferencing it inside
+                // the handler would then throw.
+                const requestId = daemon.permission!.requestId;
                 return (
                   <Pressable
                     key={option.optionId}
                     accessibilityRole="button"
                     accessibilityLabel={option.name}
-                    onPress={() =>
-                      daemon.answer(daemon.permission!.requestId, option.optionId)
-                    }
+                    onPress={() => daemon.answer(requestId, option.optionId)}
                     style={({ pressed }) => [
                       styles.sheetButton,
                       deny ? styles.sheetDeny : styles.sheetAllow,

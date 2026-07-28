@@ -209,14 +209,21 @@ export async function connectProvider(options: ConnectOptions): Promise<AcpSessi
     sessionId: created.sessionId,
     configOptions,
     async setConfigOption(configId: string, value: string | boolean) {
-      const result = (await connection.agent.request("session/set_config_option", {
-        sessionId: created.sessionId,
-        configId,
-        ...(typeof value === "boolean" ? { type: "boolean" } : {}),
-        value,
-      })) as { configOptions?: unknown };
-      // The agent replies with the complete list, so trust it over local state.
-      return normaliseConfigOptions(result?.configOptions);
+      try {
+        const result = (await connection.agent.request("session/set_config_option", {
+          sessionId: created.sessionId,
+          configId,
+          ...(typeof value === "boolean" ? { type: "boolean" } : {}),
+          value,
+        })) as { configOptions?: unknown };
+        // The agent replies with the complete list, so trust it over local state.
+        return normaliseConfigOptions(result?.configOptions);
+      } catch (error) {
+        // JSON-RPC errors surface as a bare "Internal error", which says nothing
+        // about which option failed. Name it so the log is actionable.
+        const detail = error instanceof Error ? error.message : String(error);
+        throw new Error(`Could not set '${configId}' to '${String(value)}': ${detail}`);
+      }
     },
     prompt: (text: string) =>
       connection.agent.request("session/prompt", {
