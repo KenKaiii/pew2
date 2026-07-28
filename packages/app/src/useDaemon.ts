@@ -103,6 +103,14 @@ export function useDaemon(url: string) {
         // them twice, and the ref would then desync from state.
         if (message.t === "session.started") sessionRef.current = message.sessionId;
 
+        // The daemon broadcasts every session to every client, and a previous
+        // session can still be streaming after the user backs out and starts
+        // another. Drop anything that is not the session on screen, otherwise
+        // its output would appear in the wrong conversation.
+        const scoped =
+          message.t === "session.event" || message.t === "session.idle";
+        if (scoped && message.sessionId !== sessionRef.current) return;
+
         setState((prev) => {
           switch (message.t) {
             case "providers":
