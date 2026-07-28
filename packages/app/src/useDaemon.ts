@@ -31,11 +31,41 @@ export interface Turn {
   text: string;
 }
 
+/**
+ * A session-level selector advertised by the connected agent: model, thinking
+ * level, or mode. pew2 hardcodes no model names — each app reports its own.
+ * https://agentclientprotocol.com/protocol/v1/session-config-options
+ */
+export interface ConfigOption {
+  id: string;
+  name: string;
+  category?: string;
+  type: string;
+  currentValue: string | boolean;
+  options?: { value: string; name: string; description?: string }[];
+}
+
+/** A past conversation, grouped by the agent that ran it. */
+export interface Session {
+  id: string;
+  providerId: string;
+  /** First user message, used as the list title. */
+  title: string;
+  startedAt: number;
+  turns: Turn[];
+}
+
 interface State {
   status: Status;
   providers: Provider[];
   sessionId?: string;
+  /** The agent the composer will talk to. Chosen before a session exists. */
+  activeProviderId?: string;
   turns: Turn[];
+  /** Every conversation this client has seen, newest first. */
+  sessions: Session[];
+  /** Selectors for the open session, in the agent's own priority order. */
+  configOptions: ConfigOption[];
   permission?: PermissionRequest;
   busy: boolean;
 }
@@ -63,6 +93,8 @@ export function useDaemon(url: string) {
     status: "connecting",
     providers: [],
     turns: [],
+    sessions: [],
+    configOptions: [],
     busy: false,
   });
 
@@ -73,6 +105,9 @@ export function useDaemon(url: string) {
   // Mirrors state.sessionId so actions can read it without doing work inside a
   // state updater. Updaters must stay pure: React may invoke them twice.
   const sessionRef = useRef<string | undefined>(undefined);
+  // Text entered before a session existed. Sent as soon as the daemon confirms
+  // one, so the composer works straight from the empty state.
+  const queued = useRef<string | undefined>(undefined);
 
   useEffect(() => {
     alive.current = true;
@@ -101,14 +136,30 @@ export function useDaemon(url: string) {
         // Track the live session id here, as the message arrives, rather than
         // inside the updater below. Updaters must stay pure: React may invoke
         // them twice, and the ref would then desync from state.
-        if (message.t === "session.started") sessionRef.current = message.sessionId;
+        if (message.t === "session.started") {
+          sessionRef.current = message.sessionId;
+
+          const pending = queued.current;
+          queued.current = undefined;
+          if (pending) {
+            ws.send(
+              JSON.stringify({
+                t: "session.prompt",
+                sessionId: message.sessionId,
+                text: pending,
+              }),
+            );
+          }
+        }
 
         // The daemon broadcasts every session to every client, and a previous
         // session can still be streaming after the user backs out and starts
         // another. Drop anything that is not the session on screen, otherwise
         // its output would appear in the wrong conversation.
         const scoped =
-          message.t === "session.event" || message.t === "session.idle";
+          message.t === "session.event" ||
+          message.t === "session.idle" ||
+          message.t === "session.config";
         if (scoped && message.sessionId !== sessionRef.current) return;
 
         setState((prev) => {
@@ -117,11 +168,31 @@ export function useDaemon(url: string) {
               return { ...prev, providers: message.providers ?? [] };
 
             case "session.started":
-              return { ...prev, sessionId: message.sessionId, turns: [], busy: false };
+              return {
+                ...prev,
+                sessionId: message.sessionId,
+                activeProviderId: message.providerId ?? prev.activeProviderId,
+                configOptions: message.configOptions ?? [],
+                turns: [],
+                sessions: [
+                  {
+                    id: message.sessionId,
+                    providerId: message.providerId ?? prev.activeProviderId ?? "",
+                    title: "New conversation",
+                    startedAt: Date.now(),
+                    turns: [],
+                  },
+                  ...prev.sessions,
+                ],
+                busy: false,
+              };
 
             case "session.idle":
               // The turn finished. Without this the spinner would never stop.
               return { ...prev, busy: false };
+
+            case "session.config":
+              return { ...prev, configOptions: message.configOptions ?? [] };
 
             case "session.event": {
               const payload = message.payload;
@@ -159,7 +230,22 @@ export function useDaemon(url: string) {
                   text: chunk.text,
                 });
               }
-              return { ...prev, turns, busy: chunk.role !== "system" };
+              // Mirror into history so the sidebar can reopen this later, and
+              // title the session from its first user message.
+              const sessions = prev.sessions.map((session) =>
+                session.id === message.sessionId
+                  ? {
+                      ...session,
+                      turns,
+                      title:
+                        session.title === "New conversation" && chunk.role === "user"
+                          ? chunk.text.trim().slice(0, 60)
+                          : session.title,
+                    }
+                  : session,
+              );
+
+              return { ...prev, turns, sessions, busy: chunk.role !== "system" };
             }
 
             case "error":
@@ -227,7 +313,12 @@ export function useDaemon(url: string) {
 
   const actions = useMemo(
     () => ({
-      start: (providerId: string) => post({ t: "session.start", providerId }),
+      /** `initialText` is sent automatically once the session is ready. */
+      start: (providerId: string, initialText?: string) => {
+        queued.current = initialText;
+        post({ t: "session.start", providerId });
+        if (initialText) setState((s) => ({ ...s, busy: true }));
+      },
 
       prompt: (text: string) => {
         const sessionId = sessionRef.current;
@@ -248,9 +339,46 @@ export function useDaemon(url: string) {
         setState((s) => ({ ...s, permission: undefined, busy: true }));
       },
 
+      /** Change a model, thinking level or mode on the open session. */
+      setConfig: (configId: string, value: string | boolean) => {
+        const sessionId = sessionRef.current;
+        if (sessionId) post({ t: "session.config", sessionId, configId, value });
+      },
+
+      /** Reopen a past conversation from the sidebar. */
+      openSession: (sessionId: string) => {
+        sessionRef.current = sessionId;
+        queued.current = undefined;
+        setState((s) => {
+          const session = s.sessions.find((entry) => entry.id === sessionId);
+          if (!session) return s;
+          return {
+            ...s,
+            sessionId,
+            activeProviderId: session.providerId,
+            turns: session.turns,
+            busy: false,
+          };
+        });
+      },
+
+      /** Choose which agent the composer targets. Ends any open session. */
+      select: (providerId: string) => {
+        sessionRef.current = undefined;
+        queued.current = undefined;
+        setState((s) => ({
+          ...s,
+          activeProviderId: providerId,
+          sessionId: undefined,
+          turns: [],
+          busy: false,
+        }));
+      },
+
       leave: () => {
         sessionRef.current = undefined;
-        setState((s) => ({ ...s, sessionId: undefined, turns: [] }));
+        queued.current = undefined;
+        setState((s) => ({ ...s, sessionId: undefined, turns: [], busy: false }));
       },
     }),
     [post],

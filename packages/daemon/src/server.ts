@@ -84,6 +84,8 @@ const server = Bun.serve({
         text?: string;
         requestId?: string;
         optionId?: string;
+        configId?: string;
+        value?: string | boolean;
       };
       try {
         message = JSON.parse(raw);
@@ -104,7 +106,14 @@ const server = Bun.serve({
               message.providerId,
               message.cwd ?? process.cwd(),
             );
-            broadcast({ t: "session.started", sessionId, providerId: message.providerId });
+            broadcast({
+              t: "session.started",
+              sessionId,
+              providerId: message.providerId,
+              // Models and thinking levels come from the agent itself, so a
+              // newly connected app brings its own without any mapping here.
+              configOptions: daemon.configOptions(sessionId),
+            });
             break;
           }
           case "session.prompt": {
@@ -128,6 +137,22 @@ const server = Bun.serve({
             await daemon.cancel(message.sessionId);
             break;
           }
+          case "session.config": {
+            if (!message.sessionId || !message.configId || message.value === undefined) {
+              throw new Error("sessionId, configId and value required");
+            }
+            broadcast({
+              t: "session.config",
+              sessionId: message.sessionId,
+              configOptions: await daemon.setConfigOption(
+                message.sessionId,
+                message.configId,
+                message.value,
+              ),
+            });
+            break;
+          }
+
           case "session.permission": {
             if (!message.sessionId || !message.requestId || !message.optionId) {
               throw new Error("sessionId, requestId and optionId required");

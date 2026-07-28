@@ -87,6 +87,19 @@ export class Daemon {
     return log.sessionId;
   }
 
+  /** Selectors (model, thinking level, mode) advertised by a session's agent. */
+  configOptions(sessionId: string) {
+    return this.sessions.get(sessionId)?.handle.configOptions ?? [];
+  }
+
+  async setConfigOption(sessionId: string, configId: string, value: string | boolean) {
+    const session = this.require(sessionId);
+    const updated = await session.handle.setConfigOption(configId, value);
+    // Keep the handle authoritative so late-joining clients see current values.
+    session.handle.configOptions = updated;
+    return updated;
+  }
+
   async prompt(sessionId: string, text: string) {
     const session = this.require(sessionId);
     // Echo the user's own message into the log so every client renders it,

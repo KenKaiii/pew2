@@ -10,13 +10,59 @@ import { Readable, Writable } from "node:stream";
 import { client, ndJsonStream, type ClientConnection } from "@agentclientprotocol/sdk";
 import type { LoadedProvider } from "../providers/registry.js";
 
+/**
+ * A session-level selector advertised by the agent: model, thinking level, mode.
+ * pew2 never hardcodes model names — each agent reports its own, so connecting a
+ * new app automatically brings its models and reasoning levels with it.
+ * https://agentclientprotocol.com/protocol/v1/session-config-options
+ */
+export interface ConfigOption {
+  id: string;
+  name: string;
+  description?: string;
+  /** 'model' | 'thought_level' | 'mode' | 'model_config', or a custom '_' name. */
+  category?: string;
+  type: string;
+  currentValue: string | boolean;
+  options?: { value: string; name: string; description?: string }[];
+}
+
+/**
+ * Agents differ on the identifier field: ACP v1 uses `id`, the v2 draft uses
+ * `configId`. Accept either so a mixed-version fleet works, and emit `id`.
+ */
+function normaliseConfigOptions(raw: unknown): ConfigOption[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((entry) => {
+    const option = entry as Record<string, unknown>;
+    const id = (option.id ?? option.configId) as string | undefined;
+    if (!id || typeof option.name !== "string") return [];
+    return [
+      {
+        id,
+        name: option.name,
+        description: option.description as string | undefined,
+        category: (option.category ?? undefined) as string | undefined,
+        type: typeof option.type === "string" ? option.type : "select",
+        currentValue: option.currentValue as string | boolean,
+        options: Array.isArray(option.options)
+          ? (option.options as ConfigOption["options"])
+          : undefined,
+      },
+    ];
+  });
+}
+
 export interface AcpSessionHandle {
   connection: ClientConnection;
   child: ChildProcessWithoutNullStreams;
   /** The agent's own session id, returned by `session/new`. */
   sessionId: string;
+  /** Selectors the agent advertised. Empty when it offers none. */
+  configOptions: ConfigOption[];
   prompt(text: string): Promise<unknown>;
   cancel(): Promise<void>;
+  setConfigOption(configId: string, value: string | boolean): Promise<ConfigOption[]>;
   answerPermission(requestId: string, optionId: string): boolean;
   close(): void;
 }
@@ -115,19 +161,63 @@ export async function connectProvider(options: ConnectOptions): Promise<AcpSessi
 
   await connection.agent.request("initialize", {
     protocolVersion: 1,
-    clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
+    clientCapabilities: {
+      fs: { readTextFile: false, writeTextFile: false },
+      terminal: false,
+      // Opt in to boolean selectors; agents must not send them otherwise.
+      session: { configOptions: { boolean: {} } },
+    },
     clientInfo: { name: "pew2", title: "pew2", version: "0.1.0" },
   });
 
   const created = (await connection.agent.request("session/new", {
     cwd,
     mcpServers: [],
-  })) as { sessionId: string };
+  })) as {
+    sessionId: string;
+    configOptions?: ConfigOption[];
+    modes?: {
+      currentModeId: string;
+      availableModes: { id: string; name: string; description?: string }[];
+    };
+  };
+
+  // `modes` is the deprecated predecessor of `configOptions`. Normalise it so
+  // the app only ever deals with one shape.
+  const configOptions: ConfigOption[] = created.configOptions
+    ? normaliseConfigOptions(created.configOptions)
+    : (created.modes
+      ? [
+          {
+            id: "mode",
+            name: "Mode",
+            category: "mode",
+            type: "select",
+            currentValue: created.modes.currentModeId,
+            options: created.modes.availableModes.map((mode) => ({
+              value: mode.id,
+              name: mode.name,
+              description: mode.description,
+            })),
+          },
+        ]
+      : []);
 
   return {
     connection,
     child,
     sessionId: created.sessionId,
+    configOptions,
+    async setConfigOption(configId: string, value: string | boolean) {
+      const result = (await connection.agent.request("session/set_config_option", {
+        sessionId: created.sessionId,
+        configId,
+        ...(typeof value === "boolean" ? { type: "boolean" } : {}),
+        value,
+      })) as { configOptions?: unknown };
+      // The agent replies with the complete list, so trust it over local state.
+      return normaliseConfigOptions(result?.configOptions);
+    },
     prompt: (text: string) =>
       connection.agent.request("session/prompt", {
         sessionId: created.sessionId,

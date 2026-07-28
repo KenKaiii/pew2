@@ -15,6 +15,38 @@ import { Readable, Writable } from "node:stream";
 const sessions = new Set<string>();
 let counter = 0;
 
+/**
+ * Models and reasoning levels this agent offers. Real agents report their own;
+ * this mirrors the shape so the picker can be exercised without an API key.
+ * https://agentclientprotocol.com/protocol/v1/session-config-options
+ */
+const configOptions = [
+  {
+    id: "model",
+    name: "Model",
+    category: "model",
+    type: "select" as const,
+    currentValue: "echo-pro",
+    options: [
+      { value: "echo-mini", name: "Echo Mini" },
+      { value: "echo-pro", name: "Echo Pro" },
+      { value: "echo-max", name: "Echo Max" },
+    ],
+  },
+  {
+    id: "thought_level",
+    name: "Thinking",
+    category: "thought_level",
+    type: "select" as const,
+    currentValue: "think",
+    options: [
+      { value: "none", name: "None" },
+      { value: "think", name: "Think" },
+      { value: "think_hard", name: "Think Hard" },
+    ],
+  },
+];
+
 const app = agent({ name: "pew2-echo" })
   .onRequest("initialize", async () => ({
     protocolVersion: 1,
@@ -25,7 +57,14 @@ const app = agent({ name: "pew2-echo" })
   .onRequest("session/new", async () => {
     const sessionId = `echo_${++counter}`;
     sessions.add(sessionId);
-    return { sessionId };
+    return { sessionId, configOptions };
+  })
+  .onRequest("session/set_config_option", async (ctx: any) => {
+    const { configId, value } = ctx.params as { configId: string; value: string };
+    const option = configOptions.find((entry) => entry.id === configId);
+    if (option) option.currentValue = value;
+    // The spec requires replying with the complete list, not just the change.
+    return { configOptions };
   })
   .onRequest("session/prompt", async (ctx: any) => {
     const { sessionId, prompt } = ctx.params as {

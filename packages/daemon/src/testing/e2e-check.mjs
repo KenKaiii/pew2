@@ -41,6 +41,25 @@ if (!started) {
   process.exit(1);
 }
 
+// Models and thinking levels must come from the agent, not from pew2.
+const models = started.configOptions?.find((o) => o.category === "model");
+const thinking = started.configOptions?.find((o) => o.category === "thought_level");
+check("agent advertises its models", models?.options?.length > 0);
+check("agent advertises thinking levels", thinking?.options?.length > 0);
+
+inbox.length = 0;
+send({
+  t: "session.config",
+  sessionId: started.sessionId,
+  configId: "model",
+  value: "echo-max",
+});
+await wait(1200);
+const applied = inbox
+  .find((m) => m.t === "session.config")
+  ?.configOptions?.find((o) => o.id === "model");
+check("changing the model round-trips", applied?.currentValue === "echo-max");
+
 inbox.length = 0;
 send({ t: "session.prompt", sessionId: started.sessionId, text: "hello from the simulator" });
 await wait(2000);
