@@ -1,0 +1,26 @@
+{
+  "$schema": "../schemas/provider.schema.json",
+  "id": "claude-code",
+  "name": "Claude Code",
+  "version": "1.0.0",
+  "description": "Anthropic's Claude Code, via Zed's official ACP adapter.",
+  "distribution": {
+    "type": "npx",
+    "package": "@zed-industries/claude-code-acp",
+    "version": "latest"
+  },
+  "repository": "https://github.com/zed-industries/claude-agent-acp",
+  "authors": ["Zed Industries"],
+  "license": "Apache-2.0",
+  "pew": {
+    "transport": "acp",
+    "color": "#d97757",
+    "env": [
+      {
+        "name": "ANTHROPIC_API_KEY",
+        "description": "Anthropic API key. Omit if you are already logged in via the Claude Code CLI.",
+        "required": false
+      }
+    ]
+  }
+}

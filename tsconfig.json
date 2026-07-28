@@ -1,0 +1,20 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2023", "DOM"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+    "types": ["node", "bun"]
+  },
+  "include": ["packages/protocol/src/**/*.ts", "packages/daemon/src/**/*.ts"],
+  // packages/relay is typechecked separately against @cloudflare/workers-types
+  // (see packages/relay/tsconfig.json); its globals conflict with Node's.
+  "exclude": ["node_modules", "packages/app", "packages/relay"]
+}

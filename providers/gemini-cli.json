@@ -1,0 +1,27 @@
+{
+  "$schema": "../schemas/provider.schema.json",
+  "id": "gemini-cli",
+  "name": "Gemini CLI",
+  "version": "1.0.0",
+  "description": "Google's Gemini CLI, the original ACP launch partner. Speaks ACP natively.",
+  "distribution": {
+    "type": "npx",
+    "package": "@google/gemini-cli",
+    "version": "latest",
+    "args": ["--experimental-acp"]
+  },
+  "repository": "https://github.com/google-gemini/gemini-cli",
+  "authors": ["Google"],
+  "license": "Apache-2.0",
+  "pew": {
+    "transport": "acp",
+    "color": "#4285f4",
+    "env": [
+      {
+        "name": "GEMINI_API_KEY",
+        "description": "Gemini API key. Omit if the Gemini CLI is already authenticated.",
+        "required": false
+      }
+    ]
+  }
+}

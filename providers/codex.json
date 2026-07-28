@@ -1,0 +1,26 @@
+{
+  "$schema": "../schemas/provider.schema.json",
+  "id": "codex",
+  "name": "Codex",
+  "version": "1.0.0",
+  "description": "OpenAI Codex CLI, via Zed's official ACP adapter.",
+  "distribution": {
+    "type": "command",
+    "command": "codex-acp",
+    "args": []
+  },
+  "repository": "https://github.com/zed-industries/codex-acp",
+  "authors": ["Zed Industries"],
+  "license": "Apache-2.0",
+  "pew": {
+    "transport": "acp",
+    "color": "#10a37f",
+    "env": [
+      {
+        "name": "OPENAI_API_KEY",
+        "description": "OpenAI API key. Omit if the Codex CLI is already authenticated.",
+        "required": false
+      }
+    ]
+  }
+}

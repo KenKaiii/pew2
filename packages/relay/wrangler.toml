@@ -1,0 +1,18 @@
+name = "pew2-relay"
+main = "src/index.ts"
+
+# Must be >= 2026-04-07 so the runtime auto-replies to WebSocket Close frames.
+compatibility_date = "2026-06-01"
+
+[[durable_objects.bindings]]
+name = "PAIRING"
+class_name = "PairingRoom"
+
+# SQLite-backed Durable Objects are the only kind available on the Workers Free
+# plan, and they give each pairing its own embedded event log.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["PairingRoom"]
+
+[observability]
+enabled = true

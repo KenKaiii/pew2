@@ -1,0 +1,27 @@
+{
+  "name": "pew2",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "engines": {
+    "bun": ">=1.2.0"
+  },
+  "scripts": {
+    "test": "bun test packages/daemon",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p packages/relay/tsconfig.json",
+    "relay:dev": "cd packages/relay && wrangler dev --port 8799 --local",
+    "relay:check": "bun run packages/relay/src/relay-check.mjs",
+    "relay:deploy": "cd packages/relay && wrangler deploy",
+    "providers:validate": "bun run packages/daemon/src/cli/index.ts providers validate",
+    "providers:list": "bun run packages/daemon/src/cli/index.ts providers list",
+    "providers:verify": "bun run packages/daemon/src/cli/index.ts providers verify",
+    "daemon": "bun run packages/daemon/src/index.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.14",
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2"
+  }
+}

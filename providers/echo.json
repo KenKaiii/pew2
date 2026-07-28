@@ -1,0 +1,19 @@
+{
+  "$schema": "../schemas/provider.schema.json",
+  "id": "echo",
+  "name": "Echo (test)",
+  "version": "0.1.0",
+  "description": "Local ACP test agent. No API key, no network. Use it to verify the pipeline end to end.",
+  "distribution": {
+    "type": "command",
+    "command": "bun",
+    "args": ["run", "packages/daemon/src/testing/echo-agent.ts"]
+  },
+  "license": "MIT",
+  "pew": {
+    "transport": "acp",
+    "color": "#8b8b8b",
+    "requiresWorkspace": false,
+    "experimental": true
+  }
+}

@@ -1,0 +1,96 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://pew2.dev/schemas/provider.schema.json",
+  "title": "pew2 provider manifest",
+  "description": "Describes an agent/app/CLI that pew2 can surface in the mobile app. Core fields match the ACP Agent Registry manifest so registry entries can be copied verbatim.",
+  "type": "object",
+  "required": ["id", "name", "version", "description", "distribution"],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": { "type": "string" },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*$",
+      "description": "Unique id. Lowercase letters, digits, hyphens; must start with a letter."
+    },
+    "name": { "type": "string", "minLength": 1, "description": "Human-readable display name." },
+    "version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+([-+].*)?$",
+      "description": "Semantic version, e.g. 1.0.0"
+    },
+    "description": { "type": "string", "minLength": 1 },
+    "repository": { "type": "string", "format": "uri" },
+    "authors": { "type": "array", "items": { "type": "string" } },
+    "license": { "type": "string" },
+    "distribution": {
+      "description": "How to obtain and run the agent.",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["type", "package"],
+          "additionalProperties": false,
+          "properties": {
+            "type": { "const": "npx" },
+            "package": { "type": "string", "minLength": 1 },
+            "version": { "type": "string", "default": "latest" },
+            "args": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["type", "package"],
+          "additionalProperties": false,
+          "properties": {
+            "type": { "const": "uvx" },
+            "package": { "type": "string", "minLength": 1 },
+            "version": { "type": "string", "default": "latest" },
+            "args": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["type", "command"],
+          "additionalProperties": false,
+          "properties": {
+            "type": { "const": "command" },
+            "command": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Executable on PATH, or an absolute path."
+            },
+            "args": { "type": "array", "items": { "type": "string" } }
+          }
+        }
+      ]
+    },
+    "pew": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "transport": {
+          "enum": ["acp", "pty"],
+          "default": "acp",
+          "description": "'acp' gives structured output and approvals. 'pty' is the raw-terminal fallback for CLIs that cannot speak ACP."
+        },
+        "label": { "type": "string" },
+        "color": { "type": "string", "pattern": "^#[0-9a-fA-F]{6}$" },
+        "requiresWorkspace": { "type": "boolean", "default": true },
+        "experimental": { "type": "boolean", "default": false },
+        "env": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name"],
+            "additionalProperties": false,
+            "properties": {
+              "name": { "type": "string", "minLength": 1 },
+              "description": { "type": "string" },
+              "required": { "type": "boolean", "default": false }
+            }
+          }
+        }
+      }
+    }
+  }
+}
