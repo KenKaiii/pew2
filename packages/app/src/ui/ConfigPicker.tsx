@@ -120,8 +120,14 @@ export function ConfigPicker({
             },
           ]}
         >
-          <BlurView intensity={60} tint="dark" style={StyleSheet.absoluteFill} />
-          <View style={styles.cardTint} />
+          {/* Decorative layers must not swallow taps meant for the rows. */}
+          <BlurView
+            intensity={60}
+            tint="dark"
+            style={StyleSheet.absoluteFill}
+            pointerEvents="none"
+          />
+          <View style={styles.cardTint} pointerEvents="none" />
 
           <ScrollView contentContainerStyle={styles.cardInner}>
             {sorted.length === 0 && (

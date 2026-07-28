@@ -5,8 +5,8 @@
  * stretches, often one-handed and at night, so the canvas recedes completely
  * and every control is a soft-grey pill floating on it.
  *
- * Muted values are chosen to clear WCAG AA (4.5:1) against the canvas:
- * textDim ~7.1:1, textFaint ~5.2:1 on #000.
+ * Muted values clear WCAG AA (4.5:1) against the canvas, measured on #000:
+ * text 18.8:1, textDim 7.5:1, textFaint 5.8:1, accent 6.7:1, danger 6.3:1.
  */
 export const theme = {
   color: {

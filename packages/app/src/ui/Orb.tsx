@@ -59,7 +59,9 @@ export function Orb({ color, size = theme.size.orb, busy = false }: OrbProps) {
   const glow = pulse.interpolate({ inputRange: [0, 1], outputRange: [0.35, 0.75] });
 
   return (
-    <View style={{ width: size, height: size }}>
+    // Purely decorative, and it lives inside tappable chips, so it must never
+    // intercept a touch meant for the row behind it.
+    <View style={{ width: size, height: size }} pointerEvents="none">
       <Animated.View
         style={[
           styles.glow,

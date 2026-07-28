@@ -53,6 +53,8 @@ export interface Session {
   title: string;
   startedAt: number;
   turns: Turn[];
+  /** The selectors this session was running with, restored when reopened. */
+  configOptions: ConfigOption[];
 }
 
 interface State {
@@ -181,6 +183,7 @@ export function useDaemon(url: string) {
                     title: "New conversation",
                     startedAt: Date.now(),
                     turns: [],
+                    configOptions: message.configOptions ?? [],
                   },
                   ...prev.sessions,
                 ],
@@ -191,8 +194,19 @@ export function useDaemon(url: string) {
               // The turn finished. Without this the spinner would never stop.
               return { ...prev, busy: false };
 
-            case "session.config":
-              return { ...prev, configOptions: message.configOptions ?? [] };
+            case "session.config": {
+              const configOptions = message.configOptions ?? [];
+              return {
+                ...prev,
+                configOptions,
+                // Mirror into history so reopening restores the same selection.
+                sessions: prev.sessions.map((session) =>
+                  session.id === message.sessionId
+                    ? { ...session, configOptions }
+                    : session,
+                ),
+              };
+            }
 
             case "session.event": {
               const payload = message.payload;
@@ -357,6 +371,7 @@ export function useDaemon(url: string) {
             sessionId,
             activeProviderId: session.providerId,
             turns: session.turns,
+            configOptions: session.configOptions,
             busy: false,
           };
         });
@@ -371,6 +386,9 @@ export function useDaemon(url: string) {
           activeProviderId: providerId,
           sessionId: undefined,
           turns: [],
+          // Selectors belong to the old agent's session; keeping them would
+          // show another agent's model name in the top bar.
+          configOptions: [],
           busy: false,
         }));
       },
@@ -378,7 +396,13 @@ export function useDaemon(url: string) {
       leave: () => {
         sessionRef.current = undefined;
         queued.current = undefined;
-        setState((s) => ({ ...s, sessionId: undefined, turns: [], busy: false }));
+        setState((s) => ({
+          ...s,
+          sessionId: undefined,
+          turns: [],
+          configOptions: [],
+          busy: false,
+        }));
       },
     }),
     [post],

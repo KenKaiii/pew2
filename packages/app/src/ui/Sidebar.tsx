@@ -91,8 +91,14 @@ export function Sidebar({
       </Animated.View>
 
       <Animated.View style={[styles.panel, { width: WIDTH, transform: [{ translateX }] }]}>
-        <BlurView intensity={60} tint="dark" style={StyleSheet.absoluteFill} />
-        <View style={styles.panelTint} />
+        {/* Decorative layers must not swallow taps meant for the list. */}
+        <BlurView
+          intensity={60}
+          tint="dark"
+          style={StyleSheet.absoluteFill}
+          pointerEvents="none"
+        />
+        <View style={styles.panelTint} pointerEvents="none" />
 
         <View style={[styles.panelInner, { paddingTop: insets.top + theme.space(3) }]}>
           <View style={styles.header}>

@@ -53,15 +53,16 @@ export function Composer({
 
   return (
     <Glass radius={theme.radius.pill} style={styles.row} intensity={50}>
-      <Pressable
+      {/* Attachments are not implemented yet. Shown disabled rather than wired
+          to a no-op, so the control never lies about what it does. */}
+      <View
+        style={[styles.leading, styles.notImplemented]}
         accessibilityRole="button"
-        accessibilityLabel="Add attachment"
-        hitSlop={touchSlop(theme.size.composerButton)}
-        onPress={() => {}}
-        style={({ pressed }) => [styles.leading, pressed && styles.pressed]}
+        accessibilityLabel="Add attachment, not available yet"
+        accessibilityState={{ disabled: true }}
       >
         <Ionicons name="add" size={22} color={theme.color.text} />
-      </Pressable>
+      </View>
 
       <TextInput
         style={styles.input}
@@ -83,15 +84,15 @@ export function Composer({
             outputRange: [1, 0],
           }) }]}
         >
-          <Pressable
+          {/* Same as the attachment button: visible, honest, not yet wired. */}
+          <View
+            style={[styles.trailingButton, styles.notImplemented]}
             accessibilityRole="button"
-            accessibilityLabel="Voice input"
-            hitSlop={touchSlop(theme.size.composerButton)}
-            onPress={() => {}}
-            style={({ pressed }) => [styles.trailingButton, pressed && styles.pressed]}
+            accessibilityLabel="Voice input, not available yet"
+            accessibilityState={{ disabled: true }}
           >
             <Ionicons name="mic-outline" size={19} color={theme.color.text} />
-          </Pressable>
+          </View>
         </Animated.View>
 
         <Animated.View
@@ -177,4 +178,5 @@ const styles = StyleSheet.create({
   sendButton: { backgroundColor: theme.color.text },
   sendPressed: { backgroundColor: theme.color.textDim },
   pressed: { backgroundColor: "rgba(255,255,255,0.20)" },
+  notImplemented: { opacity: 0.4 },
 });

@@ -15,8 +15,6 @@ interface GlassProps {
   radius: number;
   style?: StyleProp<ViewStyle>;
   intensity?: number;
-  /** Slightly brighter fill for controls that should sit above their neighbours. */
-  raised?: boolean;
 }
 
 export function Glass({
@@ -24,33 +22,26 @@ export function Glass({
   radius,
   style,
   intensity = 40,
-  raised = false,
 }: GlassProps) {
   return (
     <View style={[{ borderRadius: radius, overflow: "hidden" }, style]}>
-      <BlurView intensity={intensity} tint="dark" style={StyleSheet.absoluteFill} />
-      <View
-        style={[
-          StyleSheet.absoluteFill,
-          {
-            backgroundColor: raised
-              ? "rgba(255,255,255,0.12)"
-              : "rgba(255,255,255,0.07)",
-          },
-        ]}
+      {/* The three decorative layers are pointerEvents="none" so they never
+          intercept a tap meant for the control rendered inside. */}
+      <BlurView
+        intensity={intensity}
+        tint="dark"
+        style={StyleSheet.absoluteFill}
+        pointerEvents="none"
       />
-      <View
-        style={[
-          styles.edge,
-          { borderRadius: radius },
-        ]}
-      />
+      <View style={[StyleSheet.absoluteFill, styles.tint]} pointerEvents="none" />
+      <View style={[styles.edge, { borderRadius: radius }]} pointerEvents="none" />
       {children}
     </View>
   );
 }
 
 const styles = StyleSheet.create({
+  tint: { backgroundColor: "rgba(255,255,255,0.07)" },
   edge: {
     position: "absolute",
     top: 0,
