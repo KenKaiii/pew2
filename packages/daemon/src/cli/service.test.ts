@@ -10,7 +10,7 @@
  */
 import { test, expect } from "bun:test";
 import { mkdtemp, readFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { platform, tmpdir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { existsSync } from "node:fs";
 import {
@@ -181,7 +181,11 @@ test("reload waits for launchd teardown and retries a raced bootstrap", async ()
   expect(sleeps).toEqual([200, 400]);
 });
 
-test("the generated plist parses as real XML", async () => {
+// `plutil` ships with macOS and exists nowhere else, and launchd is macOS-only
+// anyway, so on Linux CI there is nothing meaningful to assert here. Skipped
+// rather than deleted: this is the check that proves launchd would accept the
+// file, and it still runs on the platform that can actually load it.
+test.skipIf(platform() !== "darwin")("the generated plist parses as real XML", async () => {
   const plist = buildPlist({ bunPath: bun });
   const path = join(await mkdtemp(join(tmpdir(), "pew2-plist-")), "test.plist");
   await Bun.write(path, plist);
