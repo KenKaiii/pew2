@@ -163,10 +163,15 @@ export function Sidebar({
                   <Text style={styles.sessionTitle} numberOfLines={1}>
                     {session.title}
                   </Text>
-                  <Text style={styles.sessionMeta}>
-                    {session.turns.length} message
-                    {session.turns.length === 1 ? "" : "s"}
-                  </Text>
+                  {/* Agent-history stubs hold no turns on this device yet, so
+                      "0 messages" would be a lie about a conversation that may
+                      hold hundreds. The count appears once it has been opened. */}
+                  {!(session.agentSessionId && session.turns.length === 0) && (
+                    <Text style={styles.sessionMeta}>
+                      {session.turns.length} message
+                      {session.turns.length === 1 ? "" : "s"}
+                    </Text>
+                  )}
                 </Pressable>
               ))
             )}

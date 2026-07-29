@@ -88,6 +88,58 @@ test("a rejected request surfaces the agent's reason, not 'Internal error'", asy
   }
 }, 60_000);
 
+test("a session adopts the warm spare instead of spawning again", async () => {
+  const { Daemon } = await import("../index.js");
+  const daemon = new Daemon({ id: "test", name: "test" }, true);
+  await daemon.refreshProviders();
+
+  // The probe leaves its booted agent behind as the spare.
+  const caps = await daemon.probeProvider("echo");
+  const spare = (daemon as any).spares.get("echo")?.handle;
+  expect(spare).toBeDefined();
+
+  const sessionId = await daemon.startSession("echo", process.cwd());
+  const session = (daemon as any).sessions.get(sessionId);
+
+  // Same process, new conversation: no second spawn, no cold wait.
+  expect(session.handle).toBe(spare);
+
+  // The adopted session answers prompts on the reused connection.
+  await daemon.prompt(sessionId, "warm prompt");
+  await new Promise((r) => setTimeout(r, 500));
+  expect(session.log.events.some((e: any) => e.payload?.kind === "user_message")).toBe(true);
+
+  daemon.closeAll();
+}, 60_000);
+
+test("updates route to the session they belong to on a reused connection", async () => {
+  const handle = await connectProvider({
+    provider: await echoProvider(),
+    cwd: process.cwd(),
+    onUpdate: () => {},
+    onPermissionRequest: () => {},
+  });
+
+  try {
+    const firstSessionId = handle.sessionId;
+    const seen: unknown[] = [];
+    await handle.adopt({
+      onUpdate: (payload) => seen.push(payload),
+      onPermissionRequest: () => {},
+    });
+
+    // A new session on the same process, and prompts now target it.
+    expect(handle.sessionId).not.toBe(firstSessionId);
+    await handle.prompt("Adoption check");
+    await new Promise((r) => setTimeout(r, 500));
+
+    // Its echo arrived through the adopted route.
+    expect(seen.length).toBeGreaterThan(0);
+  } finally {
+    handle.close();
+  }
+}, 60_000);
+
 test("no session event ever precedes session.started", async () => {
   // Through the real handler with the real echo agent. A client that saw an
   // event first would drop it as an unknown session — the empty-resume bug.

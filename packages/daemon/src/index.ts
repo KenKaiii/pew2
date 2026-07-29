@@ -17,6 +17,7 @@ import {
 } from "./acp/connect.js";
 import { SessionLog } from "./session/log.js";
 import { resolveWorkspace } from "./workspace.js";
+import { readProbeCache, writeProbeCache } from "./probe-cache.js";
 import { wire } from "@pew2/protocol";
 
 interface ActiveSession {
@@ -58,6 +59,99 @@ export class Daemon {
   // conversations it already has on disk. Keyed by provider id, and stored in
   // flight rather than resolved so concurrent asks share one spawn.
   private readonly probes = new Map<string, Promise<ProviderCapabilities>>();
+
+  /**
+   * One already-booted agent process per provider, left over from the last
+   * probe. Spawning is the slow part of opening a conversation — GG Coder
+   * takes ~5s to boot while `session/load` answers in ~30ms — so the next
+   * session *adopts* this process instead of paying the spawn again. A spare
+   * idles out after `SPARE_TTL_MS` so an unused agent does not run forever.
+   */
+  private readonly spares = new Map<string, { handle: AcpSessionHandle; timer: NodeJS.Timeout }>();
+  private static readonly SPARE_TTL_MS = 15 * 60 * 1000;
+
+  /** A disk-cached probe older than this is refreshed in the background. */
+  private static readonly REVALIDATE_AFTER_MS = 60 * 1000;
+
+  /**
+   * Refresh a provider's probe in the background and push the result.
+   *
+   * A failed refresh is silent: the cached answer stays in place rather than
+   * being clobbered by an empty one.
+   */
+  private async revalidate(providerId: string) {
+    const fresh = await this.probeProvider(providerId, { refresh: true });
+    if (fresh === EMPTY_CAPABILITIES) return;
+    // The app folds this into the drawer exactly like an answer to its own
+    // request, so a stale list corrects itself moments after opening.
+    this.send({ t: "provider.capabilities", providerId, ...fresh });
+  }
+
+  private stashSpare(providerId: string, handle: AcpSessionHandle) {
+    const old = this.spares.get(providerId);
+    if (old) {
+      clearTimeout(old.timer);
+      old.handle.close();
+    }
+    const timer = setTimeout(() => {
+      this.spares.delete(providerId);
+      handle.close();
+    }, Daemon.SPARE_TTL_MS);
+    // The timer must not keep the daemon process alive on its own.
+    timer.unref?.();
+    this.spares.set(providerId, { handle, timer });
+  }
+
+  private takeSpare(providerId: string): AcpSessionHandle | undefined {
+    const spare = this.spares.get(providerId);
+    if (!spare) return undefined;
+    clearTimeout(spare.timer);
+    this.spares.delete(providerId);
+    return spare.handle;
+  }
+
+  /**
+   * Connect a session to its agent, warm when possible.
+   *
+   * A dead spare (the process exited while idle) falls back to a cold spawn
+   * rather than failing the open.
+   */
+  private async connectSession(
+    session: ActiveSession,
+    provider: LoadedProvider,
+    cwd: string,
+    loadSessionId: string | undefined,
+  ): Promise<void> {
+    const callbacks = {
+      onUpdate: (payload: unknown) => this.record(session, payload),
+      onPermissionRequest: ({ requestId, params }: { requestId: string; params: unknown }) =>
+        this.record(session, { kind: "permission_request", requestId, params }),
+      onExit: (code: number | null) => this.record(session, { kind: "exit", code }),
+    };
+
+    const spare = this.takeSpare(provider.manifest.id);
+    if (spare) {
+      try {
+        await spare.adopt({ loadSessionId, ...callbacks });
+        session.handle = spare;
+      } catch {
+        spare.close();
+      }
+    }
+    if (!session.handle) {
+      session.handle = await connectProvider({
+        provider,
+        cwd,
+        loadSessionId,
+        ...callbacks,
+        onStderr: (line) => console.error(`[${provider.manifest.id}] ${line}`),
+      });
+    }
+
+    // The spare is spent; quietly boot the next one so the session after this
+    // opens instantly too. Failure here only means that open is cold again.
+    void this.probeProvider(provider.manifest.id, { refresh: true }).catch(() => {});
+  }
 
   constructor(
     private readonly machine: { id: string; name: string },
@@ -140,15 +234,7 @@ export class Daemon {
     this.sessions.set(log.sessionId, session);
 
     try {
-      session.handle = await connectProvider({
-        provider,
-        cwd,
-        onUpdate: (payload) => this.record(session, payload),
-        onPermissionRequest: ({ requestId, params }) =>
-          this.record(session, { kind: "permission_request", requestId, params }),
-        onStderr: (line) => console.error(`[${providerId}] ${line}`),
-        onExit: (code) => this.record(session, { kind: "exit", code }),
-      });
+      await this.connectSession(session, provider, cwd, undefined);
     } catch (error) {
       // A session that never connected has no history worth keeping, and
       // leaving it registered would answer prompts with a broken handle.
@@ -186,6 +272,25 @@ export class Daemon {
     const provider = this.providers.find((p) => p.manifest.id === providerId);
     if (!provider || !isAvailable(provider)) return EMPTY_CAPABILITIES;
 
+    // A spawn plus session/list is seconds per provider. Serve the last good
+    // answer from disk instantly and refresh it in the background instead of
+    // making the drawer wait on the agent's boot time.
+    if (!refresh) {
+      const disk = await readProbeCache(providerId);
+      if (disk) {
+        if (Date.now() - disk.probedAt > Daemon.REVALIDATE_AFTER_MS) {
+          void this.revalidate(providerId);
+        }
+        const served = Promise.resolve<ProviderCapabilities>({
+          configOptions: disk.configOptions,
+          sessions: disk.sessions,
+          canResume: disk.canResume,
+        });
+        this.probes.set(providerId, served);
+        return served;
+      }
+    }
+
     const probe = (async (): Promise<ProviderCapabilities> => {
       let handle: AcpSessionHandle | undefined;
       try {
@@ -198,12 +303,20 @@ export class Daemon {
           onUpdate: () => {},
           onPermissionRequest: () => {},
         });
-        return {
+        const capabilities: ProviderCapabilities = {
           configOptions: handle.configOptions,
           // The agent's own history, including everything started at the desk.
           sessions: await handle.listSessions(),
           canResume: handle.canLoadSession,
         };
+        // Keep the booted process as the warm spare: the next session open
+        // adopts it instead of paying the multi-second spawn again.
+        this.stashSpare(providerId, handle);
+        handle = undefined;
+        // Persist so the next ask — and the next daemon boot — answers from
+        // disk instead of spawning again.
+        void writeProbeCache(providerId, capabilities).catch(() => {});
+        return capabilities;
       } catch (error) {
         // A probe is best-effort: this is what the app shows before a session
         // exists, and failing here must not stop the user starting a real one.
@@ -239,16 +352,7 @@ export class Daemon {
       // `session/load` replays the whole conversation here, before returning —
       // every one of those events lands in the log unsent, and `markLive`
       // delivers them after `session.started`.
-      session.handle = await connectProvider({
-        provider,
-        cwd,
-        loadSessionId: agentSessionId,
-        onUpdate: (payload) => this.record(session, payload),
-        onPermissionRequest: ({ requestId, params }) =>
-          this.record(session, { kind: "permission_request", requestId, params }),
-        onStderr: (line) => console.error(`[${providerId}] ${line}`),
-        onExit: (code) => this.record(session, { kind: "exit", code }),
-      });
+      await this.connectSession(session, provider, cwd, agentSessionId);
     } catch (error) {
       this.sessions.delete(log.sessionId);
       throw error;
@@ -258,11 +362,9 @@ export class Daemon {
   }
 
   async setConfigOption(sessionId: string, configId: string, value: string | boolean) {
-    const session = this.require(sessionId);
-    const updated = await session.handle.setConfigOption(configId, value);
-    // Keep the handle authoritative so late-joining clients see current values.
-    session.handle.configOptions = updated;
-    return updated;
+    // The handle updates its own advertised options, so late-joining clients
+    // and the next probe both see the current values.
+    return this.require(sessionId).handle.setConfigOption(configId, value);
   }
 
   async prompt(sessionId: string, text: string) {
@@ -287,8 +389,13 @@ export class Daemon {
   }
 
   closeAll() {
-    for (const session of this.sessions.values()) session.handle.close();
+    for (const session of this.sessions.values()) session.handle?.close();
     this.sessions.clear();
+    for (const spare of this.spares.values()) {
+      clearTimeout(spare.timer);
+      spare.handle.close();
+    }
+    this.spares.clear();
   }
 
   private require(sessionId: string): ActiveSession {

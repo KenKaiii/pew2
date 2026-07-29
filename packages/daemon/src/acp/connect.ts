@@ -111,10 +111,10 @@ export interface AgentSession {
 export interface AcpSessionHandle {
   connection: ClientConnection;
   child: ChildProcessWithoutNullStreams;
-  /** The agent's own session id, returned by `session/new`. */
-  sessionId: string;
-  /** Selectors the agent advertised. Empty when it offers none. */
-  configOptions: ConfigOption[];
+  /** The session prompts currently target. Changes when `adopt` opens another. */
+  readonly sessionId: string;
+  /** Selectors for the current session. Empty when it offers none. */
+  readonly configOptions: ConfigOption[];
   /** True when the agent can replay a past session via `session/load`. */
   canLoadSession: boolean;
   /**
@@ -124,11 +124,28 @@ export interface AcpSessionHandle {
    * persists history, and asking one that doesn't is an error, not an empty list.
    */
   listSessions(): Promise<AgentSession[]>;
+  /**
+   * Open another session on this same agent process.
+   *
+   * Booting the process is the expensive part of a connection — GG Coder
+   * takes ~5s while `session/load` itself answers in ~30ms — so the daemon
+   * keeps a warm handle per provider and adopts it for the next conversation
+   * instead of spawning again.
+   */
+  adopt(options: AdoptOptions): Promise<void>;
   prompt(text: string): Promise<unknown>;
   cancel(): Promise<void>;
   setConfigOption(configId: string, value: string | boolean): Promise<ConfigOption[]>;
   answerPermission(requestId: string, optionId: string): boolean;
   close(): void;
+}
+
+export interface AdoptOptions {
+  /** Resume this stored session; a fresh one is created when omitted. */
+  loadSessionId?: string;
+  onUpdate: (payload: unknown) => void;
+  onPermissionRequest: (request: { requestId: string; params: unknown }) => void;
+  onExit?: (code: number | null, signal: NodeJS.Signals | null) => void;
 }
 
 export interface ConnectOptions {
@@ -193,7 +210,10 @@ export async function connectProvider(options: ConnectOptions): Promise<AcpSessi
   });
   await spawned;
 
-  child.on("exit", (code, signal) => options.onExit?.(code, signal));
+  // The exit listener is re-pointed on `adopt`, so a reused process reports
+  // its death to the session currently living on it, not the first one.
+  let exitHandler = options.onExit;
+  child.on("exit", (code, signal) => exitHandler?.(code, signal));
 
   if (options.onStderr) {
     let buffer = "";
@@ -212,9 +232,21 @@ export async function connectProvider(options: ConnectOptions): Promise<AcpSessi
   const { input, output } = toWebStreams(child);
   const stream = ndJsonStream(output, input);
 
+  // Updates and permission requests are routed per agent session: `adopt`
+  // puts a second session on this connection, and the probe's throwaway must
+  // never write into a live conversation. `pendingRoute` covers the window
+  // inside `session/new`, whose id only exists once it resolves.
+  const updateHandlers = new Map<string, (payload: unknown) => void>();
+  const permissionHandlers = new Map<string, ConnectOptions["onPermissionRequest"]>();
+  let pendingRoute:
+    | { onUpdate: (payload: unknown) => void; onPermissionRequest: ConnectOptions["onPermissionRequest"] }
+    | undefined;
+
   const app = client({ name: "pew2-daemon" })
     .onNotification("session/update", async (ctx: { params: unknown }) => {
-      options.onUpdate(ctx.params);
+      const sid = (ctx.params as { sessionId?: string })?.sessionId;
+      const handler = (sid ? updateHandlers.get(sid) : undefined) ?? pendingRoute?.onUpdate;
+      handler?.(ctx.params);
     })
     .onRequest("session/request_permission", async (ctx: { params: unknown }) => {
       const requestId = `perm_${++permissionCounter}`;
@@ -223,7 +255,12 @@ export async function connectProvider(options: ConnectOptions): Promise<AcpSessi
       const answered = new Promise<string>((resolve) => {
         pending.set(requestId, resolve);
       });
-      options.onPermissionRequest({ requestId, params: ctx.params });
+      const sid = (ctx.params as { sessionId?: string })?.sessionId;
+      const handler =
+        (sid ? permissionHandlers.get(sid) : undefined) ??
+        pendingRoute?.onPermissionRequest ??
+        options.onPermissionRequest;
+      handler({ requestId, params: ctx.params });
       const optionId = await answered;
       return { outcome: { outcome: "selected", optionId } };
     });
@@ -262,59 +299,99 @@ export async function connectProvider(options: ConnectOptions): Promise<AcpSessi
     };
   };
 
-  // Resuming replays the agent's own history through `onUpdate` before it
-  // resolves, so the conversation is on screen by the time this returns.
-  const created: NewSessionResult = options.loadSessionId
-    ? {
-        ...((await connection.agent.request("session/load", {
-          sessionId: options.loadSessionId,
-          cwd,
-          mcpServers: [],
-        })) as Omit<NewSessionResult, "sessionId">),
-        sessionId: options.loadSessionId,
-      }
-    : ((await connection.agent.request("session/new", {
-        cwd,
-        mcpServers: [],
-      })) as NewSessionResult);
-
   // Three shapes, all live in the wild, and an agent may send more than one.
   // Claude Code returns `models` + `modes` and no `configOptions` at all, so
   // reading only the last of these silently dropped its entire model list.
-  const advertised = normaliseConfigOptions(created.configOptions);
-  const modes: ConfigOption[] = created.modes
-    ? [
-        {
-          id: "mode",
-          name: "Mode",
-          category: "mode",
-          type: "select",
-          currentValue: created.modes.currentModeId,
-          options: created.modes.availableModes.map((mode) => ({
-            value: mode.id,
-            name: mode.name,
-            description: mode.description,
-          })),
-        },
-      ]
-    : [];
+  function buildConfigOptions(created: NewSessionResult): ConfigOption[] {
+    const advertised = normaliseConfigOptions(created.configOptions);
+    const modes: ConfigOption[] = created.modes
+      ? [
+          {
+            id: "mode",
+            name: "Mode",
+            category: "mode",
+            type: "select",
+            currentValue: created.modes.currentModeId,
+            options: created.modes.availableModes.map((mode) => ({
+              value: mode.id,
+              name: mode.name,
+              description: mode.description,
+            })),
+          },
+        ]
+      : [];
 
-  // An explicit `configOptions` entry always wins: it is the current protocol,
-  // so it must not be shadowed by the legacy block describing the same thing.
-  const has = (category: string) =>
-    advertised.some((option) => option.category === category);
-  const configOptions: ConfigOption[] = [
-    ...advertised,
-    ...(has("model") ? [] : modelsAsConfigOption(created.models)),
-    ...(has("mode") ? [] : modes),
-  ];
+    // An explicit `configOptions` entry always wins: it is the current
+    // protocol, so it must not be shadowed by the legacy block describing the
+    // same thing.
+    const has = (category: string) =>
+      advertised.some((option) => option.category === category);
+    return [
+      ...advertised,
+      ...(has("model") ? [] : modelsAsConfigOption(created.models)),
+      ...(has("mode") ? [] : modes),
+    ];
+  }
+
+  // Resuming replays the agent's own history through the update handler before
+  // it resolves, so the route must exist before the request is made.
+  async function openSession(
+    loadSessionId: string | undefined,
+    route: {
+      onUpdate: (payload: unknown) => void;
+      onPermissionRequest: ConnectOptions["onPermissionRequest"];
+    },
+  ): Promise<{ sessionId: string; configOptions: ConfigOption[] }> {
+    if (loadSessionId) {
+      updateHandlers.set(loadSessionId, route.onUpdate);
+      permissionHandlers.set(loadSessionId, route.onPermissionRequest);
+    }
+    pendingRoute = route;
+    try {
+      const created: NewSessionResult = loadSessionId
+        ? {
+            ...((await connection.agent.request("session/load", {
+              sessionId: loadSessionId,
+              cwd,
+              mcpServers: [],
+            })) as Omit<NewSessionResult, "sessionId">),
+            sessionId: loadSessionId,
+          }
+        : ((await connection.agent.request("session/new", {
+            cwd,
+            mcpServers: [],
+          })) as NewSessionResult);
+      updateHandlers.set(created.sessionId, route.onUpdate);
+      permissionHandlers.set(created.sessionId, route.onPermissionRequest);
+      return { sessionId: created.sessionId, configOptions: buildConfigOptions(created) };
+    } finally {
+      pendingRoute = undefined;
+    }
+  }
+
+  let current = await openSession(options.loadSessionId, {
+    onUpdate: options.onUpdate,
+    onPermissionRequest: options.onPermissionRequest,
+  });
 
   return {
     connection,
     child,
-    sessionId: created.sessionId,
-    configOptions,
+    get sessionId() {
+      return current.sessionId;
+    },
+    get configOptions() {
+      return current.configOptions;
+    },
     canLoadSession,
+
+    async adopt(adoptOptions: AdoptOptions) {
+      current = await openSession(adoptOptions.loadSessionId, {
+        onUpdate: adoptOptions.onUpdate,
+        onPermissionRequest: adoptOptions.onPermissionRequest,
+      });
+      exitHandler = adoptOptions.onExit;
+    },
 
     async listSessions() {
       if (!canListSessions) return [];
@@ -333,23 +410,27 @@ export async function connectProvider(options: ConnectOptions): Promise<AcpSessi
         // knows, so it routes to the dedicated model method instead.
         if (configId === MODEL_CONFIG_ID) {
           await connection.agent.request("session/set_model", {
-            sessionId: created.sessionId,
+            sessionId: current.sessionId,
             modelId: String(value),
           });
           // That method returns nothing useful, so reflect the change locally.
-          return configOptions.map((option) =>
+          const updated = current.configOptions.map((option) =>
             option.id === MODEL_CONFIG_ID ? { ...option, currentValue: value } : option,
           );
+          current = { ...current, configOptions: updated };
+          return updated;
         }
 
         const result = (await connection.agent.request("session/set_config_option", {
-          sessionId: created.sessionId,
+          sessionId: current.sessionId,
           configId,
           ...(typeof value === "boolean" ? { type: "boolean" } : {}),
           value,
         })) as { configOptions?: unknown };
         // The agent replies with the complete list, so trust it over local state.
-        return normaliseConfigOptions(result?.configOptions);
+        const updated = normaliseConfigOptions(result?.configOptions);
+        current = { ...current, configOptions: updated };
+        return updated;
       } catch (error) {
         // The agent's real reason travels in the JSON-RPC `data`, so reading
         // `.message` here would substitute a bare "Internal error" and throw
@@ -364,11 +445,11 @@ export async function connectProvider(options: ConnectOptions): Promise<AcpSessi
     },
     prompt: (text: string) =>
       connection.agent.request("session/prompt", {
-        sessionId: created.sessionId,
+        sessionId: current.sessionId,
         prompt: [{ type: "text", text }],
       }),
     cancel: () =>
-      connection.agent.notify("session/cancel", { sessionId: created.sessionId }),
+      connection.agent.notify("session/cancel", { sessionId: current.sessionId }),
     answerPermission(requestId, optionId) {
       const resolve = pending.get(requestId);
       if (!resolve) return false;

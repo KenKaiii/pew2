@@ -11,6 +11,7 @@ import { USE_FIXTURES, isFixtureSession, sampleSessions } from "./fixtures";
 import { mergeAgentSessions } from "./agentHistory";
 import { advance, alreadySeen, type Cursors } from "./cursors";
 import { findDuplicateError } from "./errorDedup";
+import { readChunk } from "./chunks";
 
 export type Status = "connecting" | "online" | "offline";
 
@@ -125,27 +126,7 @@ function firstUserText(turns: Turn[]): string | undefined {
   return first?.text.trim().slice(0, 60);
 }
 
-/** Pull display text out of an ACP `session/update` payload. */
-function readChunk(payload: any): { role: Turn["role"]; text: string } | undefined {
-  const update = payload?.update;
-  if (update?.sessionUpdate === "agent_message_chunk") {
-    return { role: "agent", text: update.content?.text ?? "" };
-  }
-  if (update?.sessionUpdate === "agent_thought_chunk") {
-    return { role: "thought", text: update.content?.text ?? "" };
-  }
-  if (payload?.kind === "user_message") {
-    return { role: "user", text: payload.text ?? "" };
-  }
-  if (payload?.kind === "exit") {
-    // Closing a session kills the child, so a clean or signalled exit is the
-    // normal end of a conversation. Reporting it in red said "something broke"
-    // every time the user simply finished. Only a non-zero code is a failure.
-    if (typeof payload.code !== "number" || payload.code === 0) return undefined;
-    return { role: "system", text: `The agent stopped unexpectedly (code ${payload.code})` };
-  }
-  return undefined;
-}
+
 
 /**
  * @param deviceId Identifies this phone to the relay, which uses it to tell
