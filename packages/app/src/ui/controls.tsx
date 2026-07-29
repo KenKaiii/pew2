@@ -94,7 +94,7 @@ export function Pill({ onPress, label, children, disabled = false }: PillProps) 
 
   if (!onPress) {
     return (
-      <Glass radius={theme.radius.pill}>
+      <Glass radius={theme.radius.pill} style={styles.pillGlass}>
         <View style={styles.pill} accessibilityLabel={label}>
           {content}
         </View>
@@ -103,7 +103,7 @@ export function Pill({ onPress, label, children, disabled = false }: PillProps) 
   }
 
   return (
-    <Glass radius={theme.radius.pill}>
+    <Glass radius={theme.radius.pill} style={styles.pillGlass}>
       <Pressable
         onPress={onPress}
         disabled={disabled}
@@ -129,12 +129,24 @@ export function Caption({ children }: { children: ReactNode }) {
 
 const styles = StyleSheet.create({
   circle: { alignItems: "center", justifyContent: "center" },
+  // A pill in a crowded row must be able to give up width, and every layer down
+  // to the label needs to say so — one rigid ancestor and the text below it can
+  // never truncate, so the pill overflows the row instead.
+  pillGlass: { flexShrink: 1, minWidth: 0 },
   pill: {
     height: theme.size.control,
     paddingHorizontal: theme.space(4),
     justifyContent: "center",
+    flexShrink: 1,
+    minWidth: 0,
   },
-  pillRow: { flexDirection: "row", alignItems: "center", gap: theme.space(1.5) },
+  pillRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.space(1.5),
+    flexShrink: 1,
+    minWidth: 0,
+  },
   pressed: { backgroundColor: theme.color.surfacePressed },
   // On glass, press brightens the surface rather than replacing its colour.
   pressedOverlay: { backgroundColor: theme.glass.fillPressed },

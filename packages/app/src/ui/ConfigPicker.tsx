@@ -46,32 +46,16 @@ const CATEGORY_RANK: Record<string, number> = {
   mode: 3,
 };
 
-/** The label shown in the top bar: current model, then thinking level. */
-export function summarise(options: ConfigOption[]): {
-  primary?: ConfigOption;
-  secondary?: ConfigOption;
-} {
-  const selectable = options.filter((o) => o.type === "select" && o.options?.length);
-  const byCategory = (category: string) =>
-    selectable.find((o) => o.category === category);
-
-  return {
-    primary: byCategory("model") ?? selectable[0],
-    secondary: byCategory("thought_level"),
-  };
-}
-
-export function valueName(option?: ConfigOption): string | undefined {
-  if (!option) return undefined;
-  const match = option.options?.find((v) => v.value === option.currentValue);
-  return match?.name ?? String(option.currentValue);
-}
+// Slot assignment lives in a react-native-free module so it can be unit tested.
+export { summarise, valueName } from "./configSlots";
 
 interface ConfigPickerProps {
   visible: boolean;
   onClose: () => void;
   options: ConfigOption[];
   onSelect: (configId: string, value: string | boolean) => void;
+  /** Left edge of the pill this menu belongs to, so it opens under that pill. */
+  anchorX?: number;
 }
 
 export function ConfigPicker({
@@ -79,6 +63,7 @@ export function ConfigPicker({
   onClose,
   options,
   onSelect,
+  anchorX,
 }: ConfigPickerProps) {
   const progress = useRef(new Animated.Value(0)).current;
   const reduceMotion = useReducedMotion();
@@ -114,6 +99,7 @@ export function ConfigPicker({
         style={[
           styles.host,
           { paddingTop: insets.top + TOP_BAR + theme.space(1.5) },
+          { paddingLeft: anchorX ?? theme.gutter },
           { opacity: progress },
         ]}
       >
@@ -207,9 +193,8 @@ const styles = StyleSheet.create({
   host: {
     flex: 1,
     backgroundColor: "rgba(0,0,0,0.55)",
-    // Top left, on the same gutter as the pill that opens it.
+    // Anchored to the pill that opens it; the gutter is the default.
     alignItems: "flex-start",
-    paddingLeft: theme.gutter,
   },
   card: {
     // Menu-width, not dialog-width: it holds short value names only.

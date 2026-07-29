@@ -8,6 +8,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { USE_FIXTURES, isFixtureSession, sampleSessions } from "./fixtures";
+import { mergeAgentSessions } from "./agentHistory";
 
 export type Status = "connecting" | "online" | "offline";
 
@@ -56,7 +57,17 @@ export interface Session {
   turns: Turn[];
   /** The selectors this session was running with, restored when reopened. */
   configOptions: ConfigOption[];
+  /**
+   * The agent's own id for this conversation, when it came from the agent's
+   * history rather than this app. Present means it has not been opened yet:
+   * its turns live on the agent's disk and arrive on resume.
+   */
+  agentSessionId?: string;
+  /** Working directory the agent recorded, needed to reopen it there. */
+  cwd?: string;
 }
+
+
 
 interface State {
   status: Status;
@@ -88,6 +99,23 @@ function rememberConfigs(
 ): Record<string, ConfigOption[]> {
   if (!providerId || options.length === 0) return known;
   return { ...known, [providerId]: options };
+}
+
+/**
+ * A user turn rendered before the daemon has echoed it back. Its id is replaced
+ * with the server's once the echo arrives, so it never renders twice.
+ */
+function localTurn(seq: number, text: string): Turn {
+  return { id: `local:${seq}`, role: "user", text: text.trim() };
+}
+
+function isOptimistic(turn: Turn): boolean {
+  return turn.id.startsWith("local:");
+}
+
+function firstUserText(turns: Turn[]): string | undefined {
+  const first = turns.find((turn) => turn.role === "user");
+  return first?.text.trim().slice(0, 60);
 }
 
 /** Pull display text out of an ACP `session/update` payload. */
@@ -122,15 +150,12 @@ export function useDaemon(url: string) {
   });
 
   // Not in State: this is a cache keyed by provider, not part of the session.
-  const [knownConfigs, setKnownConfigs] = useState<Record<string, ConfigOption[]>>(
-    () =>
-      USE_FIXTURES
-        ? sampleSessions().reduce<Record<string, ConfigOption[]>>((acc, session) => {
-            if (session.configOptions.length > 0) acc[session.providerId] = session.configOptions;
-            return acc;
-          }, {})
-        : {},
-  );
+  //
+  // Never seeded from fixtures. These selectors drive the live top bar, so a
+  // sample "Model: Sonnet" would be presented as this agent's real capability
+  // and then be silently replaced by the truth once a session opened. Only an
+  // agent's own advertisement may populate this.
+  const [knownConfigs, setKnownConfigs] = useState<Record<string, ConfigOption[]>>({});
 
   const socket = useRef<WebSocket | null>(null);
   const retry = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -145,6 +170,13 @@ export function useDaemon(url: string) {
   // Text entered before a session existed. Sent as soon as the daemon confirms
   // one, so the composer works straight from the empty state.
   const queued = useRef<string | undefined>(undefined);
+  // Counter behind the ids of optimistic user turns. Starting an agent can take
+  // seconds, and the daemon's echo arrives only after that, so the prompt is
+  // rendered locally first and reconciled when the echo lands.
+  const localSeq = useRef(0);
+  // Providers already asked for capabilities, so a reconnect's repeat provider
+  // announcement does not spawn another probe for each one.
+  const probed = useRef(new Set<string>());
   // Mirrors state.sessions so openSession can look one up without doing that
   // work inside a state updater.
   const sessionsRef = useRef<Session[]>(state.sessions);
@@ -208,12 +240,31 @@ export function useDaemon(url: string) {
         if (scoped && message.sessionId !== sessionRef.current) return;
 
         // Cache selectors against the provider so they survive the session and
-        // are available before the next one starts.
-        if (message.t === "session.started" || message.t === "session.config") {
+        // are available before the next one starts. `provider.capabilities` is
+        // the same data probed ahead of a session, so the empty state can offer
+        // a real model list rather than nothing.
+        if (
+          message.t === "session.started" ||
+          message.t === "session.config" ||
+          message.t === "provider.capabilities"
+        ) {
           const advertised: ConfigOption[] = message.configOptions ?? [];
           if (advertised.length > 0) {
             setKnownConfigs((known) =>
               rememberConfigs(known, message.providerId ?? providerRef.current, advertised),
+            );
+          }
+        }
+
+        // Ask each available agent what it currently offers. The answer comes
+        // from the agent, so an app that updates its model line-up is reflected
+        // without changing anything here.
+        if (message.t === "providers") {
+          for (const provider of message.providers ?? []) {
+            if (!provider.available || probed.current.has(provider.id)) continue;
+            probed.current.add(provider.id);
+            ws.send(
+              JSON.stringify({ t: "provider.capabilities", providerId: provider.id }),
             );
           }
         }
@@ -223,26 +274,55 @@ export function useDaemon(url: string) {
             case "providers":
               return { ...prev, providers: message.providers ?? [] };
 
-            case "session.started":
+            case "provider.capabilities": {
+              // Fold in the conversations the agent already holds on disk, so
+              // the drawer shows work started at the desk too.
+              const sessions = mergeAgentSessions(
+                prev.sessions,
+                message.providerId,
+                message.sessions,
+                message.canResume === true,
+              );
+              return sessions === prev.sessions ? prev : { ...prev, sessions };
+            }
+
+            case "session.started": {
+              // A resumed conversation arrives with the agent's id for it. Its
+              // drawer entry is a stub whose turns live on the agent's disk, so
+              // this live session *replaces* it — prepending both would list
+              // the same conversation twice.
+              const agentSessionId = message.agentSessionId as string | undefined;
+              const resumedFrom = agentSessionId
+                ? prev.sessions.find((s) => s.agentSessionId === agentSessionId)
+                : undefined;
               return {
                 ...prev,
                 sessionId: message.sessionId,
                 activeProviderId: message.providerId ?? prev.activeProviderId,
                 configOptions: message.configOptions ?? [],
-                turns: [],
+                // Keep any prompt already rendered optimistically: it belongs to
+                // this session, which was started to deliver it.
+                turns: prev.turns.filter(isOptimistic),
                 sessions: [
                   {
                     id: message.sessionId,
                     providerId: message.providerId ?? prev.activeProviderId ?? "",
-                    title: "New conversation",
+                    title:
+                      firstUserText(prev.turns.filter(isOptimistic)) ??
+                      resumedFrom?.title ??
+                      "New conversation",
                     startedAt: Date.now(),
-                    turns: [],
+                    turns: prev.turns.filter(isOptimistic),
                     configOptions: message.configOptions ?? [],
+                    agentSessionId,
                   },
-                  ...prev.sessions,
+                  ...prev.sessions.filter(
+                    (s) => !agentSessionId || s.agentSessionId !== agentSessionId,
+                  ),
                 ],
                 busy: false,
               };
+            }
 
             case "session.idle":
               // The turn finished. Without this the spinner would never stop.
@@ -286,8 +366,21 @@ export function useDaemon(url: string) {
 
               const turns = [...prev.turns];
               const last = turns[turns.length - 1];
-              // Coalesce consecutive chunks of the same role into one bubble.
-              if (last && last.role === chunk.role && chunk.role !== "user") {
+              // The echo of a prompt this client already rendered: adopt the
+              // server id in place rather than showing the message twice.
+              const optimistic =
+                chunk.role === "user"
+                  ? turns.findIndex(
+                      (turn) => isOptimistic(turn) && turn.text === chunk.text,
+                    )
+                  : -1;
+              if (optimistic >= 0) {
+                turns[optimistic] = {
+                  ...turns[optimistic],
+                  id: `${message.sessionId}:${message.seq}`,
+                };
+              } else if (last && last.role === chunk.role && chunk.role !== "user") {
+                // Coalesce consecutive chunks of the same role into one bubble.
                 turns[turns.length - 1] = { ...last, text: last.text + chunk.text };
               } else {
                 // `seq` restarts at 0 for every session, so it alone would
@@ -385,14 +478,38 @@ export function useDaemon(url: string) {
       start: (providerId: string, initialText?: string) => {
         queued.current = initialText;
         post({ t: "session.start", providerId });
-        if (initialText) setState((s) => ({ ...s, busy: true }));
+        if (!initialText) return;
+        // Spawning the agent and its ACP handshake take seconds; without a local
+        // turn the screen would sit empty and look like the send did nothing.
+        const turn = localTurn(localSeq.current++, initialText);
+        setState((s) => ({ ...s, busy: true, turns: [...s.turns, turn] }));
       },
 
       prompt: (text: string) => {
         const sessionId = sessionRef.current;
         if (!sessionId) return;
         post({ t: "session.prompt", sessionId, text });
-        setState((s) => ({ ...s, busy: true }));
+        const turn = localTurn(localSeq.current++, text);
+        setState((s) => {
+          const turns = [...s.turns, turn];
+          return {
+            ...s,
+            busy: true,
+            turns,
+            sessions: s.sessions.map((session) =>
+              session.id === sessionId
+                ? {
+                    ...session,
+                    turns,
+                    title:
+                      session.title === "New conversation"
+                        ? turn.text.slice(0, 60)
+                        : session.title,
+                  }
+                : session,
+            ),
+          };
+        });
       },
 
       cancel: () => {
@@ -417,6 +534,31 @@ export function useDaemon(url: string) {
       openSession: (sessionId: string) => {
         const session = sessionsRef.current.find((entry) => entry.id === sessionId);
         if (!session) return;
+
+        // A conversation from the agent's own history has no turns here yet:
+        // they live on the agent's disk and stream back as ordinary events once
+        // it loads. Show the agent and wait rather than rendering it empty.
+        if (session.agentSessionId) {
+          sessionRef.current = undefined;
+          providerRef.current = session.providerId;
+          queued.current = undefined;
+          post({
+            t: "session.resume",
+            providerId: session.providerId,
+            agentSessionId: session.agentSessionId,
+            cwd: session.cwd,
+          });
+          setState((s) => ({
+            ...s,
+            sessionId: undefined,
+            activeProviderId: session.providerId,
+            turns: [],
+            configOptions: [],
+            busy: true,
+          }));
+          return;
+        }
+
         // Fixture transcripts exist only on this device, so they must never
         // become the target of a prompt, cancel or config change: the daemon
         // has never heard of them and those messages would vanish silently.

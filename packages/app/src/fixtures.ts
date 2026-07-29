@@ -10,8 +10,12 @@
  * seeded at init and real sessions are appended ahead of them, so a live
  * session is never overwritten. Their ids all carry FIXTURE_PREFIX and
  * `isFixtureSession` gates them out of anything that talks to the daemon.
+ *
+ * They carry no `configOptions` on purpose. Those drive the live top bar, so a
+ * sample model selector would claim a capability the real agent may not have
+ * and then vanish the moment a session opened.
  */
-import type { ConfigOption, Session, Turn } from "./useDaemon";
+import type { Session, Turn } from "./useDaemon";
 
 /** Enabled by default in development so the UI can be reviewed with content. */
 export const USE_FIXTURES =
@@ -36,29 +40,6 @@ function turns(sessionId: string, entries: [Turn["role"], string][]): Turn[] {
   }));
 }
 
-const claudeConfig: ConfigOption[] = [
-  {
-    id: "model",
-    name: "Model",
-    type: "select",
-    currentValue: "sonnet",
-    options: [
-      { value: "sonnet", name: "Sonnet" },
-      { value: "opus", name: "Opus" },
-    ],
-  },
-  {
-    id: "thinking",
-    name: "Thinking",
-    type: "select",
-    currentValue: "extended",
-    options: [
-      { value: "standard", name: "Standard" },
-      { value: "extended", name: "Extended" },
-    ],
-  },
-];
-
 /**
  * Deliberately varied: a long multi-paragraph answer, a short exchange, a
  * failure, and an interrupted run — so the thread is reviewed against the
@@ -71,7 +52,7 @@ export function sampleSessions(now: number = Date.now()): Session[] {
       providerId: "claude-code",
       title: "Refactor the auth module to use the new token store",
       startedAt: now - 25 * 60 * 1000,
-      configOptions: claudeConfig,
+      configOptions: [],
       turns: turns("fixture-auth-refactor", [
         ["user", "Refactor the auth module to use the new token store"],
         [
@@ -94,7 +75,7 @@ export function sampleSessions(now: number = Date.now()): Session[] {
       providerId: "claude-code",
       title: "Why is the checkout test flaky?",
       startedAt: now - 3 * HOUR,
-      configOptions: claudeConfig,
+      configOptions: [],
       turns: turns("fixture-flaky-test", [
         ["user", "Why is the checkout test flaky?"],
         [
@@ -135,7 +116,7 @@ export function sampleSessions(now: number = Date.now()): Session[] {
       providerId: "claude-code",
       title: "Upgrade every dependency to latest",
       startedAt: now - 2 * DAY,
-      configOptions: claudeConfig,
+      configOptions: [],
       turns: turns("fixture-interrupted", [
         ["user", "Upgrade every dependency to latest"],
         [

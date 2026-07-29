@@ -1,6 +1,9 @@
 {
   "extends": "expo/tsconfig.base",
   "compilerOptions": {
-    "strict": true
+    "strict": true,
+    // Tests run under bun, so `bun:test` must resolve here even though the app
+    // itself ships to a React Native runtime.
+    "types": ["bun"]
   }
 }

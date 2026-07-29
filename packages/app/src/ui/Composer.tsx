@@ -29,8 +29,31 @@ const INSET = theme.size.composerInset;
 const BUTTON = theme.size.composerButton;
 /** Clearance the inline text needs to avoid the two buttons. */
 const INLINE_SIDE = INSET + BUTTON + theme.space(2);
-/** Tallest the control may grow before the text scrolls internally. */
-const MAX_HEIGHT = 200;
+
+/**
+ * Lines the box can grow to before the text scrolls internally.
+ *
+ * It follows the draft one line at a time from a single line up; this is only
+ * the ceiling. Composing a prompt for a coding agent is closer to writing than
+ * to chat, so at least three lines must be visible at once before any scroll.
+ */
+const MAX_LINES = 8;
+
+/**
+ * Total control height that shows `lines` of text above the action row.
+ *
+ * The text region spans from the top down to `COLLAPSED - space(2)`, and is
+ * inset by `space(3)` at the top, so the chrome around the text is the action
+ * row less that overlap plus the inset.
+ */
+const heightForLines = (lines: number) =>
+  lines * theme.line.body + COLLAPSED - theme.space(2) + theme.space(3);
+
+/** Floor: one line of text above the action row. */
+const MIN_HEIGHT = heightForLines(1);
+const MAX_HEIGHT = heightForLines(MAX_LINES);
+/** Text height at which the box stops growing and the input starts scrolling. */
+const MAX_TEXT_HEIGHT = MAX_LINES * theme.line.body;
 
 /**
  * iOS adds the whole leading (lineHeight minus the font's own height) above the
@@ -79,7 +102,9 @@ export function Composer({
   const textHeight = expanded ? contentHeight : theme.line.body;
   const expandedHeight = Math.min(
     MAX_HEIGHT,
-    Math.max(theme.size.composer, textHeight + COLLAPSED),
+    // One line while the draft is one line: the box tracks the text rather than
+    // opening pre-grown into space nothing occupies yet.
+    Math.max(MIN_HEIGHT, textHeight + COLLAPSED - theme.space(2) + theme.space(3)),
   );
 
   const grow = useRef(new Animated.Value(0)).current;
@@ -146,7 +171,11 @@ export function Composer({
             editable={editable}
             accessibilityLabel="Message"
             submitBehavior="newline"
-            scrollEnabled
+            // A scrollable TextInput reports its *visible* height as content
+            // size, so while scrolling is on it always measures one line and the
+            // box can never grow. Scrolling therefore stays off until the box
+            // has actually reached its ceiling.
+            scrollEnabled={contentHeight >= MAX_TEXT_HEIGHT}
           />
         </Animated.View>
 
@@ -219,7 +248,6 @@ export function Composer({
 const styles = StyleSheet.create({
   inputWrap: { position: "absolute", top: 0 },
   input: {
-    flex: 1,
     color: theme.color.text,
     fontSize: theme.font.body,
     lineHeight: theme.line.body,

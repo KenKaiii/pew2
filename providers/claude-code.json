@@ -3,10 +3,10 @@
   "id": "claude-code",
   "name": "Claude Code",
   "version": "1.0.0",
-  "description": "Anthropic's Claude Code, via Zed's official ACP adapter.",
+  "description": "Anthropic's Claude Code, via the official ACP adapter.",
   "distribution": {
     "type": "npx",
-    "package": "@zed-industries/claude-code-acp",
+    "package": "@agentclientprotocol/claude-agent-acp",
     "version": "latest"
   },
   "repository": "https://github.com/zed-industries/claude-agent-acp",

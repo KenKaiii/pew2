@@ -53,6 +53,60 @@ function normaliseConfigOptions(raw: unknown): ConfigOption[] {
   });
 }
 
+/**
+ * The `models` block `session/new` may return, alongside or instead of
+ * `configOptions`. Claude Code's adapter reports its live model list this way —
+ * the set is whatever that install currently offers, so it tracks agent updates
+ * on its own and pew2 must never carry a model list of its own.
+ */
+interface SessionModelState {
+  availableModels?: { modelId: string; name: string; description?: string }[];
+  currentModelId?: string;
+}
+
+/** Present the agent's `models` block as the same selector shape as the rest. */
+function modelsAsConfigOption(models: SessionModelState | undefined): ConfigOption[] {
+  const available = models?.availableModels;
+  if (!Array.isArray(available) || available.length === 0) return [];
+  return [
+    {
+      id: MODEL_CONFIG_ID,
+      name: "Model",
+      category: "model",
+      type: "select",
+      currentValue: models?.currentModelId ?? available[0]!.modelId,
+      options: available.map((model) => ({
+        value: model.modelId,
+        name: model.name,
+        description: model.description,
+      })),
+    },
+  ];
+}
+
+/**
+ * Synthetic id for the selector built from `models`.
+ *
+ * That block has no config id of its own, so setting it routes to
+ * `session/set_model` rather than `session/set_config_option`.
+ */
+export const MODEL_CONFIG_ID = "__acp_model";
+
+/**
+ * A conversation the agent already has on disk.
+ *
+ * Coding agents keep their own history, so a phone should see the work started
+ * at the desk, not just what it started itself.
+ * https://agentclientprotocol.com/protocol/v1/session-listing
+ */
+export interface AgentSession {
+  sessionId: string;
+  cwd: string;
+  title?: string;
+  /** ISO 8601 timestamp of last activity, when the agent tracks one. */
+  updatedAt?: string;
+}
+
 export interface AcpSessionHandle {
   connection: ClientConnection;
   child: ChildProcessWithoutNullStreams;
@@ -60,6 +114,15 @@ export interface AcpSessionHandle {
   sessionId: string;
   /** Selectors the agent advertised. Empty when it offers none. */
   configOptions: ConfigOption[];
+  /** True when the agent can replay a past session via `session/load`. */
+  canLoadSession: boolean;
+  /**
+   * The agent's own stored conversations, newest first.
+   *
+   * Empty when the agent does not advertise `session/list` — not every agent
+   * persists history, and asking one that doesn't is an error, not an empty list.
+   */
+  listSessions(): Promise<AgentSession[]>;
   prompt(text: string): Promise<unknown>;
   cancel(): Promise<void>;
   setConfigOption(configId: string, value: string | boolean): Promise<ConfigOption[]>;
@@ -79,6 +142,13 @@ export interface ConnectOptions {
   onPermissionRequest: (request: { requestId: string; params: unknown }) => void;
   onStderr?: (line: string) => void;
   onExit?: (code: number | null, signal: NodeJS.Signals | null) => void;
+  /**
+   * Resume one of the agent's own sessions instead of starting a fresh one.
+   *
+   * `session/load` replays the whole conversation through `onUpdate` before it
+   * resolves, which is how a phone picks up a thread started at the desk.
+   */
+  loadSessionId?: string;
 }
 
 /**
@@ -159,7 +229,7 @@ export async function connectProvider(options: ConnectOptions): Promise<AcpSessi
 
   const connection = app.connect(stream);
 
-  await connection.agent.request("initialize", {
+  const initialized = (await connection.agent.request("initialize", {
     protocolVersion: 1,
     clientCapabilities: {
       fs: { readTextFile: false, writeTextFile: false },
@@ -168,48 +238,109 @@ export async function connectProvider(options: ConnectOptions): Promise<AcpSessi
       session: { configOptions: { boolean: {} } },
     },
     clientInfo: { name: "pew2", title: "pew2", version: "0.1.0" },
-  });
-
-  const created = (await connection.agent.request("session/new", {
-    cwd,
-    mcpServers: [],
   })) as {
+    agentCapabilities?: {
+      loadSession?: boolean;
+      sessionCapabilities?: { list?: unknown };
+    };
+  };
+
+  const caps = initialized.agentCapabilities;
+  const canLoadSession = caps?.loadSession === true;
+  // Asking an agent that never advertised `session/list` is a protocol error,
+  // not an empty list, so the capability is checked rather than the call tried.
+  const canListSessions = caps?.sessionCapabilities?.list !== undefined;
+
+  type NewSessionResult = {
     sessionId: string;
     configOptions?: ConfigOption[];
+    models?: SessionModelState;
     modes?: {
       currentModeId: string;
       availableModes: { id: string; name: string; description?: string }[];
     };
   };
 
-  // `modes` is the deprecated predecessor of `configOptions`. Normalise it so
-  // the app only ever deals with one shape.
-  const configOptions: ConfigOption[] = created.configOptions
-    ? normaliseConfigOptions(created.configOptions)
-    : (created.modes
-      ? [
-          {
-            id: "mode",
-            name: "Mode",
-            category: "mode",
-            type: "select",
-            currentValue: created.modes.currentModeId,
-            options: created.modes.availableModes.map((mode) => ({
-              value: mode.id,
-              name: mode.name,
-              description: mode.description,
-            })),
-          },
-        ]
-      : []);
+  // Resuming replays the agent's own history through `onUpdate` before it
+  // resolves, so the conversation is on screen by the time this returns.
+  const created: NewSessionResult = options.loadSessionId
+    ? {
+        ...((await connection.agent.request("session/load", {
+          sessionId: options.loadSessionId,
+          cwd,
+          mcpServers: [],
+        })) as Omit<NewSessionResult, "sessionId">),
+        sessionId: options.loadSessionId,
+      }
+    : ((await connection.agent.request("session/new", {
+        cwd,
+        mcpServers: [],
+      })) as NewSessionResult);
+
+  // Three shapes, all live in the wild, and an agent may send more than one.
+  // Claude Code returns `models` + `modes` and no `configOptions` at all, so
+  // reading only the last of these silently dropped its entire model list.
+  const advertised = normaliseConfigOptions(created.configOptions);
+  const modes: ConfigOption[] = created.modes
+    ? [
+        {
+          id: "mode",
+          name: "Mode",
+          category: "mode",
+          type: "select",
+          currentValue: created.modes.currentModeId,
+          options: created.modes.availableModes.map((mode) => ({
+            value: mode.id,
+            name: mode.name,
+            description: mode.description,
+          })),
+        },
+      ]
+    : [];
+
+  // An explicit `configOptions` entry always wins: it is the current protocol,
+  // so it must not be shadowed by the legacy block describing the same thing.
+  const has = (category: string) =>
+    advertised.some((option) => option.category === category);
+  const configOptions: ConfigOption[] = [
+    ...advertised,
+    ...(has("model") ? [] : modelsAsConfigOption(created.models)),
+    ...(has("mode") ? [] : modes),
+  ];
 
   return {
     connection,
     child,
     sessionId: created.sessionId,
     configOptions,
+    canLoadSession,
+
+    async listSessions() {
+      if (!canListSessions) return [];
+      const result = (await connection.agent.request("session/list", {})) as {
+        sessions?: AgentSession[];
+      };
+      const sessions = Array.isArray(result?.sessions) ? result.sessions : [];
+      // Newest first: the thread you were just working on is the one you want.
+      return [...sessions].sort((a, b) =>
+        (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""),
+      );
+    },
     async setConfigOption(configId: string, value: string | boolean) {
       try {
+        // The selector synthesised from `models` has no config id the agent
+        // knows, so it routes to the dedicated model method instead.
+        if (configId === MODEL_CONFIG_ID) {
+          await connection.agent.request("session/set_model", {
+            sessionId: created.sessionId,
+            modelId: String(value),
+          });
+          // That method returns nothing useful, so reflect the change locally.
+          return configOptions.map((option) =>
+            option.id === MODEL_CONFIG_ID ? { ...option, currentValue: value } : option,
+          );
+        }
+
         const result = (await connection.agent.request("session/set_config_option", {
           sessionId: created.sessionId,
           configId,

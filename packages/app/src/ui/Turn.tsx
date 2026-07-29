@@ -1,9 +1,10 @@
 /**
  * One rendered turn in the thread.
  *
- * Both sides use the full reading rail and never show avatars. User prompts sit
- * in one quiet raised surface; agent output remains plain text so long responses
- * read like a document. Each new turn fades in once. Streamed chunks append to
+ * Neither side shows avatars. User prompts sit in one quiet raised surface that
+ * hugs its own text and aligns right, capped at 85% of the rail so a long prompt
+ * still wraps; agent output uses the full reading rail as plain text so long
+ * responses read like a document. Each new turn fades in once. Streamed chunks append to
  * the same Text node, avoiding a fake typewriter delay or per-token layout churn.
  */
 import { useEffect, useRef } from "react";
@@ -63,9 +64,9 @@ export function Turn({ turn }: { turn: TurnModel }) {
 }
 
 const styles = StyleSheet.create({
-  userRow: { width: "100%", alignItems: "stretch" },
+  userRow: { width: "100%", alignItems: "flex-end" },
   userBubble: {
-    width: "100%",
+    maxWidth: "85%",
     backgroundColor: theme.color.surfaceRaised,
     borderRadius: theme.radius.lg,
     paddingHorizontal: theme.space(3.5),

@@ -61,6 +61,77 @@ export const ProviderAnnounce = z.object({
   ),
 });
 
+/**
+ * A selector the agent advertises: model, thinking level, permission mode.
+ *
+ * pew2 never stores model names of its own. The list is whatever the connected
+ * app reports for its installed version, so upgrading that app changes the
+ * options here with no release of pew2.
+ */
+export const ConfigOption = z.object({
+  id: z.string(),
+  name: z.string(),
+  description: z.string().optional(),
+  /** 'model' | 'thought_level' | 'mode' | 'model_config', or a custom '_' name. */
+  category: z.string().optional(),
+  type: z.string(),
+  currentValue: z.union([z.string(), z.boolean()]),
+  options: z
+    .array(
+      z.object({
+        value: z.string(),
+        name: z.string(),
+        description: z.string().optional(),
+      }),
+    )
+    .optional(),
+});
+
+/**
+ * A conversation the agent already holds on disk, from `session/list`.
+ *
+ * These are not pew2's sessions. Coding agents keep their own history, so work
+ * begun at the desk must be reachable from the phone.
+ */
+export const AgentSession = z.object({
+  sessionId: z.string(),
+  cwd: z.string(),
+  title: z.string().optional(),
+  /** ISO 8601 timestamp of last activity, when the agent tracks one. */
+  updatedAt: z.string().optional(),
+});
+
+/** App -> daemon. What does this provider currently offer? */
+export const ProviderCapabilitiesRequest = z.object({
+  t: z.literal("provider.capabilities"),
+  providerId: z.string(),
+  /** Re-probe instead of answering from cache, e.g. after the agent updates. */
+  refresh: z.boolean().optional(),
+});
+
+/**
+ * Daemon -> app. What the provider offers, learned by asking the agent: its
+ * live selectors and its own stored conversations. Sent before any session
+ * exists so the empty state shows real options and real history.
+ */
+export const ProviderCapabilities = z.object({
+  t: z.literal("provider.capabilities"),
+  providerId: z.string(),
+  configOptions: z.array(ConfigOption),
+  sessions: z.array(AgentSession),
+  /** Whether those sessions can be reopened, i.e. the agent supports load. */
+  canResume: z.boolean(),
+});
+
+/** App -> daemon. Reopen one of the agent's own past conversations. */
+export const ResumeSession = z.object({
+  t: z.literal("session.resume"),
+  providerId: z.string(),
+  /** The agent's session id, as reported by `session/list`. */
+  agentSessionId: z.string(),
+  cwd: z.string().optional(),
+});
+
 /** App -> daemon. Start a new session with a provider. */
 export const StartSession = z.object({
   t: z.literal("session.start"),
@@ -119,7 +190,9 @@ export const ErrorMessage = z.object({
 
 export const ClientMessage = z.discriminatedUnion("t", [
   Hello,
+  ProviderCapabilitiesRequest,
   StartSession,
+  ResumeSession,
   Prompt,
   Cancel,
   PermissionReply,
@@ -128,6 +201,7 @@ export const ClientMessage = z.discriminatedUnion("t", [
 export const ServerMessage = z.discriminatedUnion("t", [
   Ready,
   ProviderAnnounce,
+  ProviderCapabilities,
   SessionEvent,
   Replay,
   ErrorMessage,
@@ -135,6 +209,11 @@ export const ServerMessage = z.discriminatedUnion("t", [
 
 export type Hello = z.output<typeof Hello>;
 export type ProviderAnnounce = z.output<typeof ProviderAnnounce>;
+export type ConfigOption = z.output<typeof ConfigOption>;
+export type AgentSession = z.output<typeof AgentSession>;
+export type ResumeSession = z.output<typeof ResumeSession>;
+export type ProviderCapabilitiesRequest = z.output<typeof ProviderCapabilitiesRequest>;
+export type ProviderCapabilities = z.output<typeof ProviderCapabilities>;
 export type StartSession = z.output<typeof StartSession>;
 export type Prompt = z.output<typeof Prompt>;
 export type Cancel = z.output<typeof Cancel>;

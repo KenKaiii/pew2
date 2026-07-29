@@ -33,6 +33,7 @@ import { CircleButton, Pill } from "./src/ui/controls";
 import { Sidebar, DRAWER_WIDTH } from "./src/ui/Sidebar";
 import { ConfigPicker, summarise, valueName } from "./src/ui/ConfigPicker";
 import { useReducedMotion } from "./src/ui/useReducedMotion";
+import { withLayoutX, type PillX } from "./src/ui/pillAnchor";
 
 // The simulator shares the host's network, so localhost reaches the daemon.
 const DAEMON_URL = "ws://localhost:8787";
@@ -49,7 +50,13 @@ function Pew2() {
   const daemon = useDaemon(DAEMON_URL);
   const [draft, setDraft] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
-  const [configOpen, setConfigOpen] = useState(false);
+  // Which pill's menu is open, and where that pill sits, so the menu opens
+  // under it instead of always at the gutter.
+  const [picker, setPicker] = useState<"model" | "mode" | null>(null);
+  const [pillX, setPillX] = useState<PillX>({
+    model: theme.gutter,
+    mode: theme.gutter,
+  });
   const scroller = useRef<ScrollView>(null);
   const reduceMotion = useReducedMotion();
   const drawer = useRef(new Animated.Value(0)).current;
@@ -60,9 +67,12 @@ function Pew2() {
 
   const inThread = daemon.turns.length > 0;
 
-  // Model and thinking level are whatever this agent advertised; pew2 keeps no
-  // model list of its own.
-  const { primary: model, secondary: level } = summarise(daemon.configOptions);
+  // Model, permission mode and thinking level are whatever this agent
+  // advertised; pew2 keeps no model list of its own. Mode gets its own pill:
+  // folding it into the model pill would hide whichever one lost.
+  const { model, mode: modeOption, level } = summarise(daemon.configOptions);
+  // Never let one selector drive two pills.
+  const mode = modeOption && modeOption.id !== model?.id ? modeOption : undefined;
 
   useEffect(() => {
     if (inThread) scroller.current?.scrollToEnd({ animated: !reduceMotion });
@@ -156,27 +166,55 @@ function Pew2() {
           )}
         </View>
 
-        <Pill
-          label={
-            model
-              ? `Model: ${valueName(model)}${level ? `, ${valueName(level)}` : ""}`
-              : (active?.name ?? "No agents")
-          }
-          onPress={model ? () => setConfigOpen(true) : undefined}
-        >
-          <Text style={styles.agentName}>
-            {valueName(model) ?? active?.name ?? "No agents"}
-          </Text>
-          {level && <Text style={styles.agentMeta}>{valueName(level)}</Text>}
-          {model && (
-            <Ionicons
-              name="chevron-down"
-              size={13}
-              color={theme.color.textDim}
-              style={styles.pillChevron}
-            />
-          )}
-        </Pill>
+        {/* No agent-name pill. Which app is connected is already the drawer's
+            job, and repeating it here only stole width from the selectors,
+            which are the sole reason the top bar is interactive. */}
+        {model && (
+          <View
+            style={styles.selectorPill}
+            onLayout={(e) => setPillX(withLayoutX(e, "model"))}
+          >
+            <Pill
+              label={`Model: ${valueName(model)}${level ? `, ${valueName(level)}` : ""}`}
+              onPress={() => setPicker("model")}
+            >
+              {/* The thinking level is not shown here. It lives in this pill's
+                  own menu, and squeezing both names into one pill truncated
+                  each to a couple of letters. */}
+              <Text style={styles.selectorValue} numberOfLines={1}>
+                {valueName(model)}
+              </Text>
+              <Ionicons
+                name="chevron-down"
+                size={13}
+                color={theme.color.textDim}
+                style={styles.pillChevron}
+              />
+            </Pill>
+          </View>
+        )}
+
+        {mode && (
+          <View
+            style={styles.selectorPill}
+            onLayout={(e) => setPillX(withLayoutX(e, "mode"))}
+          >
+            <Pill
+              label={`${mode.name}: ${valueName(mode)}`}
+              onPress={() => setPicker("mode")}
+            >
+              <Text style={styles.selectorValue} numberOfLines={1}>
+                {valueName(mode)}
+              </Text>
+              <Ionicons
+                name="chevron-down"
+                size={13}
+                color={theme.color.textDim}
+                style={styles.pillChevron}
+              />
+            </Pill>
+          </View>
+        )}
 
         <View style={styles.topBarSpacer} />
 
@@ -238,10 +276,19 @@ function Pew2() {
         </View>
       </KeyboardAvoidingView>
 
+      {/* One picker, pointed at whichever pill opened it. The mode selector is
+          excluded from the model menu so each pill owns exactly one list. */}
       <ConfigPicker
-        visible={configOpen}
-        onClose={() => setConfigOpen(false)}
-        options={daemon.configOptions}
+        visible={picker !== null}
+        onClose={() => setPicker(null)}
+        anchorX={picker === "mode" ? pillX.mode : pillX.model}
+        options={
+          picker === "mode"
+            ? mode
+              ? [mode]
+              : []
+            : daemon.configOptions.filter((option) => option.id !== mode?.id)
+        }
         onSelect={daemon.setConfig}
       />
 
@@ -369,16 +416,13 @@ const styles = StyleSheet.create({
     paddingVertical: theme.headerInset,
   },
   topBarSpacer: { flex: 1 },
-  // Equal lineHeight on both labels puts them on one optical baseline despite
-  // the different font sizes; without it the smaller label rides high.
-  agentName: {
+  // Pills hug their text, but no single pill may take the row. flexShrink
+  // alone shrinks proportionally, which left the model pill wide and starved
+  // the mode pill to "A…"; the cap bounds the greedy one instead.
+  selectorPill: { flexShrink: 1, minWidth: 0, maxWidth: "42%" },
+  selectorValue: {
+    flexShrink: 1,
     color: theme.color.text,
-    fontSize: theme.font.body,
-    lineHeight: theme.font.body + 4,
-    fontWeight: "600",
-  },
-  agentMeta: {
-    color: theme.color.textDim,
     fontSize: theme.font.small,
     lineHeight: theme.font.body + 4,
   },

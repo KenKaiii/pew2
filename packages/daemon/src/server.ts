@@ -86,6 +86,8 @@ const server = Bun.serve({
         optionId?: string;
         configId?: string;
         value?: string | boolean;
+        agentSessionId?: string;
+        refresh?: boolean;
       };
       try {
         message = JSON.parse(raw);
@@ -99,6 +101,43 @@ const server = Bun.serve({
             // Handshake. The provider list is pushed on connect, so there is
             // nothing to do beyond accepting it.
             break;
+
+          case "provider.capabilities": {
+            // What does this app offer right now, and what has it already been
+            // used for? Both come from the agent itself, so the reply reflects
+            // the installed version rather than anything baked into pew2.
+            if (!message.providerId) throw new Error("providerId required");
+            const providerId = message.providerId;
+            const capabilities = await daemon.probeProvider(providerId, {
+              refresh: message.refresh === true,
+            });
+            send(ws, { t: "provider.capabilities", providerId, ...capabilities });
+            break;
+          }
+
+          case "session.resume": {
+            // Reopen a conversation the agent already had on disk, including
+            // ones this app never started.
+            if (!message.providerId || !message.agentSessionId) {
+              throw new Error("providerId and agentSessionId required");
+            }
+            const sessionId = await daemon.resumeSession(
+              message.providerId,
+              message.agentSessionId,
+              message.cwd ?? process.cwd(),
+            );
+            broadcast({
+              t: "session.started",
+              sessionId,
+              providerId: message.providerId,
+              configOptions: daemon.configOptions(sessionId),
+              resumed: true,
+              // Clients list the agent's copy as a stub; this is what lets them
+              // replace it with the live session instead of showing it twice.
+              agentSessionId: message.agentSessionId,
+            });
+            break;
+          }
 
           case "session.start": {
             if (!message.providerId) throw new Error("providerId required");
