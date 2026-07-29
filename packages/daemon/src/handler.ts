@@ -13,6 +13,7 @@
  */
 import type { Daemon } from "./index.js";
 import { humanError } from "./errors.js";
+import { resolveWorkspace } from "./workspace.js";
 
 export interface HandlerContext {
   daemon: Daemon;
@@ -54,7 +55,9 @@ export function errorMessage(code: string, error: unknown) {
  */
 export async function handleMessage(raw: string, ctx: HandlerContext): Promise<void> {
   const { daemon, reply, broadcast } = ctx;
-  const cwd = ctx.cwd ?? process.cwd();
+  // A headless daemon (launchd) has cwd `/`; an agent spawned there writes its
+  // state into the filesystem root or fails trying. Resolve to somewhere real.
+  const cwd = resolveWorkspace(ctx.cwd);
 
   let message: ClientMessage;
   try {

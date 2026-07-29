@@ -16,6 +16,7 @@ import {
   type ConfigOption,
 } from "./acp/connect.js";
 import { SessionLog } from "./session/log.js";
+import { resolveWorkspace } from "./workspace.js";
 import { wire } from "@pew2/protocol";
 
 interface ActiveSession {
@@ -143,7 +144,9 @@ export class Daemon {
       try {
         handle = await connectProvider({
           provider,
-          cwd: process.cwd(),
+          // Same rule as session.start: under launchd cwd is `/`, which is not a
+          // project directory. Probing from it hid every agent's sessions.
+          cwd: resolveWorkspace(),
           // A probe session is never shown, so its output goes nowhere.
           onUpdate: () => {},
           onPermissionRequest: () => {},
