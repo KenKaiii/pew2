@@ -11,6 +11,8 @@
 import { useEffect, useRef, useState } from "react";
 import {
   Animated,
+  Easing,
+  Keyboard,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -28,7 +30,7 @@ import { Orb } from "./src/ui/Orb";
 import { Composer } from "./src/ui/Composer";
 import { Turn } from "./src/ui/Turn";
 import { CircleButton, Pill } from "./src/ui/controls";
-import { Sidebar } from "./src/ui/Sidebar";
+import { Sidebar, DRAWER_WIDTH } from "./src/ui/Sidebar";
 import { ConfigPicker, summarise, valueName } from "./src/ui/ConfigPicker";
 import { useReducedMotion } from "./src/ui/useReducedMotion";
 
@@ -50,6 +52,7 @@ function Pew2() {
   const [configOpen, setConfigOpen] = useState(false);
   const scroller = useRef<ScrollView>(null);
   const reduceMotion = useReducedMotion();
+  const drawer = useRef(new Animated.Value(0)).current;
 
   const active: Provider | undefined =
     daemon.providers.find((p) => p.id === daemon.activeProviderId) ??
@@ -64,6 +67,26 @@ function Pew2() {
   useEffect(() => {
     if (inThread) scroller.current?.scrollToEnd({ animated: !reduceMotion });
   }, [daemon.turns, daemon.busy, inThread, reduceMotion]);
+
+  // Push, not overlay: the conversation slides right to uncover the drawer, so
+  // both surfaces stay part of one layout instead of becoming a modal layer.
+  useEffect(() => {
+    const animation = Animated.timing(drawer, {
+      toValue: menuOpen ? 1 : 0,
+      duration: reduceMotion ? 0 : 280,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: true,
+    });
+    animation.start();
+    return () => animation.stop();
+  }, [menuOpen, reduceMotion, drawer]);
+
+  // Translate only. The conversation keeps its exact size as it moves, so no
+  // text reflows or resamples mid-animation.
+  const slideX = drawer.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0, DRAWER_WIDTH],
+  });
 
   const send = () => {
     const text = draft.trim();
@@ -81,8 +104,32 @@ function Pew2() {
   };
 
   return (
-    <SafeAreaView style={styles.root} edges={["top", "bottom"]}>
+    <View style={styles.root}>
       <StatusBar style="light" />
+
+      <Sidebar
+        open={menuOpen}
+        providers={daemon.providers}
+        sessions={daemon.sessions}
+        activeProviderId={active?.id}
+        activeSessionId={daemon.sessionId}
+        // Selecting an app refilters the history in place. The drawer stays
+        // open so you can pick a conversation from that app straight after —
+        // closing here would make choosing an app cost two trips.
+        onSelectProvider={daemon.select}
+        onOpenSession={(id) => {
+          daemon.openSession(id);
+          setMenuOpen(false);
+        }}
+        onNewConversation={() => {
+          daemon.leave();
+          setMenuOpen(false);
+        }}
+      />
+
+      {/* The conversation pane. Slides right to reveal the drawer beneath. */}
+      <Animated.View style={[styles.pane, { transform: [{ translateX: slideX }] }]}>
+      <SafeAreaView style={styles.paneInner} edges={["top", "bottom"]}>
 
       <View style={styles.topBar}>
         <View>
@@ -153,12 +200,20 @@ function Pew2() {
             keyboardShouldPersistTaps="handled"
           >
             {daemon.turns.map((turn) => (
-              <Turn key={turn.id} turn={turn} color={active?.color} />
+              <Turn key={turn.id} turn={turn} />
             ))}
-            {daemon.busy && <Working color={active?.color} />}
+            {daemon.busy && <Working />}
           </ScrollView>
         ) : (
-          <View style={styles.greeting}>
+          // Tapping the empty state dismisses the keyboard, which collapses the
+          // composer. Without this the greeting is inert and the only way out of
+          // the expanded state is the keyboard's own dismiss control.
+          <Pressable
+            style={styles.greeting}
+            accessibilityRole="button"
+            accessibilityLabel="Dismiss keyboard"
+            onPress={Keyboard.dismiss}
+          >
             <Orb color={active?.color} size={56} busy={daemon.busy} />
             <Text style={styles.greetingText}>
               {daemon.status !== "online"
@@ -167,7 +222,7 @@ function Pew2() {
                   ? `What would you like ${active.name} to do?`
                   : "No agents available on this machine."}
             </Text>
-          </View>
+          </Pressable>
         )}
 
         <View style={styles.dock}>
@@ -190,26 +245,17 @@ function Pew2() {
         onSelect={daemon.setConfig}
       />
 
-      <Sidebar
-        open={menuOpen}
-        onClose={() => setMenuOpen(false)}
-        providers={daemon.providers}
-        sessions={daemon.sessions}
-        activeProviderId={active?.id}
-        activeSessionId={daemon.sessionId}
-        onSelectProvider={(id) => {
-          daemon.select(id);
-          setMenuOpen(false);
-        }}
-        onOpenSession={(id) => {
-          daemon.openSession(id);
-          setMenuOpen(false);
-        }}
-        onNewConversation={() => {
-          daemon.leave();
-          setMenuOpen(false);
-        }}
-      />
+      {/* While the drawer is open the pane itself is the way back: tapping
+          anywhere on it closes, which matches the push metaphor better than a
+          separate dimming layer would. */}
+      {menuOpen && (
+        <Pressable
+          style={StyleSheet.absoluteFill}
+          accessibilityRole="button"
+          accessibilityLabel="Close menu"
+          onPress={() => setMenuOpen(false)}
+        />
+      )}
 
       {daemon.permission && (
         // Blocking on purpose: an approval must not be scrollable away.
@@ -247,12 +293,14 @@ function Pew2() {
           </View>
         </View>
       )}
-    </SafeAreaView>
+      </SafeAreaView>
+      </Animated.View>
+    </View>
   );
 }
 
 /** Three dots that fade in sequence. Calm, and it costs no layout. */
-function Working({ color }: { color?: string }) {
+function Working() {
   const one = useRef(new Animated.Value(0.25)).current;
   const two = useRef(new Animated.Value(0.25)).current;
   const three = useRef(new Animated.Value(0.25)).current;
@@ -276,31 +324,49 @@ function Working({ color }: { color?: string }) {
   }, [reduceMotion, one, two, three]);
 
   return (
-    // `accessible` groups the orb and dots into one node; without it the label
-    // is attached to a container VoiceOver never focuses.
+    // `accessible` groups the dots into one node; without it the label is
+    // attached to a container VoiceOver never focuses.
     <View style={styles.workingRow} accessible accessibilityLabel="Agent is working">
-      <View style={styles.agentOrbSlot}>
-        <Orb color={color} size={22} busy />
-      </View>
-      <View style={styles.dots}>
-        <Animated.View style={[styles.dot, { opacity: one }]} />
-        <Animated.View style={[styles.dot, { opacity: two }]} />
-        <Animated.View style={[styles.dot, { opacity: three }]} />
-      </View>
+      <Animated.View style={[styles.dot, { opacity: one }]} />
+      <Animated.View style={[styles.dot, { opacity: two }]} />
+      <Animated.View style={[styles.dot, { opacity: three }]} />
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: theme.color.bg },
+  // Drawer colour, so the strip behind the sliding pane matches it.
+  root: { flex: 1, backgroundColor: theme.color.drawer },
+  // Rounded on all corners: once it slides it is a card over the drawer, and
+  // the curve is what makes the two planes legible.
+  pane: {
+    flex: 1,
+    backgroundColor: theme.color.bg,
+    borderRadius: theme.radius.pane,
+    overflow: "hidden",
+    // Must sit above the drawer, which is absolutely positioned and would
+    // otherwise paint over this pane and swallow its touches.
+    zIndex: 1,
+    // A cast shadow is what stops the two dark planes merging into one at the
+    // seam once the pane slides clear.
+    shadowColor: "#000",
+    shadowOpacity: 0.5,
+    shadowRadius: 24,
+    shadowOffset: { width: -8, height: 0 },
+    elevation: 16,
+  },
+  paneInner: { flex: 1 },
   body: { flex: 1 },
 
   topBar: {
     flexDirection: "row",
     alignItems: "center",
     gap: theme.space(2),
-    paddingHorizontal: theme.space(4),
-    paddingVertical: theme.space(2),
+    // Shares theme.gutter and theme.headerInset with the drawer header, so the
+    // hamburger and the "Connected Apps" title it reveals sit on one rail and
+    // one baseline.
+    paddingHorizontal: theme.gutter,
+    paddingVertical: theme.headerInset,
   },
   topBarSpacer: { flex: 1 },
   // Equal lineHeight on both labels puts them on one optical baseline despite
@@ -331,7 +397,7 @@ const styles = StyleSheet.create({
 
   thread: { flex: 1 },
   threadContent: {
-    paddingHorizontal: theme.space(4),
+    paddingHorizontal: theme.gutter,
     paddingTop: theme.space(4),
     paddingBottom: theme.space(2),
     gap: theme.space(5),
@@ -351,11 +417,14 @@ const styles = StyleSheet.create({
     textAlign: "center",
   },
 
-  // Matches the agent turn's gap and orb size so the working indicator sits on
-  // the same rail as the reply that replaces it, with no visible jump.
-  workingRow: { flexDirection: "row", gap: theme.space(2.5), alignItems: "center" },
-  agentOrbSlot: { height: 22, justifyContent: "center" },
-  dots: { flexDirection: "row", gap: theme.space(1.5), alignItems: "center" },
+  // Sits on the same left rail as the agent text that replaces it, so the
+  // reply does not jump horizontally when streaming begins.
+  workingRow: {
+    flexDirection: "row",
+    gap: theme.space(1.5),
+    alignItems: "center",
+    height: theme.line.body,
+  },
   dot: {
     width: 6,
     height: 6,
@@ -366,7 +435,7 @@ const styles = StyleSheet.create({
   // One consistent gap between the thread and the composer, kept when the
   // keyboard is open so the last message never hides behind the input.
   dock: {
-    paddingHorizontal: theme.space(4),
+    paddingHorizontal: theme.gutter,
     paddingTop: theme.space(2),
     paddingBottom: theme.space(2),
   },

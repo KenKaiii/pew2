@@ -7,6 +7,7 @@
  * per word and scrolling would fight the user.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { USE_FIXTURES, isFixtureSession, sampleSessions } from "./fixtures";
 
 export type Status = "connecting" | "online" | "offline";
 
@@ -72,6 +73,23 @@ interface State {
   busy: boolean;
 }
 
+/**
+ * Last-known selectors per provider.
+ *
+ * A session only reports its options once it exists, but the model selector has
+ * to be usable on an empty screen — choosing a model is part of composing the
+ * first prompt. Remembering the last set an agent advertised lets the picker
+ * appear immediately, and the live session overwrites it as soon as it opens.
+ */
+function rememberConfigs(
+  known: Record<string, ConfigOption[]>,
+  providerId: string | undefined,
+  options: ConfigOption[],
+): Record<string, ConfigOption[]> {
+  if (!providerId || options.length === 0) return known;
+  return { ...known, [providerId]: options };
+}
+
 /** Pull display text out of an ACP `session/update` payload. */
 function readChunk(payload: any): { role: Turn["role"]; text: string } | undefined {
   const update = payload?.update;
@@ -95,10 +113,24 @@ export function useDaemon(url: string) {
     status: "connecting",
     providers: [],
     turns: [],
-    sessions: [],
+    // Sample conversations in development so history and long-response
+    // rendering can be reviewed with content. Real sessions are appended
+    // ahead of these and never replaced by them.
+    sessions: USE_FIXTURES ? sampleSessions() : [],
     configOptions: [],
     busy: false,
   });
+
+  // Not in State: this is a cache keyed by provider, not part of the session.
+  const [knownConfigs, setKnownConfigs] = useState<Record<string, ConfigOption[]>>(
+    () =>
+      USE_FIXTURES
+        ? sampleSessions().reduce<Record<string, ConfigOption[]>>((acc, session) => {
+            if (session.configOptions.length > 0) acc[session.providerId] = session.configOptions;
+            return acc;
+          }, {})
+        : {},
+  );
 
   const socket = useRef<WebSocket | null>(null);
   const retry = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -107,9 +139,20 @@ export function useDaemon(url: string) {
   // Mirrors state.sessionId so actions can read it without doing work inside a
   // state updater. Updaters must stay pure: React may invoke them twice.
   const sessionRef = useRef<string | undefined>(undefined);
+  // Mirrors activeProviderId for the same reason sessionRef exists: message
+  // handlers must not read state inside an updater.
+  const providerRef = useRef<string | undefined>(undefined);
   // Text entered before a session existed. Sent as soon as the daemon confirms
   // one, so the composer works straight from the empty state.
   const queued = useRef<string | undefined>(undefined);
+  // Mirrors state.sessions so openSession can look one up without doing that
+  // work inside a state updater.
+  const sessionsRef = useRef<Session[]>(state.sessions);
+  // Synced in an effect rather than during render: writing a ref while
+  // rendering is the same impurity the updaters above avoid.
+  useEffect(() => {
+    sessionsRef.current = state.sessions;
+  }, [state.sessions]);
 
   useEffect(() => {
     alive.current = true;
@@ -163,6 +206,17 @@ export function useDaemon(url: string) {
           message.t === "session.idle" ||
           message.t === "session.config";
         if (scoped && message.sessionId !== sessionRef.current) return;
+
+        // Cache selectors against the provider so they survive the session and
+        // are available before the next one starts.
+        if (message.t === "session.started" || message.t === "session.config") {
+          const advertised: ConfigOption[] = message.configOptions ?? [];
+          if (advertised.length > 0) {
+            setKnownConfigs((known) =>
+              rememberConfigs(known, message.providerId ?? providerRef.current, advertised),
+            );
+          }
+        }
 
         setState((prev) => {
           switch (message.t) {
@@ -361,25 +415,31 @@ export function useDaemon(url: string) {
 
       /** Reopen a past conversation from the sidebar. */
       openSession: (sessionId: string) => {
-        sessionRef.current = sessionId;
+        const session = sessionsRef.current.find((entry) => entry.id === sessionId);
+        if (!session) return;
+        // Fixture transcripts exist only on this device, so they must never
+        // become the target of a prompt, cancel or config change: the daemon
+        // has never heard of them and those messages would vanish silently.
+        // Opening one shows its history and selects its agent; typing then
+        // starts a real session instead of posting against a phantom id.
+        const live = !isFixtureSession(sessionId);
+        sessionRef.current = live ? sessionId : undefined;
+        providerRef.current = session.providerId;
         queued.current = undefined;
-        setState((s) => {
-          const session = s.sessions.find((entry) => entry.id === sessionId);
-          if (!session) return s;
-          return {
-            ...s,
-            sessionId,
-            activeProviderId: session.providerId,
-            turns: session.turns,
-            configOptions: session.configOptions,
-            busy: false,
-          };
-        });
+        setState((s) => ({
+          ...s,
+          sessionId: live ? sessionId : undefined,
+          activeProviderId: session.providerId,
+          turns: session.turns,
+          configOptions: session.configOptions,
+          busy: false,
+        }));
       },
 
       /** Choose which agent the composer targets. Ends any open session. */
       select: (providerId: string) => {
         sessionRef.current = undefined;
+        providerRef.current = providerId;
         queued.current = undefined;
         setState((s) => ({
           ...s,
@@ -408,5 +468,18 @@ export function useDaemon(url: string) {
     [post],
   );
 
-  return { ...state, ...actions };
+  // Fall back to the last selectors this agent advertised, so the model picker
+  // is available on an empty screen instead of only mid-conversation.
+  //
+  // The provider defaults the same way the UI does: before an explicit choice,
+  // the composer already targets the first available agent, so the selector has
+  // to describe that same agent rather than nothing.
+  const effectiveProviderId =
+    state.activeProviderId ?? state.providers.find((p) => p.available)?.id;
+  const configOptions =
+    state.configOptions.length > 0
+      ? state.configOptions
+      : (effectiveProviderId ? knownConfigs[effectiveProviderId] : undefined) ?? [];
+
+  return { ...state, ...actions, configOptions };
 }

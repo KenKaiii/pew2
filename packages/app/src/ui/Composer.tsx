@@ -1,17 +1,47 @@
 /**
- * The composer pill.
+ * Message composer, with two states and a continuous transition between them.
  *
- * Sits directly beneath the thread with one consistent gap, and keeps that same
- * gap when the keyboard is open, so the last message is never hidden behind the
- * input. Height grows with the text up to a cap, then scrolls internally.
+ * Resting: a single 58pt pill — attach, text, voice — all on one line, so an
+ * idle screen shows one calm control rather than a tall empty box.
+ *
+ * Focused (or once text is entered): the text region lifts to its own full-width
+ * row above the action row. This is what stops a long draft from ever clipping
+ * or overlapping the attach and send buttons in the lower corners.
+ *
+ * The two states are one layout, not two trees. The action row is always
+ * anchored to the bottom 58pt — which *is* the whole pill when collapsed — so
+ * the buttons never move, and only the text region animates. That also keeps the
+ * TextInput mounted throughout, so focus is never dropped mid-transition.
+ *
+ * Metrics and colours are sampled from the reference build: 36pt buttons inset
+ * 11pt from the pill edge, #e0e0e0 glyphs, #828282 placeholder.
  */
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Animated, Pressable, StyleSheet, TextInput, View } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { theme } from "../theme";
 import { touchSlop } from "./controls";
 import { Glass } from "./Glass";
 import { useReducedMotion } from "./useReducedMotion";
+
+const COLLAPSED = theme.size.composerCollapsed;
+const INSET = theme.size.composerInset;
+const BUTTON = theme.size.composerButton;
+/** Clearance the inline text needs to avoid the two buttons. */
+const INLINE_SIDE = INSET + BUTTON + theme.space(2);
+/** Tallest the control may grow before the text scrolls internally. */
+const MAX_HEIGHT = 200;
+
+/**
+ * iOS adds the whole leading (lineHeight minus the font's own height) above the
+ * glyphs in a multiline TextInput instead of splitting it top and bottom. A line
+ * box centred by pure geometry therefore renders about half a leading too low —
+ * measured at 2pt here, which is subtle but visible against the round buttons
+ * beside it. Subtract that half back so the text is optically centred.
+ *
+ * 1.2em is the system font's ascent + descent.
+ */
+const HALF_LEADING = Math.max(0, (theme.line.body - theme.font.body * 1.2) / 2);
 
 interface ComposerProps {
   value: string;
@@ -34,132 +64,192 @@ export function Composer({
   editable = true,
 }: ComposerProps) {
   const hasText = value.trim().length > 0;
+  const [focused, setFocused] = useState(false);
+  const [contentHeight, setContentHeight] = useState<number>(theme.line.body);
   const reduceMotion = useReducedMotion();
-  // Cross-fades the trailing control between voice and send. A fade reads as
-  // one control changing meaning; a slide would read as two controls swapping.
-  const sendIn = useRef(new Animated.Value(0)).current;
-  const target = hasText || busy ? 1 : 0;
 
-  // In an effect, not during render: starting an animation is a side effect.
+  // Stay expanded while there is a draft: collapsing under the user's own text
+  // would hide it behind the action row.
+  const expanded = focused || hasText || busy;
+
+  // Grow with the text, then scroll internally rather than eat the thread.
+  // `contentHeight` is only meaningful once expanded: a multiline TextInput
+  // reports its natural height even while collapsed, which would otherwise
+  // inflate this box before the user has typed anything.
+  const textHeight = expanded ? contentHeight : theme.line.body;
+  const expandedHeight = Math.min(
+    MAX_HEIGHT,
+    Math.max(theme.size.composer, textHeight + COLLAPSED),
+  );
+
+  const grow = useRef(new Animated.Value(0)).current;
+  const sendIn = useRef(new Animated.Value(0)).current;
+  const sendTarget = hasText || busy ? 1 : 0;
+
+  useEffect(() => {
+    const animation = Animated.timing(grow, {
+      toValue: expanded ? 1 : 0,
+      duration: reduceMotion ? 0 : theme.motion.base,
+      easing: theme.easing,
+      // Height and padding are layout properties, so this cannot run on the
+      // native driver. It is one small control, so the cost is negligible.
+      useNativeDriver: false,
+    });
+    animation.start();
+    return () => animation.stop();
+  }, [expanded, reduceMotion, grow]);
+
   useEffect(() => {
     const animation = Animated.timing(sendIn, {
-      toValue: target,
+      toValue: sendTarget,
       duration: reduceMotion ? 0 : theme.motion.fast,
       useNativeDriver: true,
     });
     animation.start();
     return () => animation.stop();
-  }, [target, reduceMotion, sendIn]);
+  }, [sendTarget, reduceMotion, sendIn]);
+
+  const lerp = (from: number, to: number) =>
+    grow.interpolate({ inputRange: [0, 1], outputRange: [from, to] });
 
   return (
-    <Glass radius={theme.radius.pill} style={styles.row} intensity={50}>
-      {/* Attachments are not implemented yet. Shown disabled rather than wired
-          to a no-op, so the control never lies about what it does. */}
-      <View
-        style={[styles.leading, styles.notImplemented]}
-        accessibilityRole="button"
-        accessibilityLabel="Add attachment, not available yet"
-        accessibilityState={{ disabled: true }}
-      >
-        <Ionicons name="add" size={22} color={theme.color.text} />
-      </View>
-
-      <TextInput
-        style={styles.input}
-        value={value}
-        onChangeText={onChangeText}
-        placeholder={placeholder}
-        placeholderTextColor={theme.color.textFaint}
-        multiline
-        editable={editable}
-        accessibilityLabel="Message"
-        submitBehavior="newline"
-      />
-
-      <View style={styles.trailing}>
+    <Glass radius={theme.radius.composer} tier="raised">
+      <Animated.View style={{ height: lerp(COLLAPSED, expandedHeight) }}>
         <Animated.View
-          pointerEvents={target === 1 ? "none" : "auto"}
-          style={[styles.trailingLayer, { opacity: sendIn.interpolate({
-            inputRange: [0, 1],
-            outputRange: [1, 0],
-          }) }]}
+          style={[
+            styles.inputWrap,
+            {
+              left: lerp(INLINE_SIDE, INSET + theme.space(1)),
+              right: lerp(INLINE_SIDE, INSET + theme.space(1)),
+              bottom: lerp(0, COLLAPSED - theme.space(2)),
+              // Centres the single line when collapsed, then lifts it to the
+              // top of the taller box as it expands.
+              paddingTop: lerp(
+                (COLLAPSED - theme.line.body) / 2 - HALF_LEADING,
+                theme.space(3) - HALF_LEADING,
+              ),
+            },
+          ]}
         >
-          {/* Same as the attachment button: visible, honest, not yet wired. */}
+          <TextInput
+            style={styles.input}
+            value={value}
+            onChangeText={onChangeText}
+            onFocus={() => setFocused(true)}
+            onBlur={() => setFocused(false)}
+            onContentSizeChange={(event) =>
+              setContentHeight(event.nativeEvent.contentSize.height)
+            }
+            placeholder={placeholder}
+            placeholderTextColor={theme.color.placeholder}
+            multiline
+            editable={editable}
+            accessibilityLabel="Message"
+            submitBehavior="newline"
+            scrollEnabled
+          />
+        </Animated.View>
+
+        {/* Always the bottom 58pt: the entire pill when collapsed, the action
+            row once expanded. Anchoring it means the buttons never shift. */}
+        <View style={styles.actions}>
           <View
-            style={[styles.trailingButton, styles.notImplemented]}
+            style={[styles.actionButton, styles.notImplemented]}
             accessibilityRole="button"
-            accessibilityLabel="Voice input, not available yet"
+            accessibilityLabel="Add attachment, not available yet"
             accessibilityState={{ disabled: true }}
           >
-            <Ionicons name="mic-outline" size={19} color={theme.color.text} />
+            <Ionicons name="add" size={22} color={theme.color.glyph} />
           </View>
-        </Animated.View>
 
-        <Animated.View
-          pointerEvents={target === 1 ? "auto" : "none"}
-          style={[styles.trailingLayer, { opacity: sendIn }]}
-        >
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={busy ? "Stop generating" : "Send message"}
-            hitSlop={touchSlop(theme.size.composerButton)}
-            onPress={busy ? onStop : onSend}
-            style={({ pressed }) => [
-              styles.trailingButton,
-              styles.sendButton,
-              pressed && styles.sendPressed,
-            ]}
-          >
-            <Ionicons
-              name={busy ? "square" : "arrow-up"}
-              size={busy ? 13 : 20}
-              color="#000"
-            />
-          </Pressable>
-        </Animated.View>
-      </View>
+          <View style={styles.trailing}>
+            <Animated.View
+              pointerEvents={sendTarget === 1 ? "none" : "auto"}
+              style={[
+                styles.trailingLayer,
+                {
+                  opacity: sendIn.interpolate({
+                    inputRange: [0, 1],
+                    outputRange: [1, 0],
+                  }),
+                },
+              ]}
+            >
+              <View
+                style={[styles.actionButton, styles.notImplemented]}
+                accessibilityRole="button"
+                accessibilityLabel="Voice input, not available yet"
+                accessibilityState={{ disabled: true }}
+              >
+                <Ionicons name="mic-outline" size={20} color={theme.color.glyph} />
+              </View>
+            </Animated.View>
+
+            <Animated.View
+              pointerEvents={sendTarget === 1 ? "auto" : "none"}
+              style={[styles.trailingLayer, { opacity: sendIn }]}
+            >
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={busy ? "Stop generating" : "Send message"}
+                accessibilityState={{ disabled: !busy && !hasText }}
+                hitSlop={touchSlop(BUTTON)}
+                onPress={busy ? onStop : onSend}
+                disabled={!busy && !hasText}
+                style={({ pressed }) => [
+                  styles.actionButton,
+                  styles.sendButton,
+                  pressed && styles.sendPressed,
+                ]}
+              >
+                <Ionicons
+                  name={busy ? "square" : "arrow-up"}
+                  size={busy ? 13 : 20}
+                  color="#0f0f0f"
+                />
+              </Pressable>
+            </Animated.View>
+          </View>
+        </View>
+      </Animated.View>
     </Glass>
   );
 }
 
 const styles = StyleSheet.create({
-  row: {
-    flexDirection: "row",
-    // flex-end so the buttons stay pinned to the last line as the input grows.
-    // With the input's minHeight matching the buttons, a single line is centred.
-    alignItems: "flex-end",
-    gap: theme.space(2),
-    paddingVertical: theme.space(1.5),
-    paddingHorizontal: theme.space(1.5),
-  },
-  leading: {
-    width: theme.size.composerButton,
-    height: theme.size.composerButton,
-    borderRadius: theme.size.composerButton / 2,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "rgba(255,255,255,0.10)",
-  },
+  inputWrap: { position: "absolute", top: 0 },
   input: {
     flex: 1,
     color: theme.color.text,
     fontSize: theme.font.body,
     lineHeight: theme.line.body,
-    // Match the button height and split the leftover space evenly, so the
-    // first line of text sits on the same centre line as the + and send
-    // buttons. Asymmetric padding here is what makes a composer look "off".
-    minHeight: theme.size.composerButton,
-    paddingTop: (theme.size.composerButton - theme.line.body) / 2,
-    paddingBottom: (theme.size.composerButton - theme.line.body) / 2,
-    maxHeight: 132,
-    paddingHorizontal: theme.space(1),
-    // Android ignores padding-based centring on multiline inputs.
-    textAlignVertical: "center",
+    // Zero the platform's own padding so the animated values above are the
+    // only thing positioning the text.
+    padding: 0,
+    textAlignVertical: "top",
   },
-  trailing: {
-    width: theme.size.composerButton,
-    height: theme.size.composerButton,
+  actions: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    bottom: 0,
+    height: COLLAPSED,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingHorizontal: INSET,
   },
+  actionButton: {
+    width: BUTTON,
+    height: BUTTON,
+    borderRadius: BUTTON / 2,
+    alignItems: "center",
+    justifyContent: "center",
+    // Nested inside the composer's own glass, so it takes the fill only. A
+    // second rim this close in would read as a seam rather than a highlight.
+    backgroundColor: theme.glass.control.fill,
+  },
+  trailing: { width: BUTTON, height: BUTTON },
   trailingLayer: {
     position: "absolute",
     top: 0,
@@ -167,16 +257,7 @@ const styles = StyleSheet.create({
     right: 0,
     bottom: 0,
   },
-  trailingButton: {
-    width: theme.size.composerButton,
-    height: theme.size.composerButton,
-    borderRadius: theme.size.composerButton / 2,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "rgba(255,255,255,0.10)",
-  },
   sendButton: { backgroundColor: theme.color.text },
   sendPressed: { backgroundColor: theme.color.textDim },
-  pressed: { backgroundColor: "rgba(255,255,255,0.20)" },
   notImplemented: { opacity: 0.4 },
 });

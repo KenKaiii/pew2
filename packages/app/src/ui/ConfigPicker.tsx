@@ -7,6 +7,9 @@
  *
  * Values only: names, no descriptions. The point is to switch quickly, not to
  * read documentation.
+ *
+ * Anchored under the model pill in the top left and scaled from that corner, so
+ * it reads as the pill opening rather than a dialog arriving from nowhere.
  */
 import { useEffect, useRef } from "react";
 import {
@@ -20,10 +23,20 @@ import {
   View,
 } from "react-native";
 import { BlurView } from "expo-blur";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { theme } from "../theme";
 import type { ConfigOption } from "../useDaemon";
 import { useReducedMotion } from "./useReducedMotion";
+
+/** Height of the top bar the picker hangs from: inset, control, inset. */
+const TOP_BAR = theme.headerInset * 2 + theme.size.control;
+
+/**
+ * Ceiling for the menu. Short lists shrink to fit; an agent advertising a dozen
+ * models scrolls inside this instead of running down the screen.
+ */
+const MAX_MENU_HEIGHT = 360;
 
 /** Category order when the agent gives no explicit priority. */
 const CATEGORY_RANK: Record<string, number> = {
@@ -69,6 +82,7 @@ export function ConfigPicker({
 }: ConfigPickerProps) {
   const progress = useRef(new Animated.Value(0)).current;
   const reduceMotion = useReducedMotion();
+  const insets = useSafeAreaInsets();
 
   useEffect(() => {
     const animation = Animated.timing(progress, {
@@ -96,7 +110,13 @@ export function ConfigPicker({
       animationType="none"
       onRequestClose={onClose}
     >
-      <Animated.View style={[styles.host, { opacity: progress }]}>
+      <Animated.View
+        style={[
+          styles.host,
+          { paddingTop: insets.top + TOP_BAR + theme.space(1.5) },
+          { opacity: progress },
+        ]}
+      >
         <Pressable
           style={StyleSheet.absoluteFill}
           accessibilityRole="button"
@@ -108,12 +128,13 @@ export function ConfigPicker({
           style={[
             styles.card,
             {
+              // Grows out of the pill's own corner rather than its centre.
+              transformOrigin: "top left",
               transform: [
                 {
-                  // Scales up from just under full size: a settle, not a slide.
                   scale: progress.interpolate({
                     inputRange: [0, 1],
-                    outputRange: [0.96, 1],
+                    outputRange: [0.92, 1],
                   }),
                 },
               ],
@@ -129,7 +150,13 @@ export function ConfigPicker({
           />
           <View style={styles.cardTint} pointerEvents="none" />
 
-          <ScrollView contentContainerStyle={styles.cardInner}>
+          {/* Hugs its rows: without this the ScrollView fills maxHeight and
+              leaves dead space under the last option. */}
+          <ScrollView
+            style={styles.scroll}
+            contentContainerStyle={styles.cardInner}
+            showsVerticalScrollIndicator={false}
+          >
             {sorted.length === 0 && (
               <Text style={styles.empty}>
                 This agent offers no model options.
@@ -180,15 +207,21 @@ const styles = StyleSheet.create({
   host: {
     flex: 1,
     backgroundColor: "rgba(0,0,0,0.55)",
-    justifyContent: "center",
-    paddingHorizontal: theme.space(6),
+    // Top left, on the same gutter as the pill that opens it.
+    alignItems: "flex-start",
+    paddingLeft: theme.gutter,
   },
   card: {
-    maxHeight: "70%",
+    // Menu-width, not dialog-width: it holds short value names only.
+    minWidth: 220,
+    maxWidth: 300,
+    maxHeight: MAX_MENU_HEIGHT,
+    // Shrink to content; maxHeight is the ceiling, not the target.
+    alignSelf: "flex-start",
     borderRadius: theme.radius.lg,
     overflow: "hidden",
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: "rgba(255,255,255,0.14)",
+    borderColor: theme.glass.control.rim,
   },
   cardTint: {
     position: "absolute",
@@ -196,8 +229,11 @@ const styles = StyleSheet.create({
     left: 0,
     right: 0,
     bottom: 0,
-    backgroundColor: "rgba(28,28,32,0.55)",
+    // Opaque enough to carry body text over a busy thread, then lifted by the
+    // same glass fill every other control uses.
+    backgroundColor: "rgba(28,28,30,0.72)",
   },
+  scroll: { flexGrow: 0 },
   cardInner: { padding: theme.space(3) },
   group: { paddingBottom: theme.space(3) },
   groupLabel: {
@@ -216,7 +252,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: theme.space(3),
     borderRadius: theme.radius.md,
   },
-  rowPressed: { backgroundColor: "rgba(255,255,255,0.10)" },
+  rowPressed: { backgroundColor: theme.glass.fillPressed },
   rowText: {
     color: theme.color.text,
     fontSize: theme.font.body,

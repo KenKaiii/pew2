@@ -137,7 +137,7 @@ const styles = StyleSheet.create({
   pillRow: { flexDirection: "row", alignItems: "center", gap: theme.space(1.5) },
   pressed: { backgroundColor: theme.color.surfacePressed },
   // On glass, press brightens the surface rather than replacing its colour.
-  pressedOverlay: { backgroundColor: "rgba(255,255,255,0.10)" },
+  pressedOverlay: { backgroundColor: theme.glass.fillPressed },
   disabled: { opacity: 0.4 },
   caption: { color: theme.color.textDim, fontSize: theme.font.small },
 });

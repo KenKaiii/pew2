@@ -1,39 +1,26 @@
 /**
  * The sidebar drawer.
  *
- * Agents across the top, their conversations below. Switching agent refilters
- * the list in place, so moving between Claude, Codex and your own app is one
- * tap and never a new screen.
+ * Connected apps across the top, their conversations below. Switching app
+ * refilters the list in place, so moving between Claude, Codex and your own app
+ * is one tap and never a new screen.
  *
- * Rendered on frosted glass: the conversation stays faintly visible behind it,
- * which keeps the drawer feeling like a layer over your session rather than a
- * page you navigated to.
+ * This is a push drawer: the conversation slides right to reveal it rather than
+ * being covered, so the two surfaces read as one moving layout instead of a
+ * modal layer. The panel itself is therefore static — App owns the motion.
  */
-import { useEffect, useRef } from "react";
-import {
-  Animated,
-  Dimensions,
-  Easing,
-  Pressable,
-  ScrollView,
-  StyleSheet,
-  Text,
-  View,
-} from "react-native";
-import { BlurView } from "expo-blur";
+import { Dimensions, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { theme } from "../theme";
 import { Orb } from "./Orb";
 import { touchSlop } from "./controls";
-import { useReducedMotion } from "./useReducedMotion";
 import type { Provider, Session } from "../useDaemon";
 
-const WIDTH = Math.min(Dimensions.get("window").width * 0.86, 340);
+export const DRAWER_WIDTH = Math.min(Dimensions.get("window").width * 0.82, 330);
 
 interface SidebarProps {
   open: boolean;
-  onClose: () => void;
   providers: Provider[];
   sessions: Session[];
   activeProviderId?: string;
@@ -45,7 +32,6 @@ interface SidebarProps {
 
 export function Sidebar({
   open,
-  onClose,
   providers,
   sessions,
   activeProviderId,
@@ -54,55 +40,24 @@ export function Sidebar({
   onOpenSession,
   onNewConversation,
 }: SidebarProps) {
-  const progress = useRef(new Animated.Value(0)).current;
-  const reduceMotion = useReducedMotion();
   const insets = useSafeAreaInsets();
-
-  useEffect(() => {
-    const animation = Animated.timing(progress, {
-      toValue: open ? 1 : 0,
-      // One curve, decelerating: the panel arrives rather than snapping.
-      duration: reduceMotion ? 0 : 260,
-      easing: Easing.out(Easing.cubic),
-      useNativeDriver: true,
-    });
-    animation.start();
-    return () => animation.stop();
-  }, [open, reduceMotion, progress]);
-
-  const translateX = progress.interpolate({
-    inputRange: [0, 1],
-    outputRange: [-WIDTH, 0],
-  });
 
   const visible = sessions.filter(
     (session) => !activeProviderId || session.providerId === activeProviderId,
   );
 
   return (
-    <View style={styles.host} pointerEvents={open ? "auto" : "none"}>
-      <Animated.View style={[styles.scrim, { opacity: progress }]}>
-        <Pressable
-          style={styles.scrimPress}
-          accessibilityRole="button"
-          accessibilityLabel="Close menu"
-          onPress={onClose}
-        />
-      </Animated.View>
-
-      <Animated.View style={[styles.panel, { width: WIDTH, transform: [{ translateX }] }]}>
-        {/* Decorative layers must not swallow taps meant for the list. */}
-        <BlurView
-          intensity={60}
-          tint="dark"
-          style={StyleSheet.absoluteFill}
-          pointerEvents="none"
-        />
-        <View style={styles.panelTint} pointerEvents="none" />
-
-        <View style={[styles.panelInner, { paddingTop: insets.top + theme.space(3) }]}>
+    <View
+      style={[styles.panel, { width: DRAWER_WIDTH }]}
+      pointerEvents={open ? "auto" : "none"}
+      // Hidden from assistive tech while closed: it is still mounted, but it is
+      // not on screen and must not be reachable by swipe navigation.
+      accessibilityElementsHidden={!open}
+      importantForAccessibility={open ? "auto" : "no-hide-descendants"}
+    >
+      <View style={[styles.panelInner, { paddingTop: insets.top + theme.headerInset }]}>
           <View style={styles.header}>
-            <Text style={styles.headerTitle}>Agents</Text>
+            <Text style={styles.headerTitle}>Connected Apps</Text>
             <Pressable
               accessibilityRole="button"
               accessibilityLabel="New conversation"
@@ -117,6 +72,9 @@ export function Sidebar({
           <ScrollView
             horizontal
             showsHorizontalScrollIndicator={false}
+            // Without an explicit height a horizontal ScrollView stretches to
+            // fill the remaining column space and pushes the history far down.
+            style={styles.agentScroller}
             contentContainerStyle={styles.agentRow}
           >
             {providers.map((provider) => (
@@ -185,46 +143,20 @@ export function Sidebar({
               ))
             )}
           </ScrollView>
-        </View>
-      </Animated.View>
+      </View>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  host: {
-    position: "absolute",
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-  },
-  scrim: {
-    position: "absolute",
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: "rgba(0,0,0,0.55)",
-  },
-  scrimPress: { flex: 1 },
+  // The drawer is the lower layer: it stays put while the conversation slides
+  // right to reveal it, so it needs no transform of its own.
   panel: {
     position: "absolute",
     top: 0,
     left: 0,
     bottom: 0,
-    overflow: "hidden",
-    borderRightWidth: StyleSheet.hairlineWidth,
-    borderRightColor: "rgba(255,255,255,0.10)",
-  },
-  // Glass needs a tint behind it or the true-black canvas shows through as mud.
-  panelTint: {
-    position: "absolute",
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: "rgba(28,28,32,0.55)",
+    backgroundColor: theme.color.drawer,
   },
   panelInner: { flex: 1, paddingBottom: theme.space(4) },
 
@@ -232,8 +164,11 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    paddingHorizontal: theme.space(4),
-    paddingBottom: theme.space(3),
+    // Same gutter and the same row height as the conversation's top bar, so
+    // the title and the hamburger beside it share one baseline.
+    paddingHorizontal: theme.gutter,
+    height: theme.size.control,
+    marginBottom: theme.space(3),
   },
   headerTitle: {
     color: theme.color.text,
@@ -246,10 +181,17 @@ const styles = StyleSheet.create({
     borderRadius: theme.size.control / 2,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "rgba(255,255,255,0.10)",
+    backgroundColor: theme.glass.control.fill,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: theme.glass.control.rim,
   },
 
-  agentRow: { paddingHorizontal: theme.space(4), gap: theme.space(2) },
+  agentScroller: { flexGrow: 0, height: theme.size.chip },
+  agentRow: {
+    paddingHorizontal: theme.gutter,
+    gap: theme.space(2),
+    alignItems: "center",
+  },
   agentChip: {
     flexDirection: "row",
     alignItems: "center",
@@ -257,10 +199,12 @@ const styles = StyleSheet.create({
     height: theme.size.chip,
     paddingHorizontal: theme.space(3.5),
     borderRadius: theme.radius.pill,
-    backgroundColor: "rgba(255,255,255,0.07)",
+    backgroundColor: theme.glass.control.fill,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: theme.glass.control.rim,
   },
   agentChipActive: {
-    backgroundColor: "rgba(255,255,255,0.16)",
+    backgroundColor: theme.glass.fillActive,
   },
   agentChipText: {
     color: theme.color.text,
@@ -274,20 +218,26 @@ const styles = StyleSheet.create({
   sectionLabel: {
     color: theme.color.textDim,
     fontSize: theme.font.small,
-    paddingHorizontal: theme.space(4),
-    paddingTop: theme.space(6),
+    paddingHorizontal: theme.gutter,
+    paddingTop: theme.space(5),
     paddingBottom: theme.space(2),
   },
 
   sessions: { flex: 1 },
-  sessionsContent: { paddingHorizontal: theme.space(3), gap: theme.space(1) },
+  // The row's own inset is subtracted from the list inset so session text lands
+  // on exactly the same left rail as the "Chat history" label, while the
+  // selected-row highlight still extends past the text on both sides.
+  sessionsContent: {
+    paddingHorizontal: theme.gutter - theme.space(2),
+    gap: theme.space(1),
+  },
   session: {
-    paddingHorizontal: theme.space(3),
+    paddingHorizontal: theme.space(2),
     paddingVertical: theme.space(3),
     borderRadius: theme.radius.md,
     gap: 2,
   },
-  sessionActive: { backgroundColor: "rgba(255,255,255,0.10)" },
+  sessionActive: { backgroundColor: theme.glass.control.fill },
   sessionTitle: {
     color: theme.color.text,
     fontSize: theme.font.body,
@@ -298,6 +248,7 @@ const styles = StyleSheet.create({
     color: theme.color.textDim,
     fontSize: theme.font.small,
     lineHeight: 20,
-    paddingHorizontal: theme.space(3),
+    paddingHorizontal: theme.space(2),
+    paddingTop: theme.space(2),
   },
 });

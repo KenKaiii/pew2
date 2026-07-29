@@ -1,19 +1,18 @@
 /**
  * One rendered turn in the thread.
  *
- * User messages sit in a raised bubble on the right; agent output is plain text
- * on the canvas so long responses read like a document rather than a stack of
- * boxes. Each turn fades in once, which is enough to signal arrival without
- * moving text the user may already be reading.
+ * Both sides use the full reading rail and never show avatars. User prompts sit
+ * in one quiet raised surface; agent output remains plain text so long responses
+ * read like a document. Each new turn fades in once. Streamed chunks append to
+ * the same Text node, avoiding a fake typewriter delay or per-token layout churn.
  */
 import { useEffect, useRef } from "react";
 import { Animated, StyleSheet, Text, View } from "react-native";
 import { theme } from "../theme";
-import { Orb } from "./Orb";
 import { useReducedMotion } from "./useReducedMotion";
 import type { Turn as TurnModel } from "../useDaemon";
 
-export function Turn({ turn, color }: { turn: TurnModel; color?: string }) {
+export function Turn({ turn }: { turn: TurnModel }) {
   const appear = useRef(new Animated.Value(0)).current;
   const reduceMotion = useReducedMotion();
 
@@ -58,34 +57,28 @@ export function Turn({ turn, color }: { turn: TurnModel; color?: string }) {
 
   return (
     <Animated.View style={[styles.agentRow, { opacity: appear }]}>
-      <View style={styles.agentOrb}>
-        <Orb color={color} size={22} />
-      </View>
       <Text style={styles.agentText}>{text}</Text>
     </Animated.View>
   );
 }
 
 const styles = StyleSheet.create({
-  userRow: { alignItems: "flex-end" },
+  userRow: { width: "100%", alignItems: "stretch" },
   userBubble: {
-    maxWidth: "84%",
+    width: "100%",
     backgroundColor: theme.color.surfaceRaised,
     borderRadius: theme.radius.lg,
     paddingHorizontal: theme.space(3.5),
-    paddingVertical: theme.space(2.5),
+    paddingVertical: theme.space(2.75),
   },
   userText: {
     color: theme.color.text,
     fontSize: theme.font.body,
     lineHeight: theme.line.body,
   },
-  agentRow: { flexDirection: "row", gap: theme.space(2.5) },
-  // Centre the 22pt orb on the first 22pt line of text rather than letting it
-  // hang from the top edge.
-  agentOrb: { paddingTop: (theme.line.body - 22) / 2 },
+  agentRow: { width: "100%" },
   agentText: {
-    flex: 1,
+    width: "100%",
     color: theme.color.text,
     fontSize: theme.font.body,
     lineHeight: theme.line.body,
@@ -94,7 +87,7 @@ const styles = StyleSheet.create({
     color: theme.color.textDim,
     fontSize: theme.font.small,
     lineHeight: 20,
-    paddingLeft: theme.space(8),
+    paddingHorizontal: theme.space(1),
   },
   systemText: {
     color: theme.color.danger,
