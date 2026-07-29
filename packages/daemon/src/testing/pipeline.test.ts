@@ -88,6 +88,39 @@ test("a rejected request surfaces the agent's reason, not 'Internal error'", asy
   }
 }, 60_000);
 
+test("no session event ever precedes session.started", async () => {
+  // Through the real handler with the real echo agent. A client that saw an
+  // event first would drop it as an unknown session — the empty-resume bug.
+  const { Daemon } = await import("../index.js");
+  const { handleMessage } = await import("../handler.js");
+
+  const daemon = new Daemon({ id: "test", name: "test" }, true);
+  await daemon.refreshProviders();
+
+  const frames: any[] = [];
+  daemon.attach((message) => frames.push(message));
+
+  await handleMessage(
+    JSON.stringify({ t: "session.start", providerId: "echo", requestId: "r1" }),
+    {
+      daemon,
+      reply: (message) => frames.push(message),
+      broadcast: (message) => frames.push(message),
+    },
+  );
+
+  const started = frames.find((f) => f.t === "session.started");
+  expect(started).toBeDefined();
+  const events = frames.filter(
+    (f) => f.t === "session.event" && f.sessionId === started.sessionId,
+  );
+  for (const event of events) {
+    expect(frames.indexOf(event)).toBeGreaterThan(frames.indexOf(started));
+  }
+
+  daemon.closeAll();
+}, 60_000);
+
 test("replay after a cursor returns only newer events", () => {
   const log = new SessionLog("s");
   log.append({ n: 1 });

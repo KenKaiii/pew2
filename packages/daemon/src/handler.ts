@@ -114,6 +114,10 @@ export async function handleMessage(raw: string, ctx: HandlerContext): Promise<v
           // replace it with the live session instead of showing it twice.
           agentSessionId: message.agentSessionId,
         });
+        // The agent replayed the conversation's history during `session/load`,
+        // before this announce existed. Those events were held back; release
+        // them now that clients know the session.
+        daemon.markLive(sessionId);
         break;
       }
 
@@ -131,6 +135,9 @@ export async function handleMessage(raw: string, ctx: HandlerContext): Promise<v
           // connected app brings its own without any mapping here.
           configOptions: daemon.configOptions(sessionId),
         });
+        // Agents can emit updates during `session/new` itself; those were held
+        // back so no event ever precedes the session it belongs to.
+        daemon.markLive(sessionId);
         break;
       }
 

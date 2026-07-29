@@ -22,6 +22,17 @@ import { wire } from "@pew2/protocol";
 interface ActiveSession {
   handle: AcpSessionHandle;
   log: SessionLog;
+  /**
+   * Whether clients have been told this session exists.
+   *
+   * Agents replay a resumed conversation's history *during* `session/load` —
+   * before `connectProvider` resolves and long before the handler broadcasts
+   * `session.started`. Events sent that early are dropped by clients as unknown
+   * sessions, which is exactly how a resumed thread rendered empty. Until
+   * `markLive`, events accumulate in the log unsent; `markLive` then flushes
+   * them in order, after `session.started` has gone out.
+   */
+  live: boolean;
 }
 
 /** Everything a provider can tell us before a conversation is under way. */
@@ -89,6 +100,32 @@ export class Daemon {
     this.send(announce);
   }
 
+  /**
+   * Append to the session's log, sending only once the session is live.
+   *
+   * The log gets every event either way — seqs stay gapless, so the flush in
+   * `markLive` and the reconnect replay both see the complete history.
+   */
+  private record(session: ActiveSession, payload: unknown) {
+    const event = session.log.append(payload);
+    if (session.live) this.send(event);
+  }
+
+  /**
+   * Tell clients about everything a session has already produced.
+   *
+   * Callers broadcast `session.started` first; this is what guarantees a client
+   * never sees an event for a session it has not been introduced to.
+   */
+  markLive(sessionId: string) {
+    const session = this.sessions.get(sessionId);
+    if (!session || session.live) return;
+    session.live = true;
+    // `since(-1)` is the whole log: everything held back while the agent was
+    // connecting, replayed in seq order.
+    for (const event of session.log.since(-1)) this.send(event);
+  }
+
   async startSession(providerId: string, cwd: string): Promise<string> {
     const provider = this.providers.find((p) => p.manifest.id === providerId);
     if (!provider) throw new Error(`Unknown provider '${providerId}'`);
@@ -97,18 +134,28 @@ export class Daemon {
     // Assign our own session id up front so events are attributable even if the
     // agent's own `session/new` is slow or fails.
     const log = new SessionLog(`${providerId}-${Date.now().toString(36)}`);
+    // Registered before connecting so `record` has somewhere to hold events the
+    // agent emits during the handshake itself.
+    const session = { handle: undefined as unknown as AcpSessionHandle, log, live: false };
+    this.sessions.set(log.sessionId, session);
 
-    const handle = await connectProvider({
-      provider,
-      cwd,
-      onUpdate: (payload) => this.send(log.append(payload)),
-      onPermissionRequest: ({ requestId, params }) =>
-        this.send(log.append({ kind: "permission_request", requestId, params })),
-      onStderr: (line) => console.error(`[${providerId}] ${line}`),
-      onExit: (code) => this.send(log.append({ kind: "exit", code })),
-    });
+    try {
+      session.handle = await connectProvider({
+        provider,
+        cwd,
+        onUpdate: (payload) => this.record(session, payload),
+        onPermissionRequest: ({ requestId, params }) =>
+          this.record(session, { kind: "permission_request", requestId, params }),
+        onStderr: (line) => console.error(`[${providerId}] ${line}`),
+        onExit: (code) => this.record(session, { kind: "exit", code }),
+      });
+    } catch (error) {
+      // A session that never connected has no history worth keeping, and
+      // leaving it registered would answer prompts with a broken handle.
+      this.sessions.delete(log.sessionId);
+      throw error;
+    }
 
-    this.sessions.set(log.sessionId, { handle, log });
     return log.sessionId;
   }
 
@@ -185,18 +232,28 @@ export class Daemon {
     if (!isAvailable(provider)) throw new Error(unavailableReason(provider)!);
 
     const log = new SessionLog(`${providerId}-${Date.now().toString(36)}`);
-    const handle = await connectProvider({
-      provider,
-      cwd,
-      loadSessionId: agentSessionId,
-      onUpdate: (payload) => this.send(log.append(payload)),
-      onPermissionRequest: ({ requestId, params }) =>
-        this.send(log.append({ kind: "permission_request", requestId, params })),
-      onStderr: (line) => console.error(`[${providerId}] ${line}`),
-      onExit: (code) => this.send(log.append({ kind: "exit", code })),
-    });
+    const session = { handle: undefined as unknown as AcpSessionHandle, log, live: false };
+    this.sessions.set(log.sessionId, session);
 
-    this.sessions.set(log.sessionId, { handle, log });
+    try {
+      // `session/load` replays the whole conversation here, before returning —
+      // every one of those events lands in the log unsent, and `markLive`
+      // delivers them after `session.started`.
+      session.handle = await connectProvider({
+        provider,
+        cwd,
+        loadSessionId: agentSessionId,
+        onUpdate: (payload) => this.record(session, payload),
+        onPermissionRequest: ({ requestId, params }) =>
+          this.record(session, { kind: "permission_request", requestId, params }),
+        onStderr: (line) => console.error(`[${providerId}] ${line}`),
+        onExit: (code) => this.record(session, { kind: "exit", code }),
+      });
+    } catch (error) {
+      this.sessions.delete(log.sessionId);
+      throw error;
+    }
+
     return log.sessionId;
   }
 
