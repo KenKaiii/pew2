@@ -93,8 +93,10 @@ test("a session adopts the warm spare instead of spawning again", async () => {
   const daemon = new Daemon({ id: "test", name: "test" }, true);
   await daemon.refreshProviders();
 
-  // The probe leaves its booted agent behind as the spare.
-  const caps = await daemon.probeProvider("echo");
+  // The probe leaves its booted agent behind as the spare. Forced live: a
+  // disk-cached probe from an earlier run would answer without spawning, and
+  // there would be no spare to adopt.
+  await daemon.probeProvider("echo", { refresh: true });
   const spare = (daemon as any).spares.get("echo")?.handle;
   expect(spare).toBeDefined();
 
