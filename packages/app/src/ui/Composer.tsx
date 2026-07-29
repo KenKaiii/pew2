@@ -21,6 +21,7 @@ import { Animated, Pressable, StyleSheet, TextInput, View } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { theme } from "../theme";
 import { touchSlop } from "./controls";
+import { haptics } from "./haptics";
 import { Glass } from "./Glass";
 import { useReducedMotion } from "./useReducedMotion";
 
@@ -223,7 +224,17 @@ export function Composer({
                 accessibilityLabel={busy ? "Stop generating" : "Send message"}
                 accessibilityState={{ disabled: !busy && !hasText }}
                 hitSlop={touchSlop(BUTTON)}
-                onPress={busy ? onStop : onSend}
+                // Sending commits work to another machine, so it lands heavier
+                // than a navigation tap; stopping is a correction, not a commit.
+                onPress={() => {
+                  if (busy) {
+                    haptics.warned();
+                    onStop?.();
+                    return;
+                  }
+                  haptics.sent();
+                  onSend();
+                }}
                 disabled={!busy && !hasText}
                 style={({ pressed }) => [
                   styles.actionButton,

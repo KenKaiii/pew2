@@ -120,7 +120,10 @@ export class PairingRoom extends DurableObject {
           );
         }
       }
-      return;
+      // Deliberately falls through rather than returning: `hello` is also the
+      // only signal the daemon gets that an app has joined. The daemon dialled
+      // in long before, so without this it never re-announces its providers and
+      // the phone shows an empty app list forever.
     }
 
     // Otherwise relay to the opposite role. Daemons talk to apps, apps to daemons.

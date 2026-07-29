@@ -8,7 +8,7 @@
  * The approval sheet is the reason this app exists, so it is a blocking,
  * unmissable surface rather than an inline row that can scroll away.
  */
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Animated,
   Easing,
@@ -30,24 +30,108 @@ import { Orb } from "./src/ui/Orb";
 import { Composer } from "./src/ui/Composer";
 import { Turn } from "./src/ui/Turn";
 import { CircleButton, Pill } from "./src/ui/controls";
+import { haptics } from "./src/ui/haptics";
 import { Sidebar, DRAWER_WIDTH } from "./src/ui/Sidebar";
 import { ConfigPicker, summarise, valueName } from "./src/ui/ConfigPicker";
 import { useReducedMotion } from "./src/ui/useReducedMotion";
 import { withLayoutX, type PillX } from "./src/ui/pillAnchor";
-
-// The simulator shares the host's network, so localhost reaches the daemon.
-const DAEMON_URL = "ws://localhost:8787";
+import { PairingScreen } from "./src/ui/PairingScreen";
+import { LaunchScreen } from "./src/ui/LaunchScreen";
+import { clearPairing, loadPairing, savePairing, type Pairing } from "./src/pairing";
+import {
+  useFonts,
+  BitcountPropSingle_400Regular,
+  BitcountPropSingle_600SemiBold,
+  BitcountPropSingle_700Bold,
+} from "@expo-google-fonts/bitcount-prop-single";
 
 export default function App() {
+  const [fontsLoaded] = useFonts({
+    BitcountPropSingle_400Regular,
+    BitcountPropSingle_600SemiBold,
+    BitcountPropSingle_700Bold,
+  });
+
+  // Hold on the canvas colour rather than rendering with the fallback face:
+  // the two have different metrics, so titles would visibly reflow the moment
+  // the display font arrives.
+  if (!fontsLoaded) {
+    return (
+      <SafeAreaProvider>
+        <View style={{ flex: 1, backgroundColor: theme.color.bg }} />
+      </SafeAreaProvider>
+    );
+  }
+
   return (
     <SafeAreaProvider>
-      <Pew2 />
+      <Root />
     </SafeAreaProvider>
   );
 }
 
-function Pew2() {
-  const daemon = useDaemon(DAEMON_URL);
+/**
+ * Pairing gate.
+ *
+ * The daemon's address is a secret held in the keychain, so it is not known
+ * until an async read completes. Rendering the conversation before then would
+ * open a socket to nowhere, so this holds a neutral screen for the frame it
+ * takes, and shows the pairing screen when nothing is stored.
+ */
+function Root() {
+  const [pairing, setPairing] = useState<Pairing | null>(null);
+  const [checked, setChecked] = useState(false);
+  // Whether the user has moved past the launch screen. Not persisted: it only
+  // exists between opening the app and pairing, and a stored pairing skips it
+  // entirely.
+  const [connecting, setConnecting] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    loadPairing().then((stored) => {
+      if (!alive) return;
+      setPairing(stored);
+      setChecked(true);
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const pair = useCallback((next: Pairing) => {
+    // Connect regardless of whether the keychain accepted it. A locked or
+    // unavailable keychain costs the user a re-pair next launch; blocking on it
+    // would strand them on this screen with a spinner and no way forward.
+    savePairing(next)
+      .catch(() => {})
+      .then(() => setPairing(next));
+  }, []);
+
+  const unpair = useCallback(() => {
+    // Same reasoning inverted: forget it locally even if the delete failed, or
+    // "Disconnect" would appear to do nothing.
+    clearPairing()
+      .catch(() => {})
+      .then(() => {
+        setPairing(null);
+        // Back to the launch screen rather than straight to the form, so
+        // disconnecting lands somewhere deliberate.
+        setConnecting(false);
+      });
+  }, []);
+
+  if (!checked) return <View style={{ flex: 1, backgroundColor: theme.color.bg }} />;
+  // A paired device never sees the launch screen: it has a machine already, and
+  // an extra tap on every cold start would be pure friction.
+  if (pairing) return <Pew2 pairing={pairing} onUnpair={unpair} />;
+  if (!connecting) return <LaunchScreen onConnect={() => setConnecting(true)} />;
+  return <PairingScreen onPaired={pair} onBack={() => setConnecting(false)} />;
+}
+
+function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void }) {
+  // The relay identifies devices by this, and it must match the id baked into
+  // the stored pairing URL or the two look like different clients.
+  const daemon = useDaemon(pairing.url, pairing.deviceId);
   const [draft, setDraft] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
   // Which pill's menu is open, and where that pill sits, so the menu opens
@@ -77,6 +161,45 @@ function Pew2() {
   useEffect(() => {
     if (inThread) scroller.current?.scrollToEnd({ animated: !reduceMotion });
   }, [daemon.turns, daemon.busy, inThread, reduceMotion]);
+
+  // Feedback for things that happen on their own, rather than because a finger
+  // touched the screen. This is the point of a remote control: the agent runs
+  // for minutes on another machine, and the phone is usually in a pocket. Each
+  // effect compares against the previous value so nothing fires on mount.
+
+  // A turn landed. The single most useful pulse in the app.
+  const wasBusy = useRef(false);
+  useEffect(() => {
+    const finished = wasBusy.current && !daemon.busy;
+    wasBusy.current = daemon.busy;
+    if (!finished) return;
+    // A turn that ended in an error already pulsed as a failure below; a success
+    // buzz on top of it would contradict what the screen says.
+    const last = daemon.turns[daemon.turns.length - 1];
+    if (last?.role !== "system") haptics.finished();
+  }, [daemon.busy, daemon.turns]);
+
+  // The agent is blocked on an approval and cannot continue without one.
+  const lastPermissionId = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    const requestId = daemon.permission?.requestId;
+    if (requestId && requestId !== lastPermissionId.current) haptics.attention();
+    lastPermissionId.current = requestId;
+  }, [daemon.permission]);
+
+  // Something failed. Keyed by role as well as id, because a duplicated error is
+  // promoted in place rather than appended, which leaves the id unchanged.
+  const lastTurnKey = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    const last = daemon.turns[daemon.turns.length - 1];
+    const key = last && `${last.id}:${last.role}`;
+    const changed = key !== undefined && key !== lastTurnKey.current;
+    // Seed on first render so an error already on screen from a replayed
+    // session does not buzz every time the component mounts.
+    const seeded = lastTurnKey.current !== undefined;
+    lastTurnKey.current = key;
+    if (seeded && changed && last?.role === "system") haptics.failed();
+  }, [daemon.turns]);
 
   // Push, not overlay: the conversation slides right to uncover the drawer, so
   // both surfaces stay part of one layout instead of becoming a modal layer.
@@ -135,6 +258,9 @@ function Pew2() {
           daemon.leave();
           setMenuOpen(false);
         }}
+        machineLabel={pairing.label}
+        machineRemote={pairing.remote}
+        onUnpair={onUnpair}
       />
 
       {/* The conversation pane. Slides right to reveal the drawer beneath. */}
@@ -300,7 +426,10 @@ function Pew2() {
           style={StyleSheet.absoluteFill}
           accessibilityRole="button"
           accessibilityLabel="Close menu"
-          onPress={() => setMenuOpen(false)}
+          onPress={() => {
+            haptics.tap();
+            setMenuOpen(false);
+          }}
         />
       )}
 
@@ -323,7 +452,13 @@ function Pew2() {
                     key={option.optionId}
                     accessibilityRole="button"
                     accessibilityLabel={option.name}
-                    onPress={() => daemon.answer(requestId, option.optionId)}
+                    // Approving hands real capability to the agent, so the two
+                    // answers must not feel identical under the thumb.
+                    onPress={() => {
+                      if (deny) haptics.warned();
+                      else haptics.sent();
+                      daemon.answer(requestId, option.optionId);
+                    }}
                     style={({ pressed }) => [
                       styles.sheetButton,
                       deny ? styles.sheetDeny : styles.sheetAllow,
@@ -456,8 +591,10 @@ const styles = StyleSheet.create({
   },
   greetingText: {
     color: theme.color.text,
+    fontFamily: theme.display.regular,
     fontSize: theme.font.greeting,
     lineHeight: theme.line.greeting,
+    letterSpacing: 0.3,
     textAlign: "center",
   },
 

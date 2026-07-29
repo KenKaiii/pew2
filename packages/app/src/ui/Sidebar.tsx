@@ -15,6 +15,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { theme } from "../theme";
 import { Orb } from "./Orb";
 import { touchSlop } from "./controls";
+import { haptics } from "./haptics";
 import type { Provider, Session } from "../useDaemon";
 
 export const DRAWER_WIDTH = Math.min(Dimensions.get("window").width * 0.82, 330);
@@ -28,6 +29,11 @@ interface SidebarProps {
   onSelectProvider: (id: string) => void;
   onOpenSession: (id: string) => void;
   onNewConversation: () => void;
+  /** Host and port of the paired machine. Never the token. */
+  machineLabel: string;
+  /** True when reached via a relay, so it works away from home. */
+  machineRemote: boolean;
+  onUnpair: () => void;
 }
 
 export function Sidebar({
@@ -39,6 +45,9 @@ export function Sidebar({
   onSelectProvider,
   onOpenSession,
   onNewConversation,
+  machineLabel,
+  machineRemote,
+  onUnpair,
 }: SidebarProps) {
   const insets = useSafeAreaInsets();
 
@@ -62,7 +71,10 @@ export function Sidebar({
               accessibilityRole="button"
               accessibilityLabel="New conversation"
               hitSlop={touchSlop(theme.size.control)}
-              onPress={onNewConversation}
+              onPress={() => {
+                haptics.tap();
+                onNewConversation();
+              }}
               style={({ pressed }) => [styles.newButton, pressed && styles.pressed]}
             >
               <Ionicons name="create-outline" size={18} color={theme.color.text} />
@@ -91,7 +103,10 @@ export function Sidebar({
                   selected: provider.id === activeProviderId,
                   disabled: !provider.available,
                 }}
-                onPress={() => onSelectProvider(provider.id)}
+                onPress={() => {
+                  haptics.select();
+                  onSelectProvider(provider.id);
+                }}
                 style={({ pressed }) => [
                   styles.agentChip,
                   provider.id === activeProviderId && styles.agentChipActive,
@@ -125,7 +140,10 @@ export function Sidebar({
                   accessibilityRole="button"
                   accessibilityLabel={session.title}
                   accessibilityState={{ selected: session.id === activeSessionId }}
-                  onPress={() => onOpenSession(session.id)}
+                  onPress={() => {
+                    haptics.tap();
+                    onOpenSession(session.id);
+                  }}
                   style={({ pressed }) => [
                     styles.session,
                     session.id === activeSessionId && styles.sessionActive,
@@ -143,12 +161,53 @@ export function Sidebar({
               ))
             )}
           </ScrollView>
+
+          {/* Which machine this phone is driving. Easy to lose track of once
+              more than one has been paired, and the only way to undo it. */}
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={`Paired with ${machineLabel}, ${
+              machineRemote ? "reachable from anywhere" : "same network only"
+            }. Double tap to disconnect.`}
+            // Unpairing is the one destructive action in the drawer, so it is
+            // the one that must not feel like an ordinary tap.
+            onPress={() => {
+              haptics.warned();
+              onUnpair();
+            }}
+            style={({ pressed }) => [styles.machine, pressed && styles.pressed]}
+          >
+            <Ionicons
+              // Whether this works away from home is the single most useful
+              // fact about a pairing, so it is the icon rather than a footnote.
+              name={machineRemote ? "globe-outline" : "wifi-outline"}
+              size={14}
+              color={theme.color.textFaint}
+            />
+            <Text style={styles.machineText} numberOfLines={1}>
+              {machineLabel}
+            </Text>
+            <Text style={styles.machineAction}>Disconnect</Text>
+          </Pressable>
       </View>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
+  machine: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.space(2),
+    marginHorizontal: theme.gutter,
+    marginTop: theme.space(2),
+    paddingTop: theme.space(3),
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: theme.color.border,
+  },
+  machineText: { color: theme.color.textFaint, fontSize: 12, flex: 1 },
+  machineAction: { color: theme.color.textFaint, fontSize: 12 },
+
   // The drawer is the lower layer: it stays put while the conversation slides
   // right to reveal it, so it needs no transform of its own.
   panel: {
@@ -172,8 +231,9 @@ const styles = StyleSheet.create({
   },
   headerTitle: {
     color: theme.color.text,
+    fontFamily: theme.display.bold,
     fontSize: theme.font.title,
-    fontWeight: "700",
+    letterSpacing: 0.4,
   },
   newButton: {
     width: theme.size.control,

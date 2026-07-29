@@ -123,6 +123,24 @@ export const theme = {
     greeting: 20,
   },
 
+  /**
+   * Display family, for main titles only.
+   *
+   * Bitcount Prop Single is a dot-matrix face: it carries the brand at heading
+   * size but is unreadable in a paragraph, so body copy, agent output and
+   * controls stay on the system font. Named here so the family string is
+   * written once and every title changes together.
+   *
+   * Only applied once `useFonts` reports loaded. Naming an unloaded family on
+   * iOS silently falls back with different metrics, which shifts layout after
+   * the font arrives.
+   */
+  display: {
+    regular: "BitcountPropSingle_400Regular",
+    semibold: "BitcountPropSingle_600SemiBold",
+    bold: "BitcountPropSingle_700Bold",
+  },
+
   line: {
     body: 22,
     greeting: 28,

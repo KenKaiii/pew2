@@ -9,6 +9,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { Readable, Writable } from "node:stream";
 import { client, ndJsonStream, type ClientConnection } from "@agentclientprotocol/sdk";
 import type { LoadedProvider } from "../providers/registry.js";
+import { humanError } from "../errors.js";
 
 /**
  * A session-level selector advertised by the agent: model, thinking level, mode.
@@ -350,10 +351,15 @@ export async function connectProvider(options: ConnectOptions): Promise<AcpSessi
         // The agent replies with the complete list, so trust it over local state.
         return normaliseConfigOptions(result?.configOptions);
       } catch (error) {
-        // JSON-RPC errors surface as a bare "Internal error", which says nothing
-        // about which option failed. Name it so the log is actionable.
-        const detail = error instanceof Error ? error.message : String(error);
-        throw new Error(`Could not set '${configId}' to '${String(value)}': ${detail}`);
+        // The agent's real reason travels in the JSON-RPC `data`, so reading
+        // `.message` here would substitute a bare "Internal error" and throw
+        // the explanation away before anyone could see it.
+        const detail = humanError(error);
+        // Name the option only when the agent's own wording does not, so the
+        // message stays one short sentence instead of saying it twice.
+        throw new Error(
+          detail.includes(configId) ? detail : `Could not set '${configId}': ${detail}`,
+        );
       }
     },
     prompt: (text: string) =>

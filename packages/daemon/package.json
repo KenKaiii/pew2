@@ -9,6 +9,7 @@
   "dependencies": {
     "@agentclientprotocol/sdk": "^1.3.0",
     "@pew2/protocol": "workspace:*",
+    "toqr": "^0.1.1",
     "zod": "^3.24.1"
   }
 }

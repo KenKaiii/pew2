@@ -12,9 +12,17 @@
  * conversation at once.
  */
 import { Daemon } from "./index.js";
+import { loadPairing, pairingUrl, qrCode, tokenMatches } from "./pairing.js";
+import { handleMessage } from "./handler.js";
+import { RelayClient } from "./relay-client.js";
+import { hostname } from "node:os";
 import type { ServerWebSocket } from "bun";
 
 const PORT = Number(process.env.PEW2_PORT ?? 8787);
+
+// Minted on first run and reused thereafter, so restarting the daemon does not
+// unpair the phone.
+const pairing = await loadPairing();
 
 // PEW2_EXPERIMENTAL=1 also surfaces test fixtures such as the echo agent.
 const daemon = new Daemon(
@@ -35,7 +43,32 @@ function broadcast(message: unknown) {
   }
 }
 
-daemon.attach(broadcast);
+/**
+ * Outbound relay connection, when one is configured.
+ *
+ * This is what lifts pew2 off the local network: the daemon dials out, so the
+ * phone can be on a mobile network on the other side of the world and still
+ * reach this machine. Without it, pairing only works on the same Wi-Fi.
+ */
+const relay = pairing.relay
+  ? new RelayClient({
+      daemon,
+      url: pairing.relay,
+      token: pairing.token,
+      deviceId: hostname(),
+      onStatus: (status, detail) =>
+        console.log(`[relay] ${status}${detail ? ` — ${detail}` : ""}`),
+    })
+  : null;
+
+// One fan-out point for both transports. The daemon owns the log precisely so
+// that a phone on 5G and a desktop on the LAN see the same conversation.
+daemon.attach((message) => {
+  broadcast(message);
+  relay?.send(message);
+});
+
+relay?.start();
 
 const { errors } = await daemon.refreshProviders();
 for (const error of errors) console.error(error.message);
@@ -44,19 +77,25 @@ function send(ws: ServerWebSocket<unknown>, message: unknown) {
   ws.send(JSON.stringify(message));
 }
 
-function fail(ws: ServerWebSocket<unknown>, code: string, error: unknown) {
-  const message = error instanceof Error ? error.message : String(error);
-  console.error(`[${code}] ${message}`);
-  send(ws, { t: "error", code, message });
-}
-
 const server = Bun.serve({
   port: PORT,
   hostname: "0.0.0.0",
 
   fetch(request, server) {
     const url = new URL(request.url);
+
+    // Unauthenticated on purpose: `doctor` uses it to tell "not running" from
+    // "running but unpaired", and it reveals nothing.
     if (url.pathname === "/health") return Response.json({ ok: true });
+
+    // The token is the only thing standing between the open network and every
+    // agent on this machine, so it is checked before the upgrade rather than in
+    // the first message: an unpaired socket is never established at all.
+    if (!tokenMatches(pairing.token, url.searchParams.get("token"))) {
+      console.error(`[pairing] rejected connection from ${server.requestIP(request)?.address ?? "unknown"}`);
+      return new Response("pairing token required", { status: 401 });
+    }
+
     if (server.upgrade(request)) return undefined;
     return new Response("expected websocket upgrade", { status: 426 });
   },
@@ -76,140 +115,35 @@ const server = Bun.serve({
     async message(ws, raw) {
       if (typeof raw !== "string") return;
 
-      let message: {
-        t?: string;
-        providerId?: string;
-        cwd?: string;
-        sessionId?: string;
-        text?: string;
-        requestId?: string;
-        optionId?: string;
-        configId?: string;
-        value?: string | boolean;
-        agentSessionId?: string;
-        refresh?: boolean;
-      };
-      try {
-        message = JSON.parse(raw);
-      } catch {
-        return fail(ws, "bad_json", "Message was not valid JSON");
-      }
-
-      try {
-        switch (message.t) {
-          case "hello":
-            // Handshake. The provider list is pushed on connect, so there is
-            // nothing to do beyond accepting it.
-            break;
-
-          case "provider.capabilities": {
-            // What does this app offer right now, and what has it already been
-            // used for? Both come from the agent itself, so the reply reflects
-            // the installed version rather than anything baked into pew2.
-            if (!message.providerId) throw new Error("providerId required");
-            const providerId = message.providerId;
-            const capabilities = await daemon.probeProvider(providerId, {
-              refresh: message.refresh === true,
-            });
-            send(ws, { t: "provider.capabilities", providerId, ...capabilities });
-            break;
-          }
-
-          case "session.resume": {
-            // Reopen a conversation the agent already had on disk, including
-            // ones this app never started.
-            if (!message.providerId || !message.agentSessionId) {
-              throw new Error("providerId and agentSessionId required");
-            }
-            const sessionId = await daemon.resumeSession(
-              message.providerId,
-              message.agentSessionId,
-              message.cwd ?? process.cwd(),
-            );
-            broadcast({
-              t: "session.started",
-              sessionId,
-              providerId: message.providerId,
-              configOptions: daemon.configOptions(sessionId),
-              resumed: true,
-              // Clients list the agent's copy as a stub; this is what lets them
-              // replace it with the live session instead of showing it twice.
-              agentSessionId: message.agentSessionId,
-            });
-            break;
-          }
-
-          case "session.start": {
-            if (!message.providerId) throw new Error("providerId required");
-            const sessionId = await daemon.startSession(
-              message.providerId,
-              message.cwd ?? process.cwd(),
-            );
-            broadcast({
-              t: "session.started",
-              sessionId,
-              providerId: message.providerId,
-              // Models and thinking levels come from the agent itself, so a
-              // newly connected app brings its own without any mapping here.
-              configOptions: daemon.configOptions(sessionId),
-            });
-            break;
-          }
-          case "session.prompt": {
-            if (!message.sessionId || message.text === undefined) {
-              throw new Error("sessionId and text required");
-            }
-            // Deliberately not awaited: a turn can run for minutes, and the
-            // client is driven by streamed events rather than this reply.
-            const sessionId = message.sessionId;
-            daemon
-              .prompt(sessionId, message.text)
-              .catch((error) => fail(ws, "prompt_failed", error))
-              // Tell every client the turn is over, so they can stop showing a
-              // working indicator. Broadcast, not reply: other devices watching
-              // this session need it too.
-              .finally(() => broadcast({ t: "session.idle", sessionId }));
-            break;
-          }
-          case "session.cancel": {
-            if (!message.sessionId) throw new Error("sessionId required");
-            await daemon.cancel(message.sessionId);
-            break;
-          }
-          case "session.config": {
-            if (!message.sessionId || !message.configId || message.value === undefined) {
-              throw new Error("sessionId, configId and value required");
-            }
-            broadcast({
-              t: "session.config",
-              sessionId: message.sessionId,
-              configOptions: await daemon.setConfigOption(
-                message.sessionId,
-                message.configId,
-                message.value,
-              ),
-            });
-            break;
-          }
-
-          case "session.permission": {
-            if (!message.sessionId || !message.requestId || !message.optionId) {
-              throw new Error("sessionId, requestId and optionId required");
-            }
-            daemon.answerPermission(message.sessionId, message.requestId, message.optionId);
-            break;
-          }
-          default:
-            throw new Error(`Unknown message type '${message.t}'`);
-        }
-      } catch (error) {
-        fail(ws, "command_failed", error);
-      }
+      // Shared with the relay transport, so a message type can never work on
+      // one path and not the other.
+      await handleMessage(raw, {
+        daemon,
+        reply: (message) => send(ws, message),
+        broadcast: (message) => {
+          broadcast(message);
+          relay?.send(message);
+        },
+      });
     },
   },
 });
 
-console.log(`pew2 daemon listening on ws://localhost:${server.port}`);
+const url = pairingUrl({
+  token: pairing.token,
+  port: server.port ?? PORT,
+  relay: pairing.relay,
+});
+const qr = await qrCode(url);
+
+console.log(`\npew2 daemon listening on port ${server.port}\n`);
+if (qr) console.log(`${qr}\n`);
+console.log(`Scan this, or paste into the app:\n  ${url}\n`);
+console.log(
+  pairing.relay
+    ? `Works from anywhere via ${pairing.relay}\n`
+    : `Same network only. For anywhere: pew2 relay <url>\n`,
+);
 
 // A misbehaving agent process must never take the daemon down with it; every
 // client would lose its session.
@@ -217,6 +151,7 @@ process.on("uncaughtException", (error) => console.error("[uncaught]", error));
 process.on("unhandledRejection", (error) => console.error("[unhandled]", error));
 
 process.on("SIGINT", () => {
+  relay?.stop();
   daemon.closeAll();
   process.exit(0);
 });

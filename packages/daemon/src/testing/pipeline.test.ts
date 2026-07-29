@@ -65,6 +65,29 @@ test("permission request round-trips through the client", async () => {
   expect(text).toContain("You chose: allow");
 }, 60_000);
 
+test("a rejected request surfaces the agent's reason, not 'Internal error'", async () => {
+  const handle = await connectProvider({
+    provider: await echoProvider(),
+    cwd: process.cwd(),
+    onUpdate: () => {},
+    onPermissionRequest: () => {},
+  });
+
+  try {
+    // The SDK wraps a thrown agent error as a JSON-RPC "Internal error" and
+    // hides the real sentence in `data`. Reading the top-level message instead
+    // is what put a useless label — or a JSON blob — on the phone.
+    const failure = await handle
+      .setConfigOption("model", "not-a-real-model")
+      .then(() => undefined)
+      .catch((error: Error) => error.message);
+
+    expect(failure).toBe("Invalid value 'not-a-real-model' for 'model'");
+  } finally {
+    handle.close();
+  }
+}, 60_000);
+
 test("replay after a cursor returns only newer events", () => {
   const log = new SessionLog("s");
   log.append({ n: 1 });

@@ -9,6 +9,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { USE_FIXTURES, isFixtureSession, sampleSessions } from "./fixtures";
 import { mergeAgentSessions } from "./agentHistory";
+import { advance, alreadySeen, type Cursors } from "./cursors";
+import { findDuplicateError } from "./errorDedup";
 
 export type Status = "connecting" | "online" | "offline";
 
@@ -131,12 +133,21 @@ function readChunk(payload: any): { role: Turn["role"]; text: string } | undefin
     return { role: "user", text: payload.text ?? "" };
   }
   if (payload?.kind === "exit") {
-    return { role: "system", text: `Agent exited (code ${payload.code ?? "?"})` };
+    // Closing a session kills the child, so a clean or signalled exit is the
+    // normal end of a conversation. Reporting it in red said "something broke"
+    // every time the user simply finished. Only a non-zero code is a failure.
+    if (typeof payload.code !== "number" || payload.code === 0) return undefined;
+    return { role: "system", text: `The agent stopped unexpectedly (code ${payload.code})` };
   }
   return undefined;
 }
 
-export function useDaemon(url: string) {
+/**
+ * @param deviceId Identifies this phone to the relay, which uses it to tell
+ * devices apart. Falls back to a constant so a direct LAN connection, where the
+ * daemon does not care, still works.
+ */
+export function useDaemon(url: string, deviceId = "phone") {
   const [state, setState] = useState<State>({
     status: "connecting",
     providers: [],
@@ -177,6 +188,14 @@ export function useDaemon(url: string) {
   // Providers already asked for capabilities, so a reconnect's repeat provider
   // announcement does not spawn another probe for each one.
   const probed = useRef(new Set<string>());
+  // Highest `seq` seen per session.
+  //
+  // This is what makes reconnecting gap-free. ACP does not replay messages
+  // emitted while a client was away, so the relay stores them and hands back
+  // everything after the cursor. On a phone this is not an edge case: the
+  // socket dies every time the app is backgrounded or the network changes, and
+  // without a cursor the tail of every interrupted turn is lost for good.
+  const cursors = useRef<Cursors>({});
   // Mirrors state.sessions so openSession can look one up without doing that
   // work inside a state updater.
   const sessionsRef = useRef<Session[]>(state.sessions);
@@ -199,7 +218,16 @@ export function useDaemon(url: string) {
       ws.onopen = () => {
         attempts.current = 0;
         setState((s) => ({ ...s, status: "online" }));
-        ws.send(JSON.stringify({ t: "hello", wire: 1, role: "app", deviceId: "sim", cursors: {} }));
+        ws.send(
+          JSON.stringify({
+            t: "hello",
+            wire: 1,
+            role: "app",
+            deviceId,
+            // "Everything after this, please." Empty on a first connection.
+            cursors: cursors.current,
+          }),
+        );
       };
 
       ws.onmessage = (event) => {
@@ -208,6 +236,26 @@ export function useDaemon(url: string) {
           message = JSON.parse(event.data as string);
         } catch {
           return;
+        }
+
+        // Replayed history after a reconnect. Each event is fed back through
+        // this same handler, so there is no second rendering path to keep in
+        // step and the cursor advances identically.
+        if (message.t === "session.replay" && Array.isArray(message.events)) {
+          for (const event of message.events) {
+            ws.onmessage?.({ data: JSON.stringify(event) } as MessageEvent);
+          }
+          return;
+        }
+
+        // Advance the cursor here, as the message arrives, for the same reason
+        // the session ref is tracked here: updaters must stay pure.
+        if (message.t === "session.event" && typeof message.seq === "number") {
+          // Replay and the live stream overlap, so an event received just
+          // before the socket dropped can arrive again. Rendering it twice
+          // would duplicate agent output on screen.
+          if (alreadySeen(cursors.current, message.sessionId, message.seq)) return;
+          cursors.current = advance(cursors.current, message.sessionId, message.seq);
         }
 
         // Track the live session id here, as the message arrives, rather than
@@ -409,7 +457,19 @@ export function useDaemon(url: string) {
               return { ...prev, turns, sessions, busy: chunk.role !== "system" };
             }
 
-            case "error":
+            case "error": {
+              // Agents usually stream a failure as message text and then reject
+              // the turn, so the same sentence arrives twice. Promote the copy
+              // already on screen instead of appending a second one: the user
+              // sees it once, and in the colour that says it failed.
+              const duplicate = findDuplicateError(prev.turns, message.message);
+              if (duplicate >= 0) {
+                const turns = [...prev.turns];
+                // Keep the agent's own wording, which may carry more context
+                // than the rejection; only its severity was wrong.
+                turns[duplicate] = { ...turns[duplicate]!, role: "system" };
+                return { ...prev, busy: false, turns };
+              }
               return {
                 ...prev,
                 busy: false,
@@ -424,6 +484,7 @@ export function useDaemon(url: string) {
                   },
                 ],
               };
+            }
 
             default:
               return prev;

@@ -4,11 +4,28 @@
  * Every interactive surface in the app is one of these three shapes, so press
  * feedback, radii, touch targets and disabled treatment stay identical
  * everywhere rather than being re-styled per screen.
+ *
+ * That includes touch feedback: because every button routes through here, a tap
+ * feels the same app-wide without a single call site opting in.
  */
 import type { ReactNode } from "react";
 import { Pressable, StyleSheet, Text, View, type ViewStyle } from "react-native";
 import { theme } from "../theme";
 import { Glass } from "./Glass";
+import { haptics } from "./haptics";
+
+/**
+ * Wrap a press handler so it pulses first.
+ *
+ * `feel` lets a control say what its press means — sending is not the same
+ * event as opening a menu — while defaulting to the ordinary tap.
+ */
+function withHaptic(onPress: () => void, feel: () => void = haptics.tap) {
+  return () => {
+    feel();
+    onPress();
+  };
+}
 
 /** Expands a sub-44pt control to the platform minimum touch target. */
 export function touchSlop(size: number) {
@@ -24,6 +41,8 @@ interface CircleButtonProps {
   disabled?: boolean;
   tint?: string;
   style?: ViewStyle;
+  /** Override the press sensation, for controls that commit rather than open. */
+  feel?: () => void;
 }
 
 /** Round icon button: menu, send, composer actions. */
@@ -35,12 +54,15 @@ export function CircleButton({
   disabled = false,
   tint,
   style,
+  feel,
 }: CircleButtonProps) {
+  const press = withHaptic(onPress, feel);
+
   // A solid tint opts out of glass: used where a control must read as filled.
   if (tint) {
     return (
       <Pressable
-        onPress={onPress}
+        onPress={press}
         disabled={disabled}
         accessibilityRole="button"
         accessibilityLabel={label}
@@ -62,7 +84,7 @@ export function CircleButton({
   return (
     <Glass radius={size / 2} style={[{ width: size, height: size }, style]}>
       <Pressable
-        onPress={onPress}
+        onPress={press}
         disabled={disabled}
         accessibilityRole="button"
         accessibilityLabel={label}
@@ -86,10 +108,12 @@ interface PillProps {
   label: string;
   children: ReactNode;
   disabled?: boolean;
+  /** Override the press sensation. */
+  feel?: () => void;
 }
 
 /** Horizontal pill: the provider selector and the quick-action chips. */
-export function Pill({ onPress, label, children, disabled = false }: PillProps) {
+export function Pill({ onPress, label, children, disabled = false, feel }: PillProps) {
   const content = <View style={styles.pillRow}>{children}</View>;
 
   if (!onPress) {
@@ -105,7 +129,7 @@ export function Pill({ onPress, label, children, disabled = false }: PillProps) 
   return (
     <Glass radius={theme.radius.pill} style={styles.pillGlass}>
       <Pressable
-        onPress={onPress}
+        onPress={withHaptic(onPress, feel)}
         disabled={disabled}
         accessibilityRole="button"
         accessibilityLabel={label}

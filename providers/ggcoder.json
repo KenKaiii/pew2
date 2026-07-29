@@ -1,0 +1,19 @@
+{
+  "$schema": "../schemas/provider.schema.json",
+  "id": "ggcoder",
+  "name": "GG Coder",
+  "version": "1.0.0",
+  "description": "GG Coder's own ACP mode. Speaks the protocol natively - no adapter process.",
+  "distribution": {
+    "type": "command",
+    "command": "ggcoder",
+    "args": ["acp"]
+  },
+  "repository": "https://github.com/kenkaiiii/gg-framework",
+  "authors": ["kenkaiiii"],
+  "license": "MIT",
+  "pew": {
+    "transport": "acp",
+    "color": "#4ade80"
+  }
+}

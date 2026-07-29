@@ -26,6 +26,7 @@ import { BlurView } from "expo-blur";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { theme } from "../theme";
+import { haptics } from "./haptics";
 import type { ConfigOption } from "../useDaemon";
 import { useReducedMotion } from "./useReducedMotion";
 
@@ -161,6 +162,9 @@ export function ConfigPicker({
                       accessibilityLabel={value.name}
                       accessibilityState={{ selected }}
                       onPress={() => {
+                        // Selection, not impact: this is a value changing in a
+                        // list, the same gesture family as a picker wheel.
+                        haptics.select();
                         onSelect(option.id, value.value);
                         onClose();
                       }}

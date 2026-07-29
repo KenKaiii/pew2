@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      # --frozen-lockfile so CI fails on an out-of-date bun.lock rather than
+      # silently resolving different versions than a contributor is running.
+      - run: bun install --frozen-lockfile
+
+      # Covers daemon, protocol, relay and the app: the relay's Workers globals
+      # conflict with Node's, and the app needs React Native's own config, so
+      # each is a separate pass rather than one project.
+      - run: npm run typecheck
+
+      # Exercises the ACP pipeline end to end via providers/echo.json, which
+      # needs no API key and no network.
+      - run: npm test

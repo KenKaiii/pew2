@@ -10,8 +10,8 @@
   },
   "scripts": {
     "test": "bun test packages/daemon packages/app",
-    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p packages/relay/tsconfig.json",
-    "relay:dev": "cd packages/relay && wrangler dev --port 8799 --local",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p packages/relay/tsconfig.json && (cd packages/app && tsc --noEmit)",
+    "relay:dev": "cd packages/relay && wrangler dev --port 8799",
     "relay:check": "bun run packages/relay/src/relay-check.mjs",
     "relay:deploy": "cd packages/relay && wrangler deploy",
     "providers:validate": "bun run packages/daemon/src/cli/index.ts providers validate",
