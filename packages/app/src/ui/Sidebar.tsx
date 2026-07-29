@@ -17,6 +17,8 @@ import { Orb } from "./Orb";
 import { touchSlop } from "./controls";
 import { haptics } from "./haptics";
 import { HistorySkeleton } from "./Skeleton";
+import { orderProvidersByRecency } from "../providerRecency";
+import { folderName } from "../projectFolder";
 import type { Provider, Session } from "../useDaemon";
 
 export const DRAWER_WIDTH = Math.min(Dimensions.get("window").width * 0.82, 330);
@@ -59,6 +61,10 @@ export function Sidebar({
 }: SidebarProps) {
   const insets = useSafeAreaInsets();
 
+  // Most recently used app first, so the daily driver is never off-screen
+  // behind apps that were tried once.
+  const orderedProviders = orderProvidersByRecency(providers, sessions);
+
   const visible = sessions.filter(
     (session) => !activeProviderId || session.providerId === activeProviderId,
   );
@@ -97,7 +103,7 @@ export function Sidebar({
             style={styles.agentScroller}
             contentContainerStyle={styles.agentRow}
           >
-            {providers.map((provider) => (
+            {orderedProviders.map((provider) => (
               <Pressable
                 key={provider.id}
                 disabled={!provider.available}
@@ -163,14 +169,21 @@ export function Sidebar({
                   <Text style={styles.sessionTitle} numberOfLines={1}>
                     {session.title}
                   </Text>
-                  {/* Agent-history stubs hold no turns on this device yet, so
-                      "0 messages" would be a lie about a conversation that may
-                      hold hundreds. The count appears once it has been opened. */}
-                  {!(session.agentSessionId && session.turns.length === 0) && (
-                    <Text style={styles.sessionMeta}>
-                      {session.turns.length} message
-                      {session.turns.length === 1 ? "" : "s"}
+                  {/* Which project this conversation belongs to — how people
+                      actually tell sessions apart. The message count only
+                      stands in when no directory is known (locally started
+                      sessions). */}
+                  {folderName(session.cwd) ? (
+                    <Text style={styles.sessionMeta} numberOfLines={1}>
+                      {folderName(session.cwd)}
                     </Text>
+                  ) : (
+                    !(session.agentSessionId && session.turns.length === 0) && (
+                      <Text style={styles.sessionMeta}>
+                        {session.turns.length} message
+                        {session.turns.length === 1 ? "" : "s"}
+                      </Text>
+                    )
                   )}
                 </Pressable>
               ))
