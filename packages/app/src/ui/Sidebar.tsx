@@ -16,6 +16,7 @@ import { theme } from "../theme";
 import { Orb } from "./Orb";
 import { touchSlop } from "./controls";
 import { haptics } from "./haptics";
+import { HistorySkeleton } from "./Skeleton";
 import type { Provider, Session } from "../useDaemon";
 
 export const DRAWER_WIDTH = Math.min(Dimensions.get("window").width * 0.82, 330);
@@ -34,6 +35,12 @@ interface SidebarProps {
   /** True when reached via a relay, so it works away from home. */
   machineRemote: boolean;
   onUnpair: () => void;
+  /**
+   * Agents are still answering what conversations they hold. Without this the
+   * drawer claims "No conversations yet" for the first seconds after connect —
+   * a false empty state on machines with plenty of history.
+   */
+  historyLoading?: boolean;
 }
 
 export function Sidebar({
@@ -48,6 +55,7 @@ export function Sidebar({
   machineLabel,
   machineRemote,
   onUnpair,
+  historyLoading = false,
 }: SidebarProps) {
   const insets = useSafeAreaInsets();
 
@@ -129,7 +137,9 @@ export function Sidebar({
             contentContainerStyle={styles.sessionsContent}
             showsVerticalScrollIndicator={false}
           >
-            {visible.length === 0 ? (
+            {visible.length === 0 && historyLoading ? (
+              <HistorySkeleton />
+            ) : visible.length === 0 ? (
               <Text style={styles.empty}>
                 No conversations yet. Send a message to start one.
               </Text>

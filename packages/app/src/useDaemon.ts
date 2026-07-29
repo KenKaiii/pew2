@@ -84,6 +84,11 @@ interface State {
   configOptions: ConfigOption[];
   permission?: PermissionRequest;
   busy: boolean;
+  /**
+   * At least one agent has been asked what it holds and has not answered yet.
+   * The drawer shows skeleton rows instead of a false "No conversations yet".
+   */
+  loadingSessions: boolean;
 }
 
 /**
@@ -158,6 +163,7 @@ export function useDaemon(url: string, deviceId = "phone") {
     sessions: USE_FIXTURES ? sampleSessions() : [],
     configOptions: [],
     busy: false,
+    loadingSessions: false,
   });
 
   // Not in State: this is a cache keyed by provider, not part of the session.
@@ -188,6 +194,9 @@ export function useDaemon(url: string, deviceId = "phone") {
   // Providers already asked for capabilities, so a reconnect's repeat provider
   // announcement does not spawn another probe for each one.
   const probed = useRef(new Set<string>());
+  // Capability requests in flight. Drives the drawer's skeleton rows; read in
+  // render only through State, so the updater stays pure.
+  const capabilitiesPending = useRef(0);
   // Highest `seq` seen per session.
   //
   // This is what makes reconnecting gap-free. ACP does not replay messages
@@ -308,19 +317,31 @@ export function useDaemon(url: string, deviceId = "phone") {
         // from the agent, so an app that updates its model line-up is reflected
         // without changing anything here.
         if (message.t === "providers") {
+          let requested = 0;
           for (const provider of message.providers ?? []) {
             if (!provider.available || probed.current.has(provider.id)) continue;
             probed.current.add(provider.id);
+            requested += 1;
             ws.send(
               JSON.stringify({ t: "provider.capabilities", providerId: provider.id }),
             );
           }
+          // Every request gets exactly one reply — even a failed probe answers
+          // with empty capabilities — so the counter always returns to zero.
+          capabilitiesPending.current += requested;
+        }
+        if (message.t === "provider.capabilities") {
+          capabilitiesPending.current = Math.max(0, capabilitiesPending.current - 1);
         }
 
         setState((prev) => {
           switch (message.t) {
             case "providers":
-              return { ...prev, providers: message.providers ?? [] };
+              return {
+                ...prev,
+                providers: message.providers ?? [],
+                loadingSessions: capabilitiesPending.current > 0,
+              };
 
             case "provider.capabilities": {
               // Fold in the conversations the agent already holds on disk, so
@@ -331,7 +352,10 @@ export function useDaemon(url: string, deviceId = "phone") {
                 message.sessions,
                 message.canResume === true,
               );
-              return sessions === prev.sessions ? prev : { ...prev, sessions };
+              const loadingSessions = capabilitiesPending.current > 0;
+              return sessions === prev.sessions && loadingSessions === prev.loadingSessions
+                ? prev
+                : { ...prev, sessions, loadingSessions };
             }
 
             case "session.started": {

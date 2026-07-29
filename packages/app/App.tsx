@@ -34,6 +34,7 @@ import { haptics } from "./src/ui/haptics";
 import { Sidebar, DRAWER_WIDTH } from "./src/ui/Sidebar";
 import { ConfigPicker, summarise, valueName } from "./src/ui/ConfigPicker";
 import { useReducedMotion } from "./src/ui/useReducedMotion";
+import { ThreadSkeleton } from "./src/ui/Skeleton";
 import { withLayoutX, type PillX } from "./src/ui/pillAnchor";
 import { PairingScreen } from "./src/ui/PairingScreen";
 import { LaunchScreen } from "./src/ui/LaunchScreen";
@@ -258,6 +259,7 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
           daemon.leave();
           setMenuOpen(false);
         }}
+        historyLoading={daemon.loadingSessions}
         machineLabel={pairing.label}
         machineRemote={pairing.remote}
         onUnpair={onUnpair}
@@ -368,6 +370,11 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
             ))}
             {daemon.busy && <Working />}
           </ScrollView>
+        ) : daemon.busy ? (
+          // Resuming a conversation streams its history back from the agent,
+          // which takes a moment. Blocks shaped like the coming messages are a
+          // better wait than a greeting that reads as "nothing here yet".
+          <ThreadSkeleton />
         ) : (
           // Tapping the empty state dismisses the keyboard, which collapses the
           // composer. Without this the greeting is inert and the only way out of
