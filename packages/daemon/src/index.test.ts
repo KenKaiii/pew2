@@ -30,7 +30,7 @@ function plantSession(daemon: Daemon, sessionId: string) {
   return session;
 }
 
-test("events are held until the session is live, then flushed in order", () => {
+test("events are held until the session is live, then flushed as one replay", () => {
   const { daemon, sent } = daemonWithCollector();
   const session = plantSession(daemon, "s1");
 
@@ -43,11 +43,17 @@ test("events are held until the session is live, then flushed in order", () => {
   expect(session.log.events.map((e) => e.seq)).toEqual([0, 1]);
 
   daemon.markLive("s1");
-  expect(sent.map((e) => (e as any).payload.n)).toEqual([1, 2]);
+  // The backlog ships as one replay frame, in seq order: the app folds it into
+  // a single render rather than one update per event.
+  expect(sent).toHaveLength(1);
+  const replay = sent[0] as any;
+  expect(replay.t).toBe("session.replay");
+  expect(replay.events.map((e: any) => e.payload.n)).toEqual([1, 2]);
 
-  // Once live, new events go straight out.
+  // Once live, new events go straight out individually.
   (daemon as any).record(session, { n: 3 });
-  expect(sent.map((e) => (e as any).payload.n)).toEqual([1, 2, 3]);
+  expect(sent).toHaveLength(2);
+  expect((sent[1] as any).payload.n).toBe(3);
 });
 
 test("markLive is idempotent and ignores unknown sessions", () => {

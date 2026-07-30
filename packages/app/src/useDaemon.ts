@@ -12,6 +12,7 @@ import { mergeAgentSessions } from "./agentHistory";
 import { advance, alreadySeen, type Cursors } from "./cursors";
 import { findDuplicateError } from "./errorDedup";
 import { readChunk } from "./chunks";
+import { foldSessionEvents, isOptimistic, type ReplayEvent } from "./replayFold";
 
 export type Status = "connecting" | "online" | "offline";
 
@@ -115,10 +116,6 @@ function rememberConfigs(
  */
 function localTurn(seq: number, text: string): Turn {
   return { id: `local:${seq}`, role: "user", text: text.trim() };
-}
-
-function isOptimistic(turn: Turn): boolean {
-  return turn.id.startsWith("local:");
 }
 
 function firstUserText(turns: Turn[]): string | undefined {
@@ -228,12 +225,22 @@ export function useDaemon(url: string, deviceId = "phone") {
           return;
         }
 
-        // Replayed history after a reconnect. Each event is fed back through
-        // this same handler, so there is no second rendering path to keep in
-        // step and the cursor advances identically.
+        // Replayed history, after a reconnect or a resume. The whole batch is
+        // folded into ONE state update: applying a long history event-by-event
+        // copied the turns array per event — quadratic work that read on the
+        // phone as a stall of seconds after the skeleton.
         if (message.t === "session.replay" && Array.isArray(message.events)) {
+          const events: ReplayEvent[] = [];
           for (const event of message.events) {
-            ws.onmessage?.({ data: JSON.stringify(event) } as MessageEvent);
+            if (event?.t !== "session.event" || typeof event.seq !== "number") continue;
+            // Same scoping and dedup the live path applies.
+            if (event.sessionId !== sessionRef.current) continue;
+            if (alreadySeen(cursors.current, event.sessionId, event.seq)) continue;
+            cursors.current = advance(cursors.current, event.sessionId, event.seq);
+            events.push(event);
+          }
+          if (events.length > 0) {
+            setState((prev) => foldSessionEvents(prev, events));
           }
           return;
         }

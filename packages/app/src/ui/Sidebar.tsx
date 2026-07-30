@@ -9,7 +9,7 @@
  * being covered, so the two surfaces read as one moving layout instead of a
  * modal layer. The panel itself is therefore static — App owns the motion.
  */
-import { Dimensions, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Dimensions, FlatList, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { theme } from "../theme";
@@ -138,57 +138,65 @@ export function Sidebar({
 
           <Text style={styles.sectionLabel}>Chat history</Text>
 
-          <ScrollView
+          {/* A provider can hold hundreds of conversations. Rendering them
+              all in a ScrollView was the stall when switching to a well-used
+              app; a windowed list mounts only what is on screen. */}
+          <FlatList
             style={styles.sessions}
             contentContainerStyle={styles.sessionsContent}
             showsVerticalScrollIndicator={false}
-          >
-            {visible.length === 0 && historyLoading ? (
-              <HistorySkeleton />
-            ) : visible.length === 0 ? (
-              <Text style={styles.empty}>
-                No conversations yet. Send a message to start one.
-              </Text>
-            ) : (
-              visible.map((session) => (
-                <Pressable
-                  key={session.id}
-                  accessibilityRole="button"
-                  accessibilityLabel={session.title}
-                  accessibilityState={{ selected: session.id === activeSessionId }}
-                  onPress={() => {
-                    haptics.tap();
-                    onOpenSession(session.id);
-                  }}
-                  style={({ pressed }) => [
-                    styles.session,
-                    session.id === activeSessionId && styles.sessionActive,
-                    pressed && styles.pressed,
-                  ]}
-                >
-                  <Text style={styles.sessionTitle} numberOfLines={1}>
-                    {session.title}
+            data={visible}
+            keyExtractor={(session) => session.id}
+            initialNumToRender={18}
+            maxToRenderPerBatch={18}
+            windowSize={9}
+            removeClippedSubviews
+            ListEmptyComponent={
+              historyLoading ? (
+                <HistorySkeleton />
+              ) : (
+                <Text style={styles.empty}>
+                  No conversations yet. Send a message to start one.
+                </Text>
+              )
+            }
+            renderItem={({ item: session }) => (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={session.title}
+                accessibilityState={{ selected: session.id === activeSessionId }}
+                onPress={() => {
+                  haptics.tap();
+                  onOpenSession(session.id);
+                }}
+                style={({ pressed }) => [
+                  styles.session,
+                  session.id === activeSessionId && styles.sessionActive,
+                  pressed && styles.pressed,
+                ]}
+              >
+                <Text style={styles.sessionTitle} numberOfLines={1}>
+                  {session.title}
+                </Text>
+                {/* Which project this conversation belongs to — how people
+                    actually tell sessions apart. The message count only
+                    stands in when no directory is known (locally started
+                    sessions). */}
+                {folderName(session.cwd) ? (
+                  <Text style={styles.sessionMeta} numberOfLines={1}>
+                    {folderName(session.cwd)}
                   </Text>
-                  {/* Which project this conversation belongs to — how people
-                      actually tell sessions apart. The message count only
-                      stands in when no directory is known (locally started
-                      sessions). */}
-                  {folderName(session.cwd) ? (
-                    <Text style={styles.sessionMeta} numberOfLines={1}>
-                      {folderName(session.cwd)}
+                ) : (
+                  !(session.agentSessionId && session.turns.length === 0) && (
+                    <Text style={styles.sessionMeta}>
+                      {session.turns.length} message
+                      {session.turns.length === 1 ? "" : "s"}
                     </Text>
-                  ) : (
-                    !(session.agentSessionId && session.turns.length === 0) && (
-                      <Text style={styles.sessionMeta}>
-                        {session.turns.length} message
-                        {session.turns.length === 1 ? "" : "s"}
-                      </Text>
-                    )
-                  )}
-                </Pressable>
-              ))
+                  )
+                )}
+              </Pressable>
             )}
-          </ScrollView>
+          />
 
           {/* Which machine this phone is driving. Easy to lose track of once
               more than one has been paired, and the only way to undo it. */}

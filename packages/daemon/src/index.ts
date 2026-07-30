@@ -215,9 +215,13 @@ export class Daemon {
     const session = this.sessions.get(sessionId);
     if (!session || session.live) return;
     session.live = true;
-    // `since(-1)` is the whole log: everything held back while the agent was
-    // connecting, replayed in seq order.
-    for (const event of session.log.since(-1)) this.send(event);
+    // The backlog goes out as one batched frame rather than hundreds: the app
+    // folds a replay into a single render, and a resumed conversation's
+    // history arriving frame-by-frame was the visible stall in opening one.
+    const backlog = session.log.since(-1);
+    if (backlog.length > 0) {
+      this.send({ t: "session.replay", sessionId, events: backlog });
+    }
   }
 
   async startSession(providerId: string, cwd: string): Promise<string> {
