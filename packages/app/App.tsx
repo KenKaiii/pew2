@@ -13,7 +13,7 @@ import {
   Animated,
   Easing,
   Keyboard,
-  KeyboardAvoidingView,
+  LayoutAnimation,
   Platform,
   Pressable,
   ScrollView,
@@ -35,7 +35,7 @@ import { Sidebar, DRAWER_WIDTH } from "./src/ui/Sidebar";
 import { ConfigPicker, summarise, valueName } from "./src/ui/ConfigPicker";
 import { useReducedMotion } from "./src/ui/useReducedMotion";
 import { ThreadSkeleton } from "./src/ui/Skeleton";
-import { NAV_FADE, ProgressiveBlur } from "./src/ui/ProgressiveBlur";
+import { ProgressiveBlur } from "./src/ui/ProgressiveBlur";
 import { withLayoutX, type PillX } from "./src/ui/pillAnchor";
 import { PairingScreen } from "./src/ui/PairingScreen";
 import { LaunchScreen } from "./src/ui/LaunchScreen";
@@ -141,6 +141,28 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
   const [picker, setPicker] = useState<"model" | "mode" | null>(null);
   // Measured so the thread's top inset always matches the real nav height.
   const [navHeight, setNavHeight] = useState(0);
+  // The composer floats, so the thread's bottom inset and the frosted zone
+  // track its measured height. iOS overlays the keyboard, so the composer
+  // follows it manually; Android's adjustResize already moves the viewport.
+  const [dockHeight, setDockHeight] = useState(0);
+  const [keyboardHeight, setKeyboardHeight] = useState(0);
+
+  useEffect(() => {
+    if (Platform.OS !== "ios") return;
+
+    const onShow = Keyboard.addListener("keyboardWillShow", (e) => {
+      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+      setKeyboardHeight(e.endCoordinates.height);
+    });
+    const onHide = Keyboard.addListener("keyboardWillHide", () => {
+      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+      setKeyboardHeight(0);
+    });
+    return () => {
+      onShow.remove();
+      onHide.remove();
+    };
+  }, []);
   // Absolutely-positioned overlays ignore SafeAreaView's padding, so they
   // must be offset by the inset themselves or they slide under the clock.
   const insets = useSafeAreaInsets();
@@ -368,31 +390,30 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
         )}
       </View>
 
-      {/* The fade sits between thread and nav: strong blur directly under
-          the controls, nothing at its lower edge. pointerEvents-none, so it
+      {/* Frosted cover for the nav zone only — it ends exactly at the nav's
+          bottom edge and touches nothing below it. pointerEvents-none, so it
           never swallows a tap on a message or a pill. */}
       {navHeight > 0 && (
         <ProgressiveBlur
-          // From the very top edge: the status bar area fades too.
-          height={insets.top + navHeight + NAV_FADE}
-          solidHeight={insets.top + navHeight}
+          // From the very top edge to the nav's bottom edge. No tail.
+          height={insets.top + navHeight}
           style={styles.navFade}
         />
       )}
 
-      <KeyboardAvoidingView
-        style={styles.body}
-        behavior={Platform.OS === "ios" ? "padding" : "height"}
-      >
+      <View style={styles.body}>
         {inThread ? (
           <ScrollView
             ref={scroller}
             style={styles.thread}
             contentContainerStyle={[
               styles.threadContent,
-              // Clear the status bar, the nav and most of its fade before the
-              // first message.
-              { paddingTop: insets.top + (navHeight || theme.space(12)) + theme.space(2) },
+              {
+                // Clear the status bar plus the nav before the first message,
+                // and the composer (plus an open keyboard) after the last.
+                paddingTop: insets.top + (navHeight || theme.space(12)) + theme.space(2),
+                paddingBottom: dockHeight + keyboardHeight + theme.space(2),
+              },
             ]}
             keyboardDismissMode="interactive"
             keyboardShouldPersistTaps="handled"
@@ -428,7 +449,27 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
           </Pressable>
         )}
 
-        <View style={styles.dock}>
+        {/* The composer floats over the thread, and its frosted zone is
+            contained to exactly its own height — the mirror of the nav. */}
+        {dockHeight > 0 && (
+          <ProgressiveBlur
+            edge="bottom"
+            height={dockHeight}
+            style={[styles.dockCover, { bottom: keyboardHeight }]}
+          />
+        )}
+        <View
+          style={[
+            styles.dock,
+            styles.dockOverlay,
+            {
+              bottom: keyboardHeight,
+              // SafeAreaView already reserves the home-indicator inset.
+              paddingBottom: theme.space(2),
+            },
+          ]}
+          onLayout={(e) => setDockHeight(e.nativeEvent.layout.height)}
+        >
           <Composer
             value={draft}
             onChangeText={setDraft}
@@ -439,7 +480,7 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
             placeholder={active ? "Ask me. Task me..." : "Waiting for an agent..."}
           />
         </View>
-      </KeyboardAvoidingView>
+      </View>
 
       {/* One picker, pointed at whichever pill opened it. The mode selector is
           excluded from the model menu so each pill owns exactly one list. */}
@@ -667,6 +708,13 @@ const styles = StyleSheet.create({
     paddingTop: theme.space(2),
     paddingBottom: theme.space(2),
   },
+  dockOverlay: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    zIndex: 3,
+  },
+  dockCover: { zIndex: 2 },
 
   sheetBackdrop: {
     position: "absolute",
