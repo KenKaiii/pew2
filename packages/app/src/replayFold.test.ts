@@ -58,7 +58,19 @@ test("an optimistic prompt is adopted, not duplicated", () => {
   expect(isOptimistic(next.turns[0]!)).toBe(false);
 });
 
-test("a permission request inside the batch surfaces", () => {
+test("a replay is history: it never marks the session busy", () => {
+  // The looping-indicator bug: the fold used to set busy from the last chunk,
+  // and a resumed thread's last chunk is always a message.
+  const next = foldSessionEvents(state([], [sessionStub]), [user(0, "Hi"), agent(1, "Done")]);
+
+  expect(next.busy).toBe(true); // unchanged from the state passed in
+  const idle = foldSessionEvents({ ...state([], []), busy: false }, [agent(0, "Done")]);
+  expect(idle.busy).toBe(false);
+});
+
+test("a permission request in replayed history does not resurface", () => {
+  // It was answered when the conversation was live; asking again would be a
+  // phantom banner over a finished thread.
   const next = foldSessionEvents(state([], []), [
     {
       sessionId: "s1",
@@ -67,9 +79,7 @@ test("a permission request inside the batch surfaces", () => {
     },
   ]);
 
-  expect(next.permission?.requestId).toBe("p1");
-  expect(next.permission?.title).toBe("Run bash?");
-  expect(next.busy).toBe(false);
+  expect(next.permission).toBeUndefined();
 });
 
 test("an empty batch returns the same state", () => {

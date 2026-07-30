@@ -10,7 +10,7 @@
  * Pure and React-free so the fold is directly testable.
  */
 import { readChunk } from "./chunks";
-import type { PermissionRequest, Session, Turn } from "./useDaemon";
+import type { Session, Turn } from "./useDaemon";
 
 /** True for a user turn rendered before the daemon echoed it back. */
 export function isOptimistic(turn: Turn): boolean {
@@ -27,7 +27,7 @@ interface FoldState {
   turns: Turn[];
   sessions: Session[];
   busy: boolean;
-  permission?: PermissionRequest;
+  permission?: unknown;
 }
 
 export function foldSessionEvents<S extends FoldState>(
@@ -37,8 +37,10 @@ export function foldSessionEvents<S extends FoldState>(
   if (events.length === 0) return prev;
 
   const turns = [...prev.turns];
-  let busy = prev.busy;
-  let permission = prev.permission;
+  // `busy` and `permission` are deliberately left alone. They describe a turn
+  // in progress *now*: a replay is history, so its last chunk is not work
+  // being done (a looping "working" indicator on every resumed thread) and a
+  // permission request in it was answered long ago (a phantom approve banner).
   // One index for the whole batch: mirroring each event into the sessions
   // list with an array copy per event was the other half of the quadratic
   // cost once a provider held hundreds of conversations.
@@ -46,21 +48,6 @@ export function foldSessionEvents<S extends FoldState>(
 
   for (const message of events) {
     const payload = message?.payload;
-
-    if (payload?.kind === "permission_request") {
-      const params = payload.params ?? {};
-      busy = false;
-      permission = {
-        requestId: payload.requestId,
-        title: params.toolCall?.title ?? "The agent needs your approval",
-        options: params.options ?? [
-          { optionId: "allow", name: "Allow" },
-          { optionId: "reject", name: "Reject" },
-        ],
-      };
-      continue;
-    }
-
     const chunk = readChunk(payload);
     if (!chunk || !chunk.text) continue;
 
@@ -102,14 +89,11 @@ export function foldSessionEvents<S extends FoldState>(
             : entry.title,
       });
     }
-    busy = chunk.role !== "system";
   }
 
   return {
     ...prev,
     turns,
     sessions: prev.sessions.map((session) => byId.get(session.id) ?? session),
-    busy,
-    permission,
   };
 }
