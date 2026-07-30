@@ -21,7 +21,7 @@ import {
   Text,
   View,
 } from "react-native";
-import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
+import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { StatusBar } from "expo-status-bar";
 import { Ionicons } from "@expo/vector-icons";
 import { theme } from "./src/theme";
@@ -35,6 +35,7 @@ import { Sidebar, DRAWER_WIDTH } from "./src/ui/Sidebar";
 import { ConfigPicker, summarise, valueName } from "./src/ui/ConfigPicker";
 import { useReducedMotion } from "./src/ui/useReducedMotion";
 import { ThreadSkeleton } from "./src/ui/Skeleton";
+import { NAV_FADE, ProgressiveBlur } from "./src/ui/ProgressiveBlur";
 import { withLayoutX, type PillX } from "./src/ui/pillAnchor";
 import { PairingScreen } from "./src/ui/PairingScreen";
 import { LaunchScreen } from "./src/ui/LaunchScreen";
@@ -138,6 +139,11 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
   // Which pill's menu is open, and where that pill sits, so the menu opens
   // under it instead of always at the gutter.
   const [picker, setPicker] = useState<"model" | "mode" | null>(null);
+  // Measured so the thread's top inset always matches the real nav height.
+  const [navHeight, setNavHeight] = useState(0);
+  // Absolutely-positioned overlays ignore SafeAreaView's padding, so they
+  // must be offset by the inset themselves or they slide under the clock.
+  const insets = useSafeAreaInsets();
   const [pillX, setPillX] = useState<PillX>({
     model: theme.gutter,
     mode: theme.gutter,
@@ -269,7 +275,13 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
       <Animated.View style={[styles.pane, { transform: [{ translateX: slideX }] }]}>
       <SafeAreaView style={styles.paneInner} edges={["top", "bottom"]}>
 
-      <View style={styles.topBar}>
+      {/* Absolute over the thread: messages scroll beneath the nav and
+          dissolve into the ProgressiveBlur fade instead of hitting a panel
+          edge, so the conversation keeps the full screen height. */}
+      <View
+        style={[styles.topBar, styles.topBarOverlay, { top: insets.top }]}
+        onLayout={(e) => setNavHeight(e.nativeEvent.layout.height)}
+      >
         <View>
           <CircleButton
             label={`Open menu. Daemon ${daemon.status}.`}
@@ -353,6 +365,16 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
         )}
       </View>
 
+      {/* The fade sits between thread and nav: strong blur directly under
+          the controls, nothing at its lower edge. pointerEvents-none, so it
+          never swallows a tap on a message or a pill. */}
+      {navHeight > 0 && (
+        <ProgressiveBlur
+          height={navHeight + NAV_FADE}
+          style={[styles.navFade, { top: insets.top }]}
+        />
+      )}
+
       <KeyboardAvoidingView
         style={styles.body}
         behavior={Platform.OS === "ios" ? "padding" : "height"}
@@ -361,7 +383,11 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
           <ScrollView
             ref={scroller}
             style={styles.thread}
-            contentContainerStyle={styles.threadContent}
+            contentContainerStyle={[
+              styles.threadContent,
+              // Clear the nav plus most of its fade before the first message.
+              { paddingTop: (navHeight || theme.space(12)) + theme.space(2) },
+            ]}
             keyboardDismissMode="interactive"
             keyboardShouldPersistTaps="handled"
           >
@@ -557,6 +583,14 @@ const styles = StyleSheet.create({
     paddingHorizontal: theme.gutter,
     paddingVertical: theme.headerInset,
   },
+  topBarOverlay: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    zIndex: 3,
+  },
+  navFade: { zIndex: 2 },
   topBarSpacer: { flex: 1 },
   // Pills hug their text, but no single pill may take the row. flexShrink
   // alone shrinks proportionally, which left the model pill wide and starved
