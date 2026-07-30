@@ -273,7 +273,10 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
 
       {/* The conversation pane. Slides right to reveal the drawer beneath. */}
       <Animated.View style={[styles.pane, { transform: [{ translateX: slideX }] }]}>
-      <SafeAreaView style={styles.paneInner} edges={["top", "bottom"]}>
+      {/* Full-bleed: the thread runs behind the status bar too, and the
+          ProgressiveBlur covers that region, so content dissolves all the way
+          to the top edge instead of meeting a solid band under the clock. */}
+      <SafeAreaView style={styles.paneInner} edges={["bottom"]}>
 
       {/* Absolute over the thread: messages scroll beneath the nav and
           dissolve into the ProgressiveBlur fade instead of hitting a panel
@@ -370,8 +373,9 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
           never swallows a tap on a message or a pill. */}
       {navHeight > 0 && (
         <ProgressiveBlur
-          height={navHeight + NAV_FADE}
-          style={[styles.navFade, { top: insets.top }]}
+          // From the very top edge: the status bar area fades too.
+          height={insets.top + navHeight + NAV_FADE}
+          style={styles.navFade}
         />
       )}
 
@@ -385,8 +389,9 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
             style={styles.thread}
             contentContainerStyle={[
               styles.threadContent,
-              // Clear the nav plus most of its fade before the first message.
-              { paddingTop: (navHeight || theme.space(12)) + theme.space(2) },
+              // Clear the status bar, the nav and most of its fade before the
+              // first message.
+              { paddingTop: insets.top + (navHeight || theme.space(12)) + theme.space(2) },
             ]}
             keyboardDismissMode="interactive"
             keyboardShouldPersistTaps="handled"
