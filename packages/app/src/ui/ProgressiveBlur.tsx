@@ -24,12 +24,22 @@ export const NAV_FADE = 36;
 const INTENSITY = 24;
 
 interface ProgressiveBlurProps {
-  /** Total height of the fading region: nav height plus NAV_FADE. */
+  /** Total height of the fading region: solid cover plus NAV_FADE. */
   height: number;
+  /**
+   * Height that stays fully covered — the status bar plus the nav. The fade
+   * begins exactly here: percentages of the whole container would let text
+   * stay readable well below the nav, which is exactly the gap this prop
+   * exists to remove.
+   */
+  solidHeight: number;
   style?: object;
 }
 
-export function ProgressiveBlur({ height, style }: ProgressiveBlurProps) {
+export function ProgressiveBlur({ height, solidHeight, style }: ProgressiveBlurProps) {
+  // Where the fade starts, as a fraction of the container: the nav's bottom
+  // edge, not an arbitrary midpoint.
+  const fadeStart = Math.min(1, solidHeight / height);
   return (
     <BlurView
       intensity={INTENSITY}
@@ -37,12 +47,12 @@ export function ProgressiveBlur({ height, style }: ProgressiveBlurProps) {
       style={[styles.container, { height }, style]}
       pointerEvents="none"
     >
-      {/* The progression lives here: near-opaque under the nav, fully clear at
-          the bottom of the fade. Text dissolves into this gradient; the blur
-          underneath keeps it soft the whole way. */}
+      {/* The progression lives here: near-opaque through the nav, fully clear
+          at the bottom of the fade. Text dissolves into this gradient; the
+          blur underneath keeps it soft the whole way. */}
       <LinearGradient
-        colors={["rgba(10,10,11,0.82)", "rgba(10,10,11,0.34)", "rgba(10,10,11,0)"]}
-        locations={[0, 0.55, 1]}
+        colors={["rgba(10,10,11,0.85)", "rgba(10,10,11,0.4)", "rgba(10,10,11,0)"]}
+        locations={[0, fadeStart, 1]}
         style={StyleSheet.absoluteFill}
       />
     </BlurView>

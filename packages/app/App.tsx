@@ -375,6 +375,7 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
         <ProgressiveBlur
           // From the very top edge: the status bar area fades too.
           height={insets.top + navHeight + NAV_FADE}
+          solidHeight={insets.top + navHeight}
           style={styles.navFade}
         />
       )}
