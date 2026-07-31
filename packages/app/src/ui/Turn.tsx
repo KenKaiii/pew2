@@ -2,15 +2,16 @@
  * One rendered turn in the thread.
  *
  * Neither side shows avatars. User prompts sit in one quiet raised surface that
- * hugs its own text and aligns right, capped at 85% of the rail so a long prompt
- * still wraps; agent output uses the full reading rail as plain text so long
- * responses read like a document. Each new turn fades in once. Streamed chunks append to
- * the same Text node, avoiding a fake typewriter delay or per-token layout churn.
+ * hugs their content; agent output uses the full reading rail like a document.
+ * CommonMark is rendered with native components, including headings, emphasis,
+ * lists, links, tables, images, line breaks, and horizontally scrollable code.
+ * Each new turn fades in once while streamed chunks update the same turn.
  */
 import { useEffect, useRef } from "react";
-import { Animated, StyleSheet, Text, View } from "react-native";
+import { Animated, StyleSheet, View } from "react-native";
 import { theme } from "../theme";
 import { useReducedMotion } from "./useReducedMotion";
+import { MarkdownText } from "./MarkdownText";
 import type { Turn as TurnModel } from "../useDaemon";
 
 export function Turn({ turn }: { turn: TurnModel }) {
@@ -27,14 +28,16 @@ export function Turn({ turn }: { turn: TurnModel }) {
     return () => animation.stop();
   }, [appear, reduceMotion]);
 
-  const text = turn.text.trim();
-  if (!text) return null;
+  if (!turn.text.trim()) return null;
+  // Preserve leading indentation: CommonMark uses it for indented code blocks.
+  const text = turn.text.trimEnd();
+  const hasBlockLayout = text.includes("\n");
 
   if (turn.role === "user") {
     return (
       <Animated.View style={[styles.userRow, { opacity: appear }]}>
-        <View style={styles.userBubble}>
-          <Text style={styles.userText}>{text}</Text>
+        <View style={[styles.userBubble, hasBlockLayout && styles.userBubbleWide]}>
+          <MarkdownText text={text} />
         </View>
       </Animated.View>
     );
@@ -42,23 +45,23 @@ export function Turn({ turn }: { turn: TurnModel }) {
 
   if (turn.role === "system") {
     return (
-      <Animated.View style={{ opacity: appear }}>
-        <Text style={styles.systemText}>{text}</Text>
+      <Animated.View style={[styles.systemRow, { opacity: appear }]}>
+        <MarkdownText text={text} tone="system" />
       </Animated.View>
     );
   }
 
   if (turn.role === "thought") {
     return (
-      <Animated.View style={{ opacity: appear }}>
-        <Text style={styles.thoughtText}>{text}</Text>
+      <Animated.View style={[styles.thoughtRow, { opacity: appear }]}>
+        <MarkdownText text={text} tone="thought" />
       </Animated.View>
     );
   }
 
   return (
     <Animated.View style={[styles.agentRow, { opacity: appear }]}>
-      <Text style={styles.agentText}>{text}</Text>
+      <MarkdownText text={text} />
     </Animated.View>
   );
 }
@@ -72,27 +75,10 @@ const styles = StyleSheet.create({
     paddingHorizontal: theme.space(3.5),
     paddingVertical: theme.space(2.75),
   },
-  userText: {
-    color: theme.color.text,
-    fontSize: theme.font.body,
-    lineHeight: theme.line.body,
-  },
+  // Multiline Markdown needs a definite containing width so percentage-width
+  // paragraphs and nested lists can wrap. One-line prompts still hug content.
+  userBubbleWide: { width: "85%" },
   agentRow: { width: "100%" },
-  agentText: {
-    width: "100%",
-    color: theme.color.text,
-    fontSize: theme.font.body,
-    lineHeight: theme.line.body,
-  },
-  thoughtText: {
-    color: theme.color.textDim,
-    fontSize: theme.font.small,
-    lineHeight: 20,
-    paddingHorizontal: theme.space(1),
-  },
-  systemText: {
-    color: theme.color.danger,
-    fontSize: theme.font.small,
-    lineHeight: 20,
-  },
+  thoughtRow: { width: "100%", paddingHorizontal: theme.space(1) },
+  systemRow: { width: "100%" },
 });
