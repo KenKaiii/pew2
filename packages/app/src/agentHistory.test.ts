@@ -23,7 +23,13 @@ test("conversations from the agent's disk appear in the list", () => {
     [],
     "claude-code",
     [
-      { sessionId: "s1", cwd: "/repo", title: "Fix the build", updatedAt: "2026-07-29T04:29:51Z" },
+      {
+        sessionId: "s1",
+        cwd: "/repo",
+        title: "Fix the build",
+        updatedAt: "2026-07-29T04:29:51Z",
+        messageCount: 12,
+      },
       { sessionId: "s2", cwd: "/other", title: "Ship the API", updatedAt: "2026-07-28T10:00:00Z" },
     ],
     true,
@@ -36,6 +42,7 @@ test("conversations from the agent's disk appear in the list", () => {
   expect(merged[0]!.agentSessionId).toBe("s1");
   expect(merged[0]!.cwd).toBe("/repo");
   expect(merged[0]!.id).toBe(agentSessionKey("claude-code", "s1"));
+  expect(merged[0]!.messageCount).toBe(12);
 });
 
 test("newest first, so the thread just worked on is at the top", () => {

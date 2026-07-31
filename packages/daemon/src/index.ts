@@ -15,25 +15,24 @@ import {
   type AgentSession,
   type ConfigOption,
 } from "./acp/connect.js";
+import { loadClaudeDisplayHistory } from "./acp/claude-history.js";
+import { loadGgCoderDisplayHistory } from "./acp/ggcoder-history.js";
 import { SessionLog } from "./session/log.js";
 import { resolveWorkspace } from "./workspace.js";
 import { readProbeCache, writeProbeCache } from "./probe-cache.js";
 import { wire } from "@pew2/protocol";
 
 interface ActiveSession {
-  handle: AcpSessionHandle;
+  handle?: AcpSessionHandle;
   log: SessionLog;
-  /**
-   * Whether clients have been told this session exists.
-   *
-   * Agents replay a resumed conversation's history *during* `session/load` —
-   * before `connectProvider` resolves and long before the handler broadcasts
-   * `session.started`. Events sent that early are dropped by clients as unknown
-   * sessions, which is exactly how a resumed thread rendered empty. Until
-   * `markLive`, events accumulate in the log unsent; `markLive` then flushes
-   * them in order, after `session.started` has gone out.
-   */
+  /** Resolves once the agent has loaded and can accept prompts/config changes. */
+  ready: Promise<void>;
+  /** Whether clients have been told this session exists. */
   live: boolean;
+  /** Resume history is frame-batched until loading completes. */
+  streamingReplay?: boolean;
+  pendingReplay?: wire.SessionEvent[];
+  replayTimer?: NodeJS.Timeout;
 }
 
 /** Everything a provider can tell us before a conversation is under way. */
@@ -50,6 +49,8 @@ const EMPTY_CAPABILITIES: ProviderCapabilities = {
   sessions: [],
   canResume: false,
 };
+
+const REPLAY_BATCH_SIZE = 64;
 
 export class Daemon {
   private providers: LoadedProvider[] = [];
@@ -68,16 +69,13 @@ export class Daemon {
    * idles out after `SPARE_TTL_MS` so an unused agent does not run forever.
    */
   private readonly spares = new Map<string, { handle: AcpSessionHandle; timer: NodeJS.Timeout }>();
+  /** Provider boots already in flight, shared by a tap instead of duplicated. */
+  private readonly warming = new Map<string, Promise<void>>();
   private static readonly SPARE_TTL_MS = 15 * 60 * 1000;
 
-  /** A disk-cached probe older than this is refreshed in the background. */
-  private static readonly REVALIDATE_AFTER_MS = 60 * 1000;
-
   /**
-   * Refresh a provider's probe in the background and push the result.
-   *
-   * A failed refresh is silent: the cached answer stays in place rather than
-   * being clobbered by an empty one.
+   * Boot a provider in the background, refresh its cache, and push the result.
+   * A failed refresh is silent: the cached answer stays in place.
    */
   private async revalidate(providerId: string) {
     const fresh = await this.probeProvider(providerId, { refresh: true });
@@ -85,6 +83,17 @@ export class Daemon {
     // The app folds this into the drawer exactly like an answer to its own
     // request, so a stale list corrects itself moments after opening.
     this.send({ t: "provider.capabilities", providerId, ...fresh });
+  }
+
+  private warmProvider(providerId: string): Promise<void> {
+    if (this.spares.has(providerId)) return Promise.resolve();
+    const existing = this.warming.get(providerId);
+    if (existing) return existing;
+    const warming = this.revalidate(providerId).finally(() => {
+      if (this.warming.get(providerId) === warming) this.warming.delete(providerId);
+    });
+    this.warming.set(providerId, warming);
+    return warming;
   }
 
   private stashSpare(providerId: string, handle: AcpSessionHandle) {
@@ -129,10 +138,43 @@ export class Daemon {
       onExit: (code: number | null) => this.record(session, { kind: "exit", code }),
     };
 
-    const spare = this.takeSpare(provider.manifest.id);
+    // Paint local JSONL history immediately for providers whose ACP load path
+    // scans or initializes before replay. Suppress only that duplicate history;
+    // the attached agent remains authoritative for config and all live updates.
+    const localUpdates = loadSessionId
+      ? provider.manifest.id === "claude-code"
+        ? (await loadClaudeDisplayHistory(loadSessionId, cwd))?.map((message) => ({
+            sessionUpdate:
+              message.role === "user" ? "user_message_chunk" : "agent_message_chunk",
+            content: { type: "text", text: message.text },
+          }))
+        : provider.manifest.id === "ggcoder"
+          ? await loadGgCoderDisplayHistory(loadSessionId, cwd)
+          : undefined
+      : undefined;
+    if (localUpdates) {
+      for (const update of localUpdates) {
+        callbacks.onUpdate({ sessionId: loadSessionId, update });
+      }
+    }
+    let loadingDuplicateReplay = localUpdates !== undefined;
+    const agentCallbacks = {
+      ...callbacks,
+      onUpdate: (payload: unknown) => {
+        if (!loadingDuplicateReplay) callbacks.onUpdate(payload);
+      },
+    };
+
+    let spare = this.takeSpare(provider.manifest.id);
+    if (!spare) {
+      // Join the background boot started alongside a disk-cached history list
+      // instead of spawning a duplicate process on tap.
+      await this.warming.get(provider.manifest.id)?.catch(() => {});
+      spare = this.takeSpare(provider.manifest.id);
+    }
     if (spare) {
       try {
-        await spare.adopt({ loadSessionId, ...callbacks });
+        await spare.adopt({ loadSessionId, ...agentCallbacks });
         session.handle = spare;
       } catch {
         spare.close();
@@ -143,14 +185,15 @@ export class Daemon {
         provider,
         cwd,
         loadSessionId,
-        ...callbacks,
+        ...agentCallbacks,
         onStderr: (line) => console.error(`[${provider.manifest.id}] ${line}`),
       });
     }
+    loadingDuplicateReplay = false;
 
     // The spare is spent; quietly boot the next one so the session after this
     // opens instantly too. Failure here only means that open is cold again.
-    void this.probeProvider(provider.manifest.id, { refresh: true }).catch(() => {});
+    void this.warmProvider(provider.manifest.id);
   }
 
   constructor(
@@ -202,7 +245,31 @@ export class Daemon {
    */
   private record(session: ActiveSession, payload: unknown) {
     const event = session.log.append(payload);
-    if (session.live) this.send(event);
+    if (!session.live) return;
+    if (!session.streamingReplay) {
+      this.send(event);
+      return;
+    }
+    (session.pendingReplay ??= []).push(event);
+    // ACP can deliver a thousand notifications in one event-loop turn; a timer
+    // cannot fire during that burst, so flush by size as well as by frame.
+    if (session.pendingReplay.length >= REPLAY_BATCH_SIZE) {
+      this.flushStreamingReplay(session, false);
+      return;
+    }
+    if (!session.replayTimer) {
+      session.replayTimer = setTimeout(() => this.flushStreamingReplay(session, false), 16);
+      session.replayTimer.unref?.();
+    }
+  }
+
+  private flushStreamingReplay(session: ActiveSession, complete: boolean) {
+    if (session.replayTimer) clearTimeout(session.replayTimer);
+    session.replayTimer = undefined;
+    const events = session.pendingReplay?.splice(0) ?? [];
+    if (events.length > 0 || complete) {
+      this.send({ t: "session.replay", sessionId: session.log.sessionId, events, complete });
+    }
   }
 
   /**
@@ -222,6 +289,23 @@ export class Daemon {
     this.send({ t: "session.replay", sessionId, events: backlog });
   }
 
+  /** Announce first, then reveal resume history in frame-sized batches. */
+  markStreaming(sessionId: string) {
+    const session = this.sessions.get(sessionId);
+    if (!session || session.live) return;
+    session.live = true;
+    session.streamingReplay = true;
+    session.pendingReplay = session.log.since(-1);
+    this.flushStreamingReplay(session, false);
+  }
+
+  finishStreaming(sessionId: string) {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    this.flushStreamingReplay(session, true);
+    session.streamingReplay = false;
+  }
+
   async startSession(providerId: string, cwd: string): Promise<string> {
     const provider = this.providers.find((p) => p.manifest.id === providerId);
     if (!provider) throw new Error(`Unknown provider '${providerId}'`);
@@ -232,7 +316,12 @@ export class Daemon {
     const log = new SessionLog(`${providerId}-${Date.now().toString(36)}`);
     // Registered before connecting so `record` has somewhere to hold events the
     // agent emits during the handshake itself.
-    const session = { handle: undefined as unknown as AcpSessionHandle, log, live: false };
+    const session: ActiveSession = {
+      handle: undefined,
+      log,
+      live: false,
+      ready: Promise.resolve(),
+    };
     this.sessions.set(log.sessionId, session);
 
     try {
@@ -249,7 +338,7 @@ export class Daemon {
 
   /** Selectors (model, thinking level, mode) advertised by a session's agent. */
   configOptions(sessionId: string) {
-    return this.sessions.get(sessionId)?.handle.configOptions ?? [];
+    return this.sessions.get(sessionId)?.handle?.configOptions ?? [];
   }
 
   /**
@@ -279,10 +368,16 @@ export class Daemon {
     // making the drawer wait on the agent's boot time.
     if (!refresh) {
       const disk = await readProbeCache(providerId);
-      if (disk) {
-        if (Date.now() - disk.probedAt > Daemon.REVALIDATE_AFTER_MS) {
-          void this.revalidate(providerId);
-        }
+      const countsComplete =
+        disk &&
+        (!disk.canResume ||
+          disk.sessions.every((session) => session.messageCount !== undefined));
+      // Pre-count cache entries came from an older daemon. Reprobe immediately
+      // instead of pinning rows without counts in memory for this whole process.
+      if (disk && countsComplete) {
+        // Return disk history immediately while booting the matching provider.
+        // The first tap can then adopt this process instead of starting cold.
+        void this.warmProvider(providerId);
         const served = Promise.resolve<ProviderCapabilities>({
           configOptions: disk.configOptions,
           sessions: disk.sessions,
@@ -334,55 +429,57 @@ export class Daemon {
     return probe;
   }
 
-  /**
-   * Open one of the agent's own past conversations.
-   *
-   * `session/load` replays its history as ordinary `session/update` events, so
-   * they land in the log and reach every client exactly like live output — a
-   * resumed thread and a fresh one are the same thing downstream.
-   */
-  async resumeSession(providerId: string, agentSessionId: string, cwd: string) {
+  /** Begin restoring immediately; callers can announce before the agent is ready. */
+  beginResumeSession(providerId: string, agentSessionId: string, cwd: string) {
     const provider = this.providers.find((p) => p.manifest.id === providerId);
     if (!provider) throw new Error(`Unknown provider '${providerId}'`);
     if (!isAvailable(provider)) throw new Error(unavailableReason(provider)!);
 
     const log = new SessionLog(`${providerId}-${Date.now().toString(36)}`);
-    const session = { handle: undefined as unknown as AcpSessionHandle, log, live: false };
+    const session: ActiveSession = {
+      handle: undefined,
+      log,
+      live: false,
+      ready: Promise.resolve(),
+    };
     this.sessions.set(log.sessionId, session);
+    session.ready = this.connectSession(session, provider, cwd, agentSessionId);
+    return { sessionId: log.sessionId, ready: session.ready };
+  }
 
+  async resumeSession(providerId: string, agentSessionId: string, cwd: string) {
+    const pending = this.beginResumeSession(providerId, agentSessionId, cwd);
     try {
-      // `session/load` replays the whole conversation here, before returning —
-      // every one of those events lands in the log unsent, and `markLive`
-      // delivers them after `session.started`.
-      await this.connectSession(session, provider, cwd, agentSessionId);
+      await pending.ready;
+      return pending.sessionId;
     } catch (error) {
-      this.sessions.delete(log.sessionId);
+      this.sessions.delete(pending.sessionId);
       throw error;
     }
-
-    return log.sessionId;
   }
 
   async setConfigOption(sessionId: string, configId: string, value: string | boolean) {
-    // The handle updates its own advertised options, so late-joining clients
-    // and the next probe both see the current values.
-    return this.require(sessionId).handle.setConfigOption(configId, value);
+    const session = this.require(sessionId);
+    await session.ready;
+    return session.handle!.setConfigOption(configId, value);
   }
 
   async prompt(sessionId: string, text: string) {
     const session = this.require(sessionId);
-    // Echo the user's own message into the log so every client renders it,
-    // including the ones that did not send it.
+    // Echo immediately, then queue against a still-loading agent if necessary.
     this.send(session.log.append({ kind: "user_message", text }));
-    await session.handle.prompt(text);
+    await session.ready;
+    await session.handle!.prompt(text);
   }
 
   async cancel(sessionId: string) {
-    await this.require(sessionId).handle.cancel();
+    const session = this.require(sessionId);
+    await session.ready;
+    await session.handle!.cancel();
   }
 
   answerPermission(sessionId: string, requestId: string, optionId: string) {
-    return this.require(sessionId).handle.answerPermission(requestId, optionId);
+    return this.require(sessionId).handle?.answerPermission(requestId, optionId) ?? false;
   }
 
   /** Replay everything a reconnecting client has not seen yet. */
@@ -391,7 +488,10 @@ export class Daemon {
   }
 
   closeAll() {
-    for (const session of this.sessions.values()) session.handle?.close();
+    for (const session of this.sessions.values()) {
+      if (session.replayTimer) clearTimeout(session.replayTimer);
+      session.handle?.close();
+    }
     this.sessions.clear();
     for (const spare of this.spares.values()) {
       clearTimeout(spare.timer);

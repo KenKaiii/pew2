@@ -1,4 +1,5 @@
 import { Easing } from "react-native";
+import { approvalActionColors, fallbackGlassTokens } from "./materialTokens";
 
 /**
  * Design tokens.
@@ -62,36 +63,16 @@ export const theme = {
   headerInset: 8,
 
   /**
-   * Frosted-surface recipe, sampled pixel-by-pixel from the reference build.
-   *
-   * There are two tiers, and using one for everything is what makes the material
-   * look flat. Measured on the reference's #111111 canvas:
-   *
-   *   control   fill #272727  rim #404040   (buttons, pills, chips)
-   *   raised    fill #333333  rim #606060   (the composer)
-   *
-   * The rim carries the effect. A blurred fill alone reads as a painted grey
-   * rectangle; the brighter hairline is what makes it look like a pane of glass
-   * catching light above the canvas. Rim alphas are tuned to composite *over*
-   * the fill, not over the raw canvas.
+   * Non-Apple fallback only. iOS 26/27 uses the native adaptive Liquid Glass
+   * material, including the user's Clear/Tinted and accessibility preferences.
+   * These values preserve the same hierarchy on web and Android: controls are
+   * lighter than content, while composer/approval surfaces use regular-material
+   * opacity for text legibility over a moving transcript.
    */
-  glass: {
-    control: {
-      fill: "rgba(255,255,255,0.09)",
-      rim: "rgba(255,255,255,0.10)",
-    },
-    /** The composer: the primary input, and the brightest surface on screen. */
-    raised: {
-      fill: "rgba(255,255,255,0.145)",
-      rim: "rgba(255,255,255,0.22)",
-    },
-    /** Selected or active control. */
-    fillActive: "rgba(255,255,255,0.16)",
-    /** Press feedback. Brightens rather than replacing the surface colour. */
-    fillPressed: "rgba(255,255,255,0.15)",
-    /** expo-blur intensity. Above ~60 the fill washes out on a dark canvas. */
-    intensity: 45,
-  },
+  glass: fallbackGlassTokens,
+
+  /** Approval actions keep explicit contrast even over adaptive glass. */
+  approval: approvalActionColors,
 
   radius: { sm: 8, md: 12, lg: 18, composer: 26, pane: 34, pill: 999 },
 

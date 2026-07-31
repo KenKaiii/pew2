@@ -20,15 +20,17 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  useWindowDimensions,
   View,
 } from "react-native";
-import { BlurView } from "expo-blur";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { theme } from "../theme";
 import { haptics } from "./haptics";
 import type { ConfigOption } from "../useDaemon";
 import { useReducedMotion } from "./useReducedMotion";
+import { fitPickerToViewport } from "./pickerLayout";
+import { Glass } from "./Glass";
 
 /** Height of the top bar the picker hangs from: inset, control, inset. */
 const TOP_BAR = theme.headerInset * 2 + theme.size.control;
@@ -38,6 +40,7 @@ const TOP_BAR = theme.headerInset * 2 + theme.size.control;
  * models scrolls inside this instead of running down the screen.
  */
 const MAX_MENU_HEIGHT = 360;
+const PREFERRED_MENU_WIDTH = 300;
 
 /** Category order when the agent gives no explicit priority. */
 const CATEGORY_RANK: Record<string, number> = {
@@ -69,6 +72,18 @@ export function ConfigPicker({
   const progress = useRef(new Animated.Value(0)).current;
   const reduceMotion = useReducedMotion();
   const insets = useSafeAreaInsets();
+  const viewport = useWindowDimensions();
+  const menuTop = insets.top + TOP_BAR + theme.space(1.5);
+  const menuLayout = fitPickerToViewport({
+    viewportWidth: viewport.width,
+    viewportHeight: viewport.height,
+    anchorX,
+    menuTop,
+    insets,
+    margin: theme.gutter,
+    preferredWidth: PREFERRED_MENU_WIDTH,
+    maximumHeight: MAX_MENU_HEIGHT,
+  });
 
   useEffect(() => {
     const animation = Animated.timing(progress, {
@@ -99,8 +114,8 @@ export function ConfigPicker({
       <Animated.View
         style={[
           styles.host,
-          { paddingTop: insets.top + TOP_BAR + theme.space(1.5) },
-          { paddingLeft: anchorX ?? theme.gutter },
+          { paddingTop: menuTop },
+          { paddingLeft: menuLayout.left },
           { opacity: progress },
         ]}
       >
@@ -115,8 +130,11 @@ export function ConfigPicker({
           style={[
             styles.card,
             {
-              // Grows out of the pill's own corner rather than its centre.
-              transformOrigin: "top left",
+              width: menuLayout.width,
+              maxHeight: menuLayout.maxHeight,
+              // A right-edge clamp should still feel attached to a pill near
+              // that edge instead of growing in from the opposite corner.
+              transformOrigin: menuLayout.origin,
               transform: [
                 {
                   scale: progress.interpolate({
@@ -128,14 +146,11 @@ export function ConfigPicker({
             },
           ]}
         >
-          {/* Decorative layers must not swallow taps meant for the rows. */}
-          <BlurView
-            intensity={60}
-            tint="dark"
-            style={StyleSheet.absoluteFill}
-            pointerEvents="none"
-          />
-          <View style={styles.cardTint} pointerEvents="none" />
+          <Glass
+            radius={theme.radius.lg}
+            tier="raised"
+            style={[styles.cardGlass, { maxHeight: menuLayout.maxHeight }]}
+          >
 
           {/* Hugs its rows: without this the ScrollView fills maxHeight and
               leaves dead space under the last option. */}
@@ -187,6 +202,7 @@ export function ConfigPicker({
               </View>
             ))}
           </ScrollView>
+          </Glass>
         </Animated.View>
       </Animated.View>
     </Modal>
@@ -201,27 +217,10 @@ const styles = StyleSheet.create({
     alignItems: "flex-start",
   },
   card: {
-    // Menu-width, not dialog-width: it holds short value names only.
-    minWidth: 220,
-    maxWidth: 300,
-    maxHeight: MAX_MENU_HEIGHT,
-    // Shrink to content; maxHeight is the ceiling, not the target.
+    // Width and height are fitted against the live viewport before paint.
     alignSelf: "flex-start",
-    borderRadius: theme.radius.lg,
-    overflow: "hidden",
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: theme.glass.control.rim,
   },
-  cardTint: {
-    position: "absolute",
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    // Opaque enough to carry body text over a busy thread, then lifted by the
-    // same glass fill every other control uses.
-    backgroundColor: "rgba(28,28,30,0.72)",
-  },
+  cardGlass: { width: "100%", flexShrink: 1 },
   scroll: { flexGrow: 0 },
   cardInner: { padding: theme.space(3) },
   group: { paddingBottom: theme.space(3) },

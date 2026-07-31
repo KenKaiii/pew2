@@ -17,6 +17,8 @@
  */
 import type { Session, Turn } from "./useDaemon";
 
+declare const __DEV__: boolean;
+
 /** Enabled by default in development so the UI can be reviewed with content. */
 export const USE_FIXTURES =
   __DEV__ && process.env.EXPO_PUBLIC_PEW2_FIXTURES !== "0";

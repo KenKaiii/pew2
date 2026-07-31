@@ -9,6 +9,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { userProvidersDir } from "./providers/registry.js";
+import { SESSION_HISTORY_LIMIT } from "./session-history.js";
 import type { ProviderCapabilities } from "./index.js";
 
 export interface CachedProbe extends ProviderCapabilities {
@@ -34,7 +35,12 @@ export async function readProbeCache(
     ) {
       return undefined;
     }
-    return parsed as CachedProbe;
+    return {
+      ...(parsed as CachedProbe),
+      // Old cache files may predate the UI limit; never briefly republish all
+      // 600 rows while their background refresh runs.
+      sessions: parsed.sessions.slice(0, SESSION_HISTORY_LIMIT),
+    };
   } catch {
     return undefined;
   }
@@ -48,5 +54,12 @@ export async function writeProbeCache(
 ): Promise<void> {
   const path = cachePath(providerId, env);
   await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, JSON.stringify({ ...capabilities, probedAt: Date.now() }));
+  await writeFile(
+    path,
+    JSON.stringify({
+      ...capabilities,
+      sessions: capabilities.sessions.slice(0, SESSION_HISTORY_LIMIT),
+      probedAt: Date.now(),
+    }),
+  );
 }

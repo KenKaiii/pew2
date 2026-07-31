@@ -78,3 +78,29 @@ test("an empty replay still marks transcript loading complete", () => {
 
   expect(sent).toEqual([{ t: "session.replay", sessionId: "empty", events: [] }]);
 });
+
+test("resume history streams after announcement and ends with a completion frame", async () => {
+  const { daemon, sent } = daemonWithCollector();
+  const session = plantSession(daemon, "streaming");
+
+  daemon.markStreaming("streaming");
+  (daemon as any).record(session, { n: 1 });
+  (daemon as any).record(session, { n: 2 });
+  await new Promise((resolve) => setTimeout(resolve, 25));
+
+  expect(sent).toHaveLength(1);
+  expect(sent[0]).toMatchObject({
+    t: "session.replay",
+    sessionId: "streaming",
+    complete: false,
+  });
+  expect((sent[0] as any).events.map((event: any) => event.payload.n)).toEqual([1, 2]);
+
+  daemon.finishStreaming("streaming");
+  expect(sent[1]).toEqual({
+    t: "session.replay",
+    sessionId: "streaming",
+    events: [],
+    complete: true,
+  });
+});

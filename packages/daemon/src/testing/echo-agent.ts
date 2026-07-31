@@ -50,7 +50,11 @@ const configOptions = [
 const app = agent({ name: "pew2-echo" })
   .onRequest("initialize", async () => ({
     protocolVersion: 1,
-    agentCapabilities: { loadSession: false, promptCapabilities: { image: false } },
+    agentCapabilities: {
+      loadSession: true,
+      sessionCapabilities: { list: {}, resume: {} },
+      promptCapabilities: { image: false },
+    },
     agentInfo: { name: "pew2-echo", title: "Echo", version: "0.1.0" },
     authMethods: [],
   }))
@@ -58,6 +62,38 @@ const app = agent({ name: "pew2-echo" })
     const sessionId = `echo_${++counter}`;
     sessions.add(sessionId);
     return { sessionId, configOptions };
+  })
+  // A persisted conversation that exists before the phone opens it. It omits
+  // optional count metadata so the daemon must inspect its replay, as it does
+  // for existing GG Coder sessions.
+  .onRequest("session/list", async (ctx: any) => ({
+    sessions: [
+      {
+        sessionId: "echo_history_1",
+        cwd: (ctx.params as { cwd?: string })?.cwd ?? process.cwd(),
+        title: "Unopened echo session",
+        updatedAt: "2026-07-31T12:00:00.000Z",
+      },
+    ],
+  }))
+  .onRequest("session/load", async (ctx: any) => {
+    const { sessionId } = ctx.params as { sessionId: string };
+    if (sessionId !== "echo_history_1") throw new Error(`Unknown session '${sessionId}'`);
+    const replay = [
+      ["user_message_chunk", "First question"],
+      ["agent_message_chunk", "First answer"],
+      ["user_message_chunk", "Second question"],
+      ["agent_message_chunk", "Second answer"],
+      ["user_message_chunk", "Third question"],
+      ["agent_message_chunk", "Third answer"],
+    ] as const;
+    for (const [sessionUpdate, text] of replay) {
+      await ctx.client.notify("session/update", {
+        sessionId,
+        update: { sessionUpdate, content: { type: "text", text } },
+      });
+    }
+    return { configOptions };
   })
   .onRequest("session/set_config_option", async (ctx: any) => {
     const { configId, value } = ctx.params as { configId: string; value: string };

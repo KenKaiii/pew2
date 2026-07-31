@@ -16,6 +16,8 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { theme } from "../theme";
 import { haptics } from "./haptics";
+import { CircleButton } from "./controls";
+import { Glass } from "./Glass";
 
 interface Props {
   visible: boolean;
@@ -101,35 +103,23 @@ export function QrScanner({ visible, onClose, onScan, error }: Props) {
         {/* Sits above the camera, so it is declared after it. */}
         <View style={[styles.overlay, { paddingTop: insets.top + theme.space(2) }]}>
           <View style={styles.bar}>
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel="Cancel scanning"
-              onPress={() => {
-                haptics.tap();
-                close();
-              }}
-              style={({ pressed }) => [styles.iconButton, pressed && styles.pressed]}
-            >
+            <CircleButton label="Cancel scanning" size={40} onPress={close}>
               <Ionicons name="close" size={22} color={theme.color.text} />
-            </Pressable>
+            </CircleButton>
 
             {granted ? (
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel={torch ? "Turn off torch" : "Turn on torch"}
-                accessibilityState={{ selected: torch }}
-                onPress={() => {
-                  haptics.select();
-                  setTorch((on) => !on);
-                }}
-                style={({ pressed }) => [styles.iconButton, pressed && styles.pressed]}
+              <CircleButton
+                label={torch ? "Turn off torch" : "Turn on torch"}
+                size={40}
+                onPress={() => setTorch((on) => !on)}
+                feel={haptics.select}
               >
                 <Ionicons
                   name={torch ? "flashlight" : "flashlight-outline"}
                   size={20}
                   color={theme.color.text}
                 />
-              </Pressable>
+              </CircleButton>
             ) : null}
           </View>
 
@@ -152,29 +142,33 @@ export function QrScanner({ visible, onClose, onScan, error }: Props) {
                   : "Only used to read the code."}
               </Text>
               {permission?.canAskAgain !== false ? (
+                <Glass radius={theme.radius.lg} interactive>
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="Allow camera access"
+                    onPress={() => {
+                      haptics.tap();
+                      void requestPermission();
+                    }}
+                    style={({ pressed }) => [styles.allow, pressed && styles.pressed]}
+>
+                    <Text style={styles.allowText}>Allow camera</Text>
+                  </Pressable>
+                </Glass>
+              ) : null}
+              <Glass radius={theme.radius.lg} interactive>
                 <Pressable
                   accessibilityRole="button"
-                  accessibilityLabel="Allow camera access"
+                  accessibilityLabel="Paste the link instead"
                   onPress={() => {
                     haptics.tap();
-                    void requestPermission();
+                    close();
                   }}
-                  style={({ pressed }) => [styles.allow, pressed && styles.pressed]}
+                  style={({ pressed }) => [styles.secondary, pressed && styles.pressed]}
                 >
-                  <Text style={styles.allowText}>Allow camera</Text>
+                  <Text style={styles.secondaryText}>Paste a link</Text>
                 </Pressable>
-              ) : null}
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel="Paste the link instead"
-                onPress={() => {
-                  haptics.tap();
-                  close();
-                }}
-                style={({ pressed }) => [styles.secondary, pressed && styles.pressed]}
-              >
-                <Text style={styles.secondaryText}>Paste a link</Text>
-              </Pressable>
+              </Glass>
             </View>
           )}
         </View>
@@ -196,15 +190,6 @@ const styles = StyleSheet.create({
     paddingHorizontal: theme.gutter,
   },
   bar: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
-  iconButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    alignItems: "center",
-    justifyContent: "center",
-    // Legible over an arbitrary camera image, which may be any brightness.
-    backgroundColor: "rgba(0,0,0,0.55)",
-  },
   pressed: { opacity: 0.6 },
   centre: { flex: 1, alignItems: "center", justifyContent: "center", gap: theme.space(4) },
   reticle: {
@@ -238,12 +223,17 @@ const styles = StyleSheet.create({
     paddingHorizontal: theme.space(4),
   },
   allow: {
-    backgroundColor: theme.color.surfaceRaised,
-    borderRadius: 12,
+    minHeight: theme.size.touch,
+    justifyContent: "center",
     paddingVertical: theme.space(3.5),
     paddingHorizontal: theme.space(8),
   },
-  allowText: { color: theme.color.text, fontSize: 16, fontWeight: "600" },
-  secondary: { paddingVertical: theme.space(2) },
-  secondaryText: { color: theme.color.textFaint, fontSize: 15 },
+  allowText: { color: theme.color.text, fontSize: 16, fontWeight: "700" },
+  secondary: {
+    minHeight: theme.size.touch,
+    justifyContent: "center",
+    paddingVertical: theme.space(2),
+    paddingHorizontal: theme.space(8),
+  },
+  secondaryText: { color: theme.color.text, fontSize: 15, fontWeight: "600" },
 });

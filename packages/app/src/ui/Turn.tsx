@@ -4,7 +4,7 @@
  * Neither side shows avatars. User prompts sit in one quiet raised surface that
  * hugs their content; agent output uses the full reading rail like a document.
  * CommonMark is rendered with native components, including headings, emphasis,
- * lists, links, tables, images, line breaks, and horizontally scrollable code.
+ * lists, links, tables, images, line breaks, and contained code blocks.
  * Each new turn fades in once while streamed chunks update the same turn.
  */
 import { useEffect, useRef } from "react";
@@ -12,6 +12,11 @@ import { Animated, StyleSheet, View } from "react-native";
 import { theme } from "../theme";
 import { useReducedMotion } from "./useReducedMotion";
 import { MarkdownText } from "./MarkdownText";
+import {
+  adaptiveUserBubbleStyle,
+  blockUserBubbleStyle,
+  userPromptNeedsFullWidth,
+} from "./messageLayoutStyles";
 import type { Turn as TurnModel } from "../useDaemon";
 
 export function Turn({ turn }: { turn: TurnModel }) {
@@ -31,12 +36,13 @@ export function Turn({ turn }: { turn: TurnModel }) {
   if (!turn.text.trim()) return null;
   // Preserve leading indentation: CommonMark uses it for indented code blocks.
   const text = turn.text.trimEnd();
-  const hasBlockLayout = text.includes("\n");
 
   if (turn.role === "user") {
     return (
       <Animated.View style={[styles.userRow, { opacity: appear }]}>
-        <View style={[styles.userBubble, hasBlockLayout && styles.userBubbleWide]}>
+        <View
+          style={[styles.userBubble, userPromptNeedsFullWidth(text) && blockUserBubbleStyle]}
+        >
           <MarkdownText text={text} />
         </View>
       </Animated.View>
@@ -67,17 +73,14 @@ export function Turn({ turn }: { turn: TurnModel }) {
 }
 
 const styles = StyleSheet.create({
-  userRow: { width: "100%", alignItems: "flex-end" },
+  userRow: { width: "100%", minWidth: 0, alignItems: "flex-end" },
   userBubble: {
-    maxWidth: "85%",
+    ...adaptiveUserBubbleStyle,
     backgroundColor: theme.color.surfaceRaised,
     borderRadius: theme.radius.lg,
     paddingHorizontal: theme.space(3.5),
     paddingVertical: theme.space(2.75),
   },
-  // Multiline Markdown needs a definite containing width so percentage-width
-  // paragraphs and nested lists can wrap. One-line prompts still hug content.
-  userBubbleWide: { width: "85%" },
   agentRow: { width: "100%" },
   thoughtRow: { width: "100%", paddingHorizontal: theme.space(1) },
   systemRow: { width: "100%" },

@@ -12,7 +12,9 @@ async function tempEnv() {
 
 const capabilities = {
   configOptions: [],
-  sessions: [{ sessionId: "s1", cwd: "/tmp", title: "Cached conversation" }],
+  sessions: [
+    { sessionId: "s1", cwd: "/tmp", title: "Cached conversation", messageCount: 3 },
+  ],
   canResume: true,
 };
 
@@ -24,6 +26,28 @@ test("a written probe reads back with its timestamp", async () => {
   expect(cached?.sessions[0]?.title).toBe("Cached conversation");
   expect(cached?.canResume).toBe(true);
   expect(Date.now() - (cached?.probedAt ?? 0)).toBeLessThan(5000);
+});
+
+test("cached history is capped at the 30 newest sessions", async () => {
+  const env = await tempEnv();
+  await writeProbeCache(
+    "ggcoder",
+    {
+      ...capabilities,
+      sessions: Array.from({ length: 36 }, (_, index) => ({
+        sessionId: `s${index}`,
+        cwd: "/tmp",
+        title: `Session ${index}`,
+        messageCount: index,
+      })),
+    },
+    env,
+  );
+
+  const cached = await readProbeCache("ggcoder", env);
+
+  expect(cached?.sessions).toHaveLength(30);
+  expect(cached?.sessions.at(-1)?.sessionId).toBe("s29");
 });
 
 test("a missing or corrupt cache is a miss, never an error", async () => {
@@ -60,6 +84,35 @@ test("a daemon answers from disk without spawning the agent", async () => {
     expect(caps.sessions[0]?.title).toBe("Cached conversation");
     // Spawning the echo agent takes hundreds of ms; disk is ~none.
     expect(elapsed).toBeLessThan(200);
+    daemon.closeAll();
+  } finally {
+    if (home === undefined) delete process.env.PEW2_HOME;
+    else process.env.PEW2_HOME = home;
+  }
+});
+
+test("a pre-count cache is refreshed instead of pinning incomplete rows", async () => {
+  const env = await tempEnv();
+  await writeProbeCache(
+    "echo",
+    {
+      ...capabilities,
+      sessions: [{ sessionId: "old", cwd: "/tmp", title: "Missing its count" }],
+    },
+    env,
+  );
+
+  const home = process.env.PEW2_HOME;
+  process.env.PEW2_HOME = env.PEW2_HOME;
+  try {
+    const { Daemon } = await import("./index.js");
+    const daemon = new Daemon({ id: "test", name: "test" }, true);
+    await daemon.refreshProviders();
+
+    const caps = await daemon.probeProvider("echo");
+
+    expect(caps.sessions[0]?.title).toBe("Unopened echo session");
+    expect(caps.sessions[0]?.messageCount).toBe(6);
     daemon.closeAll();
   } finally {
     if (home === undefined) delete process.env.PEW2_HOME;

@@ -8,6 +8,8 @@ import { test, expect } from "bun:test";
 import { loadProviders } from "../providers/registry.js";
 import { connectProvider } from "../acp/connect.js";
 import { SessionLog } from "../session/log.js";
+import { mergeAgentSessions } from "../../../app/src/agentHistory.js";
+import { formatHistoryMetadata } from "../../../app/src/historyMetadata.js";
 
 async function echoProvider() {
   const { providers } = await loadProviders();
@@ -112,6 +114,30 @@ test("a session adopts the warm spare instead of spawning again", async () => {
   expect(session.log.events.some((e: any) => e.payload?.kind === "user_message")).toBe(true);
 
   daemon.closeAll();
+}, 60_000);
+
+test("an unopened session crosses ACP, daemon state, and drawer formatting with its count", async () => {
+  const { Daemon } = await import("../index.js");
+  const daemon = new Daemon({ id: "test", name: "test" }, true);
+  await daemon.refreshProviders();
+
+  try {
+    const capabilities = await daemon.probeProvider("echo", { refresh: true });
+    const sessions = mergeAgentSessions(
+      [],
+      "echo",
+      capabilities.sessions,
+      capabilities.canResume,
+      Date.now(),
+    );
+    const unopened = sessions.find((session) => session.agentSessionId === "echo_history_1");
+
+    expect(unopened).toBeDefined();
+    expect(unopened!.turns).toEqual([]);
+    expect(formatHistoryMetadata(unopened!)).toBe("6 messages · pew2");
+  } finally {
+    daemon.closeAll();
+  }
 }, 60_000);
 
 test("updates route to the session they belong to on a reused connection", async () => {

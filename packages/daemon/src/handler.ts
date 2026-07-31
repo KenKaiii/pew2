@@ -99,25 +99,40 @@ export async function handleMessage(raw: string, ctx: HandlerContext): Promise<v
         if (!message.providerId || !message.agentSessionId) {
           throw new Error("providerId and agentSessionId required");
         }
-        const sessionId = await daemon.resumeSession(
+        const pending = daemon.beginResumeSession(
           message.providerId,
           message.agentSessionId,
           message.cwd ?? cwd,
         );
         broadcast({
           t: "session.started",
-          sessionId,
+          sessionId: pending.sessionId,
           providerId: message.providerId,
-          configOptions: daemon.configOptions(sessionId),
+          configOptions: [],
           resumed: true,
           // Clients list the agent's copy as a stub; this is what lets them
           // replace it with the live session instead of showing it twice.
           agentSessionId: message.agentSessionId,
         });
-        // The agent replayed the conversation's history during `session/load`,
-        // before this announce existed. Those events were held back; release
-        // them now that clients know the session.
-        daemon.markLive(sessionId);
+        // History can now stream without racing ahead of session.started.
+        daemon.markStreaming(pending.sessionId);
+        void pending.ready
+          .then(() => {
+            broadcast({
+              t: "session.config",
+              sessionId: pending.sessionId,
+              providerId: message.providerId,
+              configOptions: daemon.configOptions(pending.sessionId),
+            });
+            daemon.finishStreaming(pending.sessionId);
+          })
+          .catch((error) => {
+            broadcast({
+              ...errorMessage("resume_failed", error),
+              sessionId: pending.sessionId,
+            });
+            daemon.finishStreaming(pending.sessionId);
+          });
         break;
       }
 

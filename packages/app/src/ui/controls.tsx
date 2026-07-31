@@ -82,7 +82,7 @@ export function CircleButton({
   }
 
   return (
-    <Glass radius={size / 2} style={[{ width: size, height: size }, style]}>
+    <Glass radius={size / 2} interactive style={[{ width: size, height: size }, style]}>
       <Pressable
         onPress={press}
         disabled={disabled}
@@ -127,7 +127,7 @@ export function Pill({ onPress, label, children, disabled = false, feel }: PillP
   }
 
   return (
-    <Glass radius={theme.radius.pill} style={styles.pillGlass}>
+    <Glass radius={theme.radius.pill} interactive style={styles.pillGlass}>
       <Pressable
         onPress={withHaptic(onPress, feel)}
         disabled={disabled}

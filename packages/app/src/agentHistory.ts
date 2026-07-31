@@ -16,6 +16,7 @@ export interface WireAgentSession {
   cwd: string;
   title?: string;
   updatedAt?: string;
+  messageCount?: number;
 }
 
 /** Stable local id for a conversation owned by an agent rather than this app. */
@@ -29,7 +30,11 @@ export function replaceAgentSessionStub(existing: Session[], live: Session): Ses
 
   const stub = existing.find((session) => session.agentSessionId === live.agentSessionId);
   return [
-    { ...live, cwd: live.cwd ?? stub?.cwd },
+    {
+      ...live,
+      cwd: live.cwd ?? stub?.cwd,
+      messageCount: live.messageCount ?? stub?.messageCount,
+    },
     ...existing.filter((session) => session.agentSessionId !== live.agentSessionId),
   ];
 }
@@ -64,6 +69,7 @@ export function mergeAgentSessions(
       // bury a real conversation at the bottom of the list.
       startedAt: parseUpdatedAt(s.updatedAt) ?? now,
       turns: [],
+      messageCount: s.messageCount,
       configOptions: [],
       agentSessionId: s.sessionId,
       cwd: s.cwd,

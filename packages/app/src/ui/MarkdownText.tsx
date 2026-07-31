@@ -1,11 +1,16 @@
-import { createElement } from "react";
-import { Linking, Platform, ScrollView, StyleSheet, Text, View } from "react-native";
+import { createElement, useEffect, useState } from "react";
+import { Ionicons } from "@expo/vector-icons";
+import * as Clipboard from "expo-clipboard";
+import { Linking, Platform, Pressable, StyleSheet, Text, View } from "react-native";
 import Markdown, {
   type MarkdownStyles,
   type RenderFunction,
   type RenderRules,
 } from "react-native-markdown-renderer";
 import { theme } from "../theme";
+import { writeCodeToClipboard } from "./codeBlockClipboard";
+import { fencedCodeContainerStyle, fencedCodeTextStyle } from "./markdownCodeStyles";
+import { boundedMarkdownParagraphStyle, boundedMarkdownRootStyle } from "./messageLayoutStyles";
 
 export type MarkdownTone = "body" | "thought" | "system";
 
@@ -18,21 +23,114 @@ function trimTrailingNewline(text: string): string {
   return text.endsWith("\n") ? text.slice(0, -1) : text;
 }
 
-const renderCodeBlock: RenderFunction = (node, _children, _parents, styles) =>
-  createElement(
-    View,
-    { ["key"]: node.key, style: styles.codeBlockContainer as never },
-    <ScrollView
-      horizontal
-      nestedScrollEnabled
-      showsHorizontalScrollIndicator
-      contentContainerStyle={styles.codeBlockContent as never}
-    >
-      <Text selectable style={styles.codeBlock as never}>
-        {trimTrailingNewline(node.content)}
-      </Text>
-    </ScrollView>,
+type CopyState = "idle" | "copied" | "failed";
+
+function CodeBlock({
+  content,
+  containerStyle,
+  contentStyle,
+  textStyle,
+}: {
+  content: string;
+  containerStyle: object;
+  contentStyle: object;
+  textStyle: object;
+}) {
+  const [copyState, setCopyState] = useState<CopyState>("idle");
+
+  useEffect(() => {
+    if (copyState === "idle") return undefined;
+    const reset = setTimeout(() => setCopyState("idle"), 1800);
+    return () => clearTimeout(reset);
+  }, [copyState]);
+
+  const copyCode = async () => {
+    const copied = await writeCodeToClipboard(content, Clipboard.setStringAsync);
+    setCopyState(copied ? "copied" : "failed");
+  };
+
+  const label =
+    copyState === "copied" ? "Copied" : copyState === "failed" ? "Try again" : "Copy";
+  const icon =
+    copyState === "copied"
+      ? "checkmark"
+      : copyState === "failed"
+        ? "alert-circle-outline"
+        : "copy-outline";
+
+  return (
+    <View style={containerStyle}>
+      <View style={codeBlockChrome.header}>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Copy code"
+          accessibilityState={{ selected: copyState === "copied" }}
+          hitSlop={6}
+          onPress={() => void copyCode()}
+          style={({ pressed }) => [
+            codeBlockChrome.copyButton,
+            pressed && codeBlockChrome.copyButtonPressed,
+          ]}
+        >
+          <Ionicons
+            name={icon}
+            size={14}
+            color={copyState === "failed" ? theme.color.danger : theme.color.textDim}
+          />
+          <Text
+            style={[
+              codeBlockChrome.copyLabel,
+              copyState === "failed" && codeBlockChrome.copyLabelFailed,
+            ]}
+          >
+            {label}
+          </Text>
+        </Pressable>
+      </View>
+      <View style={contentStyle}>
+        <Text selectable style={textStyle}>
+          {content}
+        </Text>
+      </View>
+    </View>
   );
+}
+
+const codeBlockChrome = StyleSheet.create({
+  header: {
+    minHeight: 36,
+    alignItems: "flex-end",
+    justifyContent: "center",
+    paddingHorizontal: theme.space(1.5),
+    borderBottomWidth: StyleSheetHairline,
+    borderBottomColor: theme.color.border,
+    backgroundColor: theme.color.surfaceRaised,
+  },
+  copyButton: {
+    minHeight: 30,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.space(1),
+    paddingHorizontal: theme.space(2),
+    borderRadius: theme.radius.sm,
+  },
+  copyButtonPressed: { backgroundColor: theme.color.surfacePressed },
+  copyLabel: { color: theme.color.textDim, fontSize: theme.font.tiny, fontWeight: "600" },
+  copyLabelFailed: { color: theme.color.danger },
+});
+
+const renderCodeBlock: RenderFunction = (node, _children, _parents, styles) => {
+  const content = trimTrailingNewline(node.content);
+  return (
+    <CodeBlock
+      key={node.key}
+      content={content}
+      containerStyle={styles.codeBlockContainer as object}
+      contentStyle={styles.codeBlockContent as object}
+      textStyle={styles.codeBlock as object}
+    />
+  );
+};
 
 const markdownRules: Partial<RenderRules> = {
   // A paragraph must be one measured Text block. The library's default uses a
@@ -57,16 +155,19 @@ const markdownRules: Partial<RenderRules> = {
     ),
 };
 
-function stylesFor(color: string, fontSize: number, lineHeight: number): Partial<MarkdownStyles> {
+function stylesFor(
+  color: string,
+  fontSize: number,
+  lineHeight: number,
+): Partial<MarkdownStyles> {
   return {
-    root: { flexShrink: 1, marginBottom: -BLOCK_GAP },
+    root: { ...boundedMarkdownRootStyle, marginBottom: -BLOCK_GAP },
     text: { color, fontSize, lineHeight },
     paragraph: {
       color,
       fontSize,
       lineHeight,
-      width: "100%",
-      flexShrink: 1,
+      ...boundedMarkdownParagraphStyle,
       marginTop: 0,
       marginBottom: BLOCK_GAP,
     },
@@ -106,17 +207,23 @@ function stylesFor(color: string, fontSize: number, lineHeight: number): Partial
       lineHeight: Math.max(18, lineHeight - 2),
     },
     codeBlockContainer: {
-      width: "100%",
-      overflow: "hidden",
+      ...fencedCodeContainerStyle,
       marginBottom: BLOCK_GAP,
       backgroundColor: theme.color.surface,
       borderWidth: StyleSheetHairline,
       borderColor: theme.color.border,
       borderRadius: theme.radius.md,
     },
-    codeBlockContent: { minWidth: "100%" },
+    codeBlockContent: {
+      width: "100%",
+      maxWidth: "100%",
+      minWidth: 0,
+    },
     codeBlock: {
       color: theme.color.text,
+      // The renderer's default code style is GitHub-light (#f6f8fa). The dark
+      // container owns the surface; the inner Text must not repaint it white.
+      ...fencedCodeTextStyle,
       paddingHorizontal: theme.space(3),
       paddingVertical: theme.space(2.5),
       fontFamily: monospace,

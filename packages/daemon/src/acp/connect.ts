@@ -10,6 +10,9 @@ import { Readable, Writable } from "node:stream";
 import { client, ndJsonStream, type ClientConnection } from "@agentclientprotocol/sdk";
 import type { LoadedProvider } from "../providers/registry.js";
 import { humanError } from "../errors.js";
+import { SESSION_HISTORY_LIMIT } from "../session-history.js";
+import { hydrateClaudeMessageCounts } from "./claude-history.js";
+import { hydrateGgCoderMessageCounts } from "./ggcoder-history.js";
 
 /**
  * A session-level selector advertised by the agent: model, thinking level, mode.
@@ -106,6 +109,8 @@ export interface AgentSession {
   title?: string;
   /** ISO 8601 timestamp of last activity, when the agent tracks one. */
   updatedAt?: string;
+  /** Number of message rows the app will render before this session is opened. */
+  messageCount?: number;
 }
 
 export interface AcpSessionHandle {
@@ -180,6 +185,19 @@ function toWebStreams(child: ChildProcessWithoutNullStreams) {
     input: Readable.toWeb(child.stdout) as unknown as ReadableStream<Uint8Array>,
     output: Writable.toWeb(child.stdin) as unknown as WritableStream<Uint8Array>,
   };
+}
+
+/**
+ * The role the app turns an ACP replay update into. Tool updates are deliberately
+ * absent: the conversation renderer ignores them, so they cannot inflate the
+ * message count shown beside a still-unopened session.
+ */
+function replayMessageRole(payload: unknown): "user" | "agent" | "thought" | undefined {
+  const update = (payload as { update?: { sessionUpdate?: string } })?.update;
+  if (update?.sessionUpdate === "user_message_chunk") return "user";
+  if (update?.sessionUpdate === "agent_message_chunk") return "agent";
+  if (update?.sessionUpdate === "agent_thought_chunk") return "thought";
+  return undefined;
 }
 
 export async function connectProvider(options: ConnectOptions): Promise<AcpSessionHandle> {
@@ -396,13 +414,65 @@ export async function connectProvider(options: ConnectOptions): Promise<AcpSessi
     async listSessions() {
       if (!canListSessions) return [];
       const result = (await connection.agent.request("session/list", {})) as {
-        sessions?: AgentSession[];
+        sessions?: (AgentSession & { _meta?: { messageCount?: unknown } })[];
       };
-      const sessions = Array.isArray(result?.sessions) ? result.sessions : [];
-      // Newest first: the thread you were just working on is the one you want.
-      return [...sessions].sort((a, b) =>
-        (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""),
-      );
+      const listed = Array.isArray(result?.sessions) ? result.sessions : [];
+      // ACP keeps agent-specific list data in `_meta`. Promote the one field the
+      // drawer understands so it survives the typed daemon/app wire boundary.
+      const sessions: AgentSession[] = listed
+        .map(({ _meta, ...session }) => {
+          const messageCount = _meta?.messageCount;
+          return {
+            ...session,
+            ...(typeof messageCount === "number" &&
+            Number.isInteger(messageCount) &&
+            messageCount >= 0
+              ? { messageCount }
+              : {}),
+          };
+        })
+        // Newest first, then cap before hydrating counts. This turns a provider
+        // with 600 archived chats into 30 small local reads instead of 600.
+        .sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""))
+        .slice(0, SESSION_HISTORY_LIMIT);
+
+      // Both agents have local indexes that are dramatically faster than
+      // loading 30 transcripts one-by-one over ACP just to count visible rows.
+      if (provider.manifest.id === "claude-code") {
+        await hydrateClaudeMessageCounts(sessions);
+      } else if (provider.manifest.id === "ggcoder") {
+        await hydrateGgCoderMessageCounts(sessions);
+      }
+
+      // Other older agents get the protocol-only fallback. Nothing is broadcast
+      // and the phone still has not opened any of these sessions.
+      if (canLoadSession) {
+        for (const session of sessions) {
+          if (session.messageCount !== undefined) continue;
+          const previousHandler = updateHandlers.get(session.sessionId);
+          let count = 0;
+          let previousRole: ReturnType<typeof replayMessageRole>;
+          updateHandlers.set(session.sessionId, (payload) => {
+            const role = replayMessageRole(payload);
+            if (role && role !== previousRole) count += 1;
+            if (role) previousRole = role;
+          });
+          try {
+            await connection.agent.request("session/load", {
+              sessionId: session.sessionId,
+              cwd: session.cwd,
+              mcpServers: [],
+            });
+            session.messageCount = count;
+          } catch {
+            // One corrupt or raced transcript must not hide every healthy one.
+          } finally {
+            if (previousHandler) updateHandlers.set(session.sessionId, previousHandler);
+            else updateHandlers.delete(session.sessionId);
+          }
+        }
+      }
+      return sessions;
     },
     async setConfigOption(configId: string, value: string | boolean) {
       try {

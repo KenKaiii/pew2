@@ -3,15 +3,16 @@ import type { Session } from "./useDaemon";
 
 /** Text rendered below a conversation title in the history drawer. */
 export function formatHistoryMetadata(
-  session: Pick<Session, "agentSessionId" | "cwd" | "turns">,
+  session: Pick<Session, "cwd" | "messageCount" | "turns">,
 ): string {
   const project = folderName(session.cwd);
-  // Agent-history stubs have not loaded their transcript yet, so their message
-  // count is unknown rather than zero.
+  // A loaded transcript is freshest. Before opening, use the count supplied by
+  // the daemon's session-list probe.
+  const messageCount = session.turns.length > 0 ? session.turns.length : session.messageCount;
   const count =
-    session.agentSessionId && session.turns.length === 0
+    messageCount === undefined
       ? undefined
-      : `${session.turns.length} message${session.turns.length === 1 ? "" : "s"}`;
+      : `${messageCount} message${messageCount === 1 ? "" : "s"}`;
 
   return [count, project].filter(Boolean).join(" · ");
 }

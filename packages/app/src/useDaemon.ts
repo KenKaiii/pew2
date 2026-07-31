@@ -59,6 +59,8 @@ export interface Session {
   title: string;
   startedAt: number;
   turns: Turn[];
+  /** Message rows available before this transcript is opened. */
+  messageCount?: number;
   /** The selectors this session was running with, restored when reopened. */
   configOptions: ConfigOption[];
   /**
@@ -175,9 +177,9 @@ export function useDaemon(url: string, deviceId = "phone") {
   // Providers already asked for capabilities, so a reconnect's repeat provider
   // announcement does not spawn another probe for each one.
   const probed = useRef(new Set<string>());
-  // Capability requests in flight. Drives the drawer's skeleton rows; read in
-  // render only through State, so the updater stays pure.
-  const capabilitiesPending = useRef(0);
+  // Capability requests in flight, keyed by provider. One slow or broken agent
+  // must not keep another provider's already-loaded history behind a skeleton.
+  const pendingCapabilities = useRef(new Set<string>());
   // Highest `seq` seen per session.
   //
   // This is what makes reconnecting gap-free. ACP does not replay messages
@@ -228,10 +230,10 @@ export function useDaemon(url: string, deviceId = "phone") {
           return;
         }
 
-        // Replayed history, after a reconnect or a resume. The whole batch is
-        // folded into ONE state update: applying a long history event-by-event
-        // copied the turns array per event — quadratic work that read on the
-        // phone as a stall of seconds after the skeleton.
+        // Replayed history, after a reconnect or a resume. Progressive batches
+        // make long transcripts visible from the top while the agent continues
+        // loading; each batch is still folded in one state update, avoiding the
+        // quadratic event-by-event array copies that caused multi-second stalls.
         if (message.t === "session.replay" && Array.isArray(message.events)) {
           if (message.sessionId !== sessionRef.current) return;
           const events: ReplayEvent[] = [];
@@ -243,9 +245,17 @@ export function useDaemon(url: string, deviceId = "phone") {
           }
           setState((prev) => {
             const folded = events.length > 0 ? foldSessionEvents(prev, events) : prev;
-            return folded.loadingSession
-              ? { ...folded, loadingSession: false, busy: false }
-              : folded;
+            const complete = message.complete !== false;
+            // Reveal on the first real batch. An empty final frame still clears
+            // the skeleton for sessions with no visible transcript.
+            if (events.length === 0 && !complete) return folded;
+            return {
+              ...folded,
+              loadingSession: false,
+              // Replay is history, not an active agent turn. Claude may still be
+              // attaching in the background, but prompts safely queue server-side.
+              busy: false,
+            };
           });
           return;
         }
@@ -310,21 +320,17 @@ export function useDaemon(url: string, deviceId = "phone") {
         // from the agent, so an app that updates its model line-up is reflected
         // without changing anything here.
         if (message.t === "providers") {
-          let requested = 0;
           for (const provider of message.providers ?? []) {
             if (!provider.available || probed.current.has(provider.id)) continue;
             probed.current.add(provider.id);
-            requested += 1;
+            pendingCapabilities.current.add(provider.id);
             ws.send(
               JSON.stringify({ t: "provider.capabilities", providerId: provider.id }),
             );
           }
-          // Every request gets exactly one reply — even a failed probe answers
-          // with empty capabilities — so the counter always returns to zero.
-          capabilitiesPending.current += requested;
         }
         if (message.t === "provider.capabilities") {
-          capabilitiesPending.current = Math.max(0, capabilitiesPending.current - 1);
+          pendingCapabilities.current.delete(message.providerId);
         }
 
         setState((prev) => {
@@ -333,7 +339,7 @@ export function useDaemon(url: string, deviceId = "phone") {
               return {
                 ...prev,
                 providers: message.providers ?? [],
-                loadingSessions: capabilitiesPending.current > 0,
+                loadingSessions: pendingCapabilities.current.size > 0,
               };
 
             case "provider.capabilities": {
@@ -345,10 +351,13 @@ export function useDaemon(url: string, deviceId = "phone") {
                 message.sessions,
                 message.canResume === true,
               );
-              const loadingSessions = capabilitiesPending.current > 0;
-              return sessions === prev.sessions && loadingSessions === prev.loadingSessions
-                ? prev
-                : { ...prev, sessions, loadingSessions };
+              // Always publish the provider's completion. Even an empty response
+              // must clear its own skeleton while unrelated probes continue.
+              return {
+                ...prev,
+                sessions,
+                loadingSessions: pendingCapabilities.current.size > 0,
+              };
             }
 
             case "session.started": {
@@ -438,7 +447,7 @@ export function useDaemon(url: string, deviceId = "phone") {
                   : -1;
               if (optimistic >= 0) {
                 turns[optimistic] = {
-                  ...turns[optimistic],
+                  ...turns[optimistic]!,
                   id: `${message.sessionId}:${message.seq}`,
                 };
               } else if (last && last.role === chunk.role && chunk.role !== "user") {
@@ -707,6 +716,9 @@ export function useDaemon(url: string, deviceId = "phone") {
     state.configOptions.length > 0
       ? state.configOptions
       : (effectiveProviderId ? knownConfigs[effectiveProviderId] : undefined) ?? [];
+  const loadingSessions = effectiveProviderId
+    ? pendingCapabilities.current.has(effectiveProviderId)
+    : false;
 
-  return { ...state, ...actions, configOptions };
+  return { ...state, ...actions, configOptions, loadingSessions };
 }

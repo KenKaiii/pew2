@@ -13,6 +13,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { theme } from "../theme";
 import { haptics } from "./haptics";
 import { Logo } from "./Logo";
+import { Glass } from "./Glass";
 
 interface Props {
   onConnect: () => void;
@@ -35,17 +36,19 @@ export function LaunchScreen({ onConnect }: Props) {
           { paddingBottom: insets.bottom + theme.space(8) },
         ]}
       >
-        <Pressable
-          style={({ pressed }) => [styles.button, pressed && styles.buttonPressed]}
-          onPress={() => {
-            haptics.tap();
-            onConnect();
-          }}
-          accessibilityRole="button"
-          accessibilityLabel="Connect your device"
-        >
-          <Text style={styles.buttonText}>Connect your device</Text>
-        </Pressable>
+        <Glass radius={theme.radius.lg} tier="raised" interactive>
+          <Pressable
+            style={({ pressed }) => [styles.button, pressed && styles.buttonPressed]}
+            onPress={() => {
+              haptics.tap();
+              onConnect();
+            }}
+            accessibilityRole="button"
+            accessibilityLabel="Connect your device"
+          >
+            <Text style={styles.buttonText}>Connect your device</Text>
+          </Pressable>
+        </Glass>
       </View>
     </View>
   );
@@ -66,14 +69,12 @@ const styles = StyleSheet.create({
   // button stays tappable despite the overlay above it.
   actions: { marginTop: "auto", paddingHorizontal: theme.gutter },
   button: {
-    backgroundColor: theme.color.surfaceRaised,
-    borderRadius: theme.radius.md,
     paddingVertical: theme.space(4),
     alignItems: "center",
     justifyContent: "center",
     // Comfortably above the 44pt minimum target.
-    minHeight: 52,
+    minHeight: 56,
   },
-  buttonPressed: { backgroundColor: theme.color.surfacePressed },
+  buttonPressed: { backgroundColor: theme.glass.fillPressed },
   buttonText: { color: theme.color.text, fontSize: theme.font.title, fontWeight: "600" },
 });

@@ -20,6 +20,47 @@ test("agent text and thought chunks keep their roles", () => {
   ).toEqual({ role: "thought", text: "Hmm" });
 });
 
+test("runtime bookkeeping markers are omitted from ACP replay", () => {
+  const replayed = (sessionUpdate: string, text: string) =>
+    readChunk({ update: { sessionUpdate, content: { type: "text", text } } });
+
+  expect(
+    replayed(
+      "user_message_chunk",
+      "[Previous compacted summaries]\nA very large generated summary",
+    ),
+  ).toBeUndefined();
+  expect(
+    replayed("user_message_chunk", " [Previous conversation summary]\nGenerated context"),
+  ).toBeUndefined();
+  expect(replayed("user_message_chunk", "[Autopilot] Continue with the next task")).toBeUndefined();
+  expect(replayed("user_message_chunk", "[Status update] Dev server is still running")).toBeUndefined();
+  expect(
+    replayed(
+      "agent_message_chunk",
+      "I have the full context from the summary above, including where work left off and the next step.",
+    ),
+  ).toBeUndefined();
+});
+
+test("ordinary messages and live prompt echoes are never mistaken for replay metadata", () => {
+  expect(
+    readChunk({
+      update: {
+        sessionUpdate: "agent_message_chunk",
+        content: { text: "The log mentioned [Status update], but this answer is useful." },
+      },
+    }),
+  ).toEqual({
+    role: "agent",
+    text: "The log mentioned [Status update], but this answer is useful.",
+  });
+  expect(readChunk({ kind: "user_message", text: "[Status update] explain this marker" })).toEqual({
+    role: "user",
+    text: "[Status update] explain this marker",
+  });
+});
+
 test("a live prompt echo still maps to a user turn", () => {
   expect(readChunk({ kind: "user_message", text: "Run it" })).toEqual({
     role: "user",

@@ -99,6 +99,8 @@ export const AgentSession = z.object({
   title: z.string().optional(),
   /** ISO 8601 timestamp of last activity, when the agent tracks one. */
   updatedAt: z.string().optional(),
+  /** Message rows available before the transcript is opened on the app. */
+  messageCount: z.number().int().nonnegative().optional(),
 });
 
 /** App -> daemon. What does this provider currently offer? */
@@ -179,6 +181,8 @@ export const Replay = z.object({
   t: z.literal("session.replay"),
   sessionId: z.string(),
   events: z.array(SessionEvent),
+  /** False for a progressive resume batch; omitted/true marks replay complete. */
+  complete: z.boolean().optional(),
 });
 
 export const ErrorMessage = z.object({
