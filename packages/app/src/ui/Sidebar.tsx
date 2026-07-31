@@ -9,19 +9,33 @@
  * being covered, so the two surfaces read as one moving layout instead of a
  * modal layer. The panel itself is therefore static — App owns the motion.
  */
-import { Dimensions, FlatList, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { useEffect, useRef } from "react";
+import {
+  Alert,
+  Animated,
+  Dimensions,
+  Easing,
+  FlatList,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+} from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { theme } from "../theme";
 import { Orb } from "./Orb";
-import { touchSlop } from "./controls";
+import { CircleButton, touchSlop } from "./controls";
+import { Glass } from "./Glass";
 import { haptics } from "./haptics";
 import { HistorySkeleton } from "./Skeleton";
 import { orderProvidersByRecency } from "../providerRecency";
 import { formatHistoryMetadata } from "../historyMetadata";
-import type { Provider, Session } from "../useDaemon";
+import { recentSessionsForProvider } from "../sessionHistory";
+import type { Provider, Session, Status } from "../useDaemon";
 
-export const DRAWER_WIDTH = Math.min(Dimensions.get("window").width * 0.82, 330);
+export const DRAWER_WIDTH = Math.min(Dimensions.get("window").width * 0.88, 380);
 
 interface SidebarProps {
   open: boolean;
@@ -32,10 +46,11 @@ interface SidebarProps {
   onSelectProvider: (id: string) => void;
   onOpenSession: (id: string) => void;
   onNewConversation: () => void;
-  /** Host and port of the paired machine. Never the token. */
+  /** Host and port, retained for accessible detail and the Forget confirmation. */
   machineLabel: string;
   /** True when reached via a relay, so it works away from home. */
   machineRemote: boolean;
+  connectionStatus: Status;
   onUnpair: () => void;
   /**
    * Agents are still answering what conversations they hold. Without this the
@@ -43,6 +58,92 @@ interface SidebarProps {
    * a false empty state on machines with plenty of history.
    */
   historyLoading?: boolean;
+  /** Honor the phone's Reduce Motion accessibility preference. */
+  reduceMotion?: boolean;
+}
+
+const MAX_STAGGERED_ROWS = 14;
+const ROW_STAGGER_MS = 18;
+const ROW_REVEAL_MS = 180;
+
+function selectedProviderTint(color: string = theme.color.orb) {
+  return {
+    // Carry the agent's identity beyond the small orb while keeping white text
+    // comfortably legible on every manifest colour.
+    backgroundColor: `${color}3d`,
+    borderColor: `${color}8c`,
+  };
+}
+
+interface SessionRowProps {
+  session: Session;
+  index: number;
+  active: boolean;
+  reduceMotion: boolean;
+  onOpen: () => void;
+}
+
+function SessionRow({ session, index, active, reduceMotion, onOpen }: SessionRowProps) {
+  // Only the initial viewport cascades. Rows virtualized in later should appear
+  // immediately, rather than fading under the user's finger while they scroll.
+  const shouldAnimate = !reduceMotion && index < MAX_STAGGERED_ROWS;
+  const entrance = useRef(new Animated.Value(shouldAnimate ? 0 : 1)).current;
+
+  useEffect(() => {
+    entrance.stopAnimation();
+    if (!shouldAnimate) {
+      entrance.setValue(1);
+      return;
+    }
+    entrance.setValue(0);
+    const animation = Animated.timing(entrance, {
+      toValue: 1,
+      delay: index * ROW_STAGGER_MS,
+      duration: ROW_REVEAL_MS,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: true,
+    });
+    animation.start();
+    return () => animation.stop();
+  }, [entrance, index, shouldAnimate]);
+
+  const metadata = formatHistoryMetadata(session);
+  return (
+    <Animated.View
+      style={{
+        opacity: entrance,
+        transform: [
+          {
+            translateY: entrance.interpolate({
+              inputRange: [0, 1],
+              outputRange: [7, 0],
+            }),
+          },
+        ],
+      }}
+    >
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={session.title}
+        accessibilityState={{ selected: active }}
+        onPress={onOpen}
+        style={({ pressed }) => [
+          styles.session,
+          active && styles.sessionActive,
+          pressed && styles.pressed,
+        ]}
+      >
+        <Text style={styles.sessionTitle} numberOfLines={1}>
+          {session.title}
+        </Text>
+        {metadata ? (
+          <Text style={styles.sessionMeta} numberOfLines={1}>
+            {metadata}
+          </Text>
+        ) : null}
+      </Pressable>
+    </Animated.View>
+  );
 }
 
 export function Sidebar({
@@ -56,8 +157,10 @@ export function Sidebar({
   onNewConversation,
   machineLabel,
   machineRemote,
+  connectionStatus,
   onUnpair,
   historyLoading = false,
+  reduceMotion = false,
 }: SidebarProps) {
   const insets = useSafeAreaInsets();
 
@@ -65,9 +168,19 @@ export function Sidebar({
   // behind apps that were tried once.
   const orderedProviders = orderProvidersByRecency(providers, sessions);
 
-  const visible = sessions.filter(
-    (session) => !activeProviderId || session.providerId === activeProviderId,
-  );
+  const visible = recentSessionsForProvider(sessions, activeProviderId);
+  const connectionLabel =
+    connectionStatus === "online"
+      ? "Healthy connection"
+      : connectionStatus === "connecting"
+        ? "Connecting…"
+        : "Connection interrupted";
+  const connectionColor =
+    connectionStatus === "online"
+      ? theme.color.success
+      : connectionStatus === "connecting"
+        ? theme.color.textDim
+        : theme.color.danger;
 
   return (
     <View
@@ -81,18 +194,13 @@ export function Sidebar({
       <View style={[styles.panelInner, { paddingTop: insets.top + theme.headerInset }]}>
           <View style={styles.header}>
             <Text style={styles.headerTitle}>Connected Apps</Text>
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel="New conversation"
-              hitSlop={touchSlop(theme.size.control)}
-              onPress={() => {
-                haptics.tap();
-                onNewConversation();
-              }}
-              style={({ pressed }) => [styles.newButton, pressed && styles.pressed]}
+            <CircleButton
+              label="New conversation"
+              onPress={onNewConversation}
+              size={theme.size.control}
             >
               <Ionicons name="create-outline" size={18} color={theme.color.text} />
-            </Pressable>
+            </CircleButton>
           </View>
 
           <ScrollView
@@ -104,35 +212,40 @@ export function Sidebar({
             contentContainerStyle={styles.agentRow}
           >
             {orderedProviders.map((provider) => (
-              <Pressable
+              <Glass
                 key={provider.id}
-                disabled={!provider.available}
-                accessibilityRole="button"
-                accessibilityLabel={
-                  provider.available
-                    ? provider.name
-                    : `${provider.name}, unavailable. ${provider.unavailableReason ?? ""}`
-                }
-                accessibilityState={{
-                  selected: provider.id === activeProviderId,
-                  disabled: !provider.available,
-                }}
-                onPress={() => {
-                  haptics.select();
-                  onSelectProvider(provider.id);
-                }}
-                style={({ pressed }) => [
-                  styles.agentChip,
-                  provider.id === activeProviderId && styles.agentChipActive,
-                  pressed && provider.available && styles.pressed,
-                  !provider.available && styles.chipDisabled,
-                ]}
+                radius={theme.radius.pill}
+                interactive={provider.available}
+                style={!provider.available && styles.chipDisabled}
               >
-                <Orb color={provider.color} size={18} />
-                <Text style={styles.agentChipText} numberOfLines={1}>
-                  {provider.name}
-                </Text>
-              </Pressable>
+                <Pressable
+                  disabled={!provider.available}
+                  accessibilityRole="button"
+                  accessibilityLabel={
+                    provider.available
+                      ? provider.name
+                      : `${provider.name}, unavailable. ${provider.unavailableReason ?? ""}`
+                  }
+                  accessibilityState={{
+                    selected: provider.id === activeProviderId,
+                    disabled: !provider.available,
+                  }}
+                  onPress={() => {
+                    haptics.select();
+                    onSelectProvider(provider.id);
+                  }}
+                  style={({ pressed }) => [
+                    styles.agentChip,
+                    provider.id === activeProviderId && selectedProviderTint(provider.color),
+                    pressed && provider.available && styles.pressed,
+                  ]}
+                >
+                  <Orb color={provider.color} size={18} />
+                  <Text style={styles.agentChipText} numberOfLines={1}>
+                    {provider.name}
+                  </Text>
+                </Pressable>
+              </Glass>
             ))}
           </ScrollView>
 
@@ -142,10 +255,14 @@ export function Sidebar({
               all in a ScrollView was the stall when switching to a well-used
               app; a windowed list mounts only what is on screen. */}
           <FlatList
+            // Remount on app selection: this resets a previously scrolled list
+            // to its newest session and gives each new row one clean entrance.
+            key={activeProviderId ?? "all-providers"}
             style={styles.sessions}
             contentContainerStyle={styles.sessionsContent}
             showsVerticalScrollIndicator={false}
             data={visible}
+            extraData={`${activeSessionId ?? ""}:${reduceMotion}`}
             keyExtractor={(session) => session.id}
             initialNumToRender={18}
             maxToRenderPerBatch={18}
@@ -160,64 +277,70 @@ export function Sidebar({
                 </Text>
               )
             }
-            renderItem={({ item: session }) => {
-              const metadata = formatHistoryMetadata(session);
-
-              return (
-                <Pressable
-                  accessibilityRole="button"
-                  accessibilityLabel={session.title}
-                  accessibilityState={{ selected: session.id === activeSessionId }}
-                  onPress={() => {
-                    haptics.tap();
-                    onOpenSession(session.id);
-                  }}
-                  style={({ pressed }) => [
-                    styles.session,
-                    session.id === activeSessionId && styles.sessionActive,
-                    pressed && styles.pressed,
-                  ]}
-                >
-                  <Text style={styles.sessionTitle} numberOfLines={1}>
-                    {session.title}
-                  </Text>
-                  {metadata ? (
-                    <Text style={styles.sessionMeta} numberOfLines={1}>
-                      {metadata}
-                    </Text>
-                  ) : null}
-                </Pressable>
-              );
-            }}
+            renderItem={({ item: session, index }) => (
+              <SessionRow
+                session={session}
+                index={index}
+                active={session.id === activeSessionId}
+                reduceMotion={reduceMotion}
+                onOpen={() => {
+                  haptics.tap();
+                  onOpenSession(session.id);
+                }}
+              />
+            )}
           />
 
-          {/* Which machine this phone is driving. Easy to lose track of once
-              more than one has been paired, and the only way to undo it. */}
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={`Paired with ${machineLabel}, ${
-              machineRemote ? "reachable from anywhere" : "same network only"
-            }. Double tap to disconnect.`}
-            // Unpairing is the one destructive action in the drawer, so it is
-            // the one that must not feel like an ordinary tap.
-            onPress={() => {
-              haptics.warned();
-              onUnpair();
-            }}
-            style={({ pressed }) => [styles.machine, pressed && styles.pressed]}
-          >
+          {/* Connection health is the useful glanceable fact. Keep the host out
+              of sight but in the spoken label for troubleshooting. */}
+          <View style={styles.machine}>
             <Ionicons
-              // Whether this works away from home is the single most useful
-              // fact about a pairing, so it is the icon rather than a footnote.
-              name={machineRemote ? "globe-outline" : "wifi-outline"}
-              size={14}
-              color={theme.color.textFaint}
+              name={
+                connectionStatus === "online"
+                  ? "checkmark-circle-outline"
+                  : connectionStatus === "connecting"
+                    ? "sync-outline"
+                    : "alert-circle-outline"
+              }
+              size={15}
+              color={connectionColor}
             />
-            <Text style={styles.machineText} numberOfLines={1}>
-              {machineLabel}
+            <Text
+              style={[styles.machineText, { color: connectionColor }]}
+              numberOfLines={1}
+              accessibilityLabel={`${connectionLabel} to ${machineLabel}. ${
+                machineRemote ? "Reachable from anywhere." : "Same network only."
+              }`}
+            >
+              {connectionLabel}
             </Text>
-            <Text style={styles.machineAction}>Disconnect</Text>
-          </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={`Forget pairing with ${machineLabel}`}
+              hitSlop={touchSlop(theme.size.touch)}
+              onPress={() => {
+                haptics.tap();
+                Alert.alert(
+                  "Forget this computer?",
+                  "You'll need to scan or paste its pairing link to connect again.",
+                  [
+                    { text: "Cancel", style: "cancel" },
+                    {
+                      text: "Forget",
+                      style: "destructive",
+                      onPress: () => {
+                        haptics.warned();
+                        onUnpair();
+                      },
+                    },
+                  ],
+                );
+              }}
+              style={({ pressed }) => pressed && styles.pressed}
+            >
+              <Text style={styles.machineAction}>Forget</Text>
+            </Pressable>
+          </View>
       </View>
     </View>
   );
@@ -235,7 +358,7 @@ const styles = StyleSheet.create({
     borderTopColor: theme.color.border,
   },
   machineText: { color: theme.color.textFaint, fontSize: 12, flex: 1 },
-  machineAction: { color: theme.color.textFaint, fontSize: 12 },
+  machineAction: { color: theme.color.danger, fontSize: 12, fontWeight: "600" },
 
   // The drawer is the lower layer: it stays put while the conversation slides
   // right to reveal it, so it needs no transform of its own.
@@ -245,6 +368,18 @@ const styles = StyleSheet.create({
     left: 0,
     bottom: 0,
     backgroundColor: theme.color.drawer,
+    // Curved on the inner edge — the side the conversation slides off — so the
+    // two read as cards in one stack rather than a panel behind a card.
+    borderTopRightRadius: theme.radius.pane,
+    borderBottomRightRadius: theme.radius.pane,
+    overflow: "hidden",
+    // The canvas behind this panel is nearly its own colour, so once the drawer
+    // is fully out the corners have nothing to read against. This rim draws
+    // them, at the same weight as every other glass edge in the app. Only on the
+    // curved side: the other three meet the screen edge, where a line would be
+    // an outline around the whole app rather than the shape of this card.
+    borderRightWidth: 1,
+    borderRightColor: "rgba(255,255,255,0.28)",
   },
   panelInner: { flex: 1, paddingBottom: theme.space(4) },
 
@@ -264,16 +399,6 @@ const styles = StyleSheet.create({
     fontSize: theme.font.title,
     letterSpacing: 0.4,
   },
-  newButton: {
-    width: theme.size.control,
-    height: theme.size.control,
-    borderRadius: theme.size.control / 2,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: theme.glass.control.fill,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: theme.glass.control.rim,
-  },
 
   agentScroller: { flexGrow: 0, height: theme.size.chip },
   agentRow: {
@@ -288,12 +413,6 @@ const styles = StyleSheet.create({
     height: theme.size.chip,
     paddingHorizontal: theme.space(3.5),
     borderRadius: theme.radius.pill,
-    backgroundColor: theme.glass.control.fill,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: theme.glass.control.rim,
-  },
-  agentChipActive: {
-    backgroundColor: theme.glass.fillActive,
   },
   agentChipText: {
     color: theme.color.text,

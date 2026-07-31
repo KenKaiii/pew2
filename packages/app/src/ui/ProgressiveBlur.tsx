@@ -1,51 +1,37 @@
 /**
- * Frosted cover for an edge zone, easing within its own bounds.
+ * Canvas-coloured blur for the nav and composer rails.
  *
- * Content scrolls behind the nav (and behind the composer), and this keeps
- * those controls legible over it. Two rules learned the hard way:
- *
- * - ONE uniform blur. Stacked strips at different radii chop glyphs into
- *   mismatched bands, which reads as pixelation.
- * - Contained to the zone. Any fade tail beyond the nav's bottom edge (or
- *   above the composer) dims content that has not even arrived yet. The
- *   softness lives INSIDE the band: the tint eases from nearly opaque at the
- *   screen edge to light at the inner edge, so the band is not a solid slab
- *   but never reaches into the thread.
+ * The overlay always uses the conversation's #111111 RGB. Its transparency lets
+ * softened text remain faintly visible underneath without introducing a separate
+ * grey material or a gradient that makes either rail read as another panel.
  */
-import { StyleSheet } from "react-native";
+import { StyleSheet, View } from "react-native";
 import { BlurView } from "expo-blur";
-import { LinearGradient } from "expo-linear-gradient";
 
-/** Uniform, and deliberately gentle: frost, not smear. */
-const INTENSITY = 24;
+/** Gentle enough to soften passing text without turning the chrome grey. */
+const INTENSITY = 20;
 
-const STRONG = "rgba(10,10,11,0.88)";
-const MID = "rgba(10,10,11,0.55)";
-const LIGHT = "rgba(10,10,11,0.28)";
+// The exact canvas RGB. Translucency reveals only blurred content beneath it;
+// the nav and dock do not introduce a separate material colour.
+const CANVAS_OVERLAY = "rgba(17,17,17,0.86)";
 
 interface ProgressiveBlurProps {
   /** Exactly the zone to cover. Nothing beyond it is touched. */
   height: number;
-  /** Which screen edge the strong side sits on. */
+  /** Which screen edge the cover is attached to. */
   edge?: "top" | "bottom";
   style?: object;
 }
 
 export function ProgressiveBlur({ height, edge = "top", style }: ProgressiveBlurProps) {
-  // The ease stays inside the band: strong at the screen edge, light — but
-  // never clear — at the inner edge, so the boundary is soft without a tail.
-  const colors: [string, string, string] =
-    edge === "top" ? [STRONG, MID, LIGHT] : [LIGHT, MID, STRONG];
-
   return (
-    <BlurView
-      intensity={INTENSITY}
-      tint="dark"
+    <View
       style={[styles.container, edge === "top" ? styles.top : styles.bottom, { height }, style]}
       pointerEvents="none"
     >
-      <LinearGradient colors={colors} style={StyleSheet.absoluteFill} />
-    </BlurView>
+      <BlurView intensity={INTENSITY} tint="dark" style={StyleSheet.absoluteFill} />
+      <View style={[StyleSheet.absoluteFill, styles.canvasOverlay]} pointerEvents="none" />
+    </View>
   );
 }
 
@@ -56,6 +42,7 @@ const styles = StyleSheet.create({
     right: 0,
     overflow: "hidden",
   },
+  canvasOverlay: { backgroundColor: CANVAS_OVERLAY },
   top: { top: 0 },
   bottom: { bottom: 0 },
 });

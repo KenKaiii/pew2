@@ -1,53 +1,141 @@
 /**
- * Frosted surface used by every floating control.
+ * Shared Liquid Glass functional surface.
  *
- * Blur alone over a near-black canvas reads as flat grey, so each surface pairs
- * a BlurView with a translucent fill and a hairline rim — the fill gives it
- * body, the rim catches "light" and lifts it off the canvas.
- *
- * All three values come from theme.glass, so every frosted control resolves to
- * the same colour. That consistency is what sells the material.
+ * iOS 26/27 gets Apple's native refractive material through expo-glass-effect,
+ * including system tint, motion, contrast, and accessibility adaptations. Other
+ * platforms retain a restrained blur fallback with a directional highlight and
+ * material rim instead of imitating glass with an opaque grey rectangle.
  */
-import type { ReactNode } from "react";
-import { StyleSheet, View, type StyleProp, type ViewStyle } from "react-native";
+import { type ReactNode, useEffect, useState } from "react";
+import {
+  AccessibilityInfo,
+  Platform,
+  StyleSheet,
+  View,
+  type StyleProp,
+  type ViewStyle,
+} from "react-native";
 import { BlurView } from "expo-blur";
+import { GlassView, isLiquidGlassAvailable } from "expo-glass-effect";
+import { LinearGradient } from "expo-linear-gradient";
 import { theme } from "../theme";
 
 interface GlassProps {
   children: ReactNode;
-  /** Corner radius. Must be on the clipping container, not the blur. */
+  /** Corner radius. Must be on the clipping material, not a child fill. */
   radius: number;
   style?: StyleProp<ViewStyle>;
   intensity?: number;
+  /** Native touch illumination for surfaces that are themselves controls. */
+  interactive?: boolean;
   /**
-   * `control` for buttons, pills and chips; `raised` for the composer, which
-   * is the primary input and reads a step brighter than everything around it.
+   * `control` for buttons, pills and chips; `raised` for the composer and
+   * approval dock, which need stronger legibility over scrolling content.
    */
   tier?: "control" | "raised";
 }
+
+function hasNativeLiquidGlass(): boolean {
+  if (Platform.OS !== "ios") return false;
+  try {
+    return isLiquidGlassAvailable();
+  } catch {
+    // A stale Expo Go/dev client can load the JS before it has the native module.
+    return false;
+  }
+}
+
+const nativeLiquidGlassAvailable = hasNativeLiquidGlass();
 
 export function Glass({
   children,
   radius,
   style,
   intensity = theme.glass.intensity,
+  interactive = false,
   tier = "control",
 }: GlassProps) {
+  const [reduceTransparency, setReduceTransparency] = useState(false);
   const { fill, rim } = theme.glass[tier];
+  const highlight =
+    tier === "raised" ? "rgba(255,255,255,0.22)" : "rgba(255,255,255,0.14)";
+  const nativeRim =
+    tier === "raised" ? "rgba(255,255,255,0.34)" : "rgba(255,255,255,0.28)";
+
+  useEffect(() => {
+    void AccessibilityInfo.isReduceTransparencyEnabled().then(setReduceTransparency);
+    const subscription = AccessibilityInfo.addEventListener(
+      "reduceTransparencyChanged",
+      setReduceTransparency,
+    );
+    return () => subscription.remove();
+  }, []);
+
+  if (nativeLiquidGlassAvailable && !reduceTransparency) {
+    return (
+      <GlassView
+        glassEffectStyle="regular"
+        colorScheme="dark"
+        // Every pew2 control keeps its semantic Pressable as a child. Let that
+        // child own hit-testing; otherwise UIVisualEffectView can swallow taps.
+        isInteractive={interactive}
+        pointerEvents="box-none"
+        style={[styles.material, { borderRadius: radius }, style]}
+      >
+        <LinearGradient
+          colors={[highlight, "rgba(255,255,255,0.025)", "rgba(255,255,255,0)"]}
+          locations={[0, 0.42, 1]}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 0.9, y: 1 }}
+          style={StyleSheet.absoluteFill}
+          pointerEvents="none"
+        />
+        <View
+          style={[styles.edge, { borderRadius: radius, borderColor: nativeRim }]}
+          pointerEvents="none"
+        />
+        {children}
+      </GlassView>
+    );
+  }
+
+  const accessibleFill =
+    tier === "raised" ? "rgba(47,47,52,0.98)" : "rgba(35,35,39,0.96)";
+
   return (
-    <View style={[{ borderRadius: radius, overflow: "hidden" }, style]}>
-      {/* The three decorative layers are pointerEvents="none" so they never
-          intercept a tap meant for the control rendered inside. */}
-      <BlurView
-        intensity={intensity}
-        tint="dark"
-        style={StyleSheet.absoluteFill}
-        pointerEvents="none"
-      />
+    <View style={[styles.material, { borderRadius: radius }, style]}>
+      {!reduceTransparency && (
+        <BlurView
+          intensity={intensity}
+          tint="dark"
+          style={StyleSheet.absoluteFill}
+          pointerEvents="none"
+        />
+      )}
       <View
-        style={[StyleSheet.absoluteFill, { backgroundColor: fill }]}
+        style={[
+          StyleSheet.absoluteFill,
+          { backgroundColor: reduceTransparency ? accessibleFill : fill },
+        ]}
         pointerEvents="none"
       />
+      {!reduceTransparency && (
+        <>
+          <LinearGradient
+            colors={[highlight, "rgba(255,255,255,0.035)", "rgba(255,255,255,0)"]}
+            locations={[0, 0.42, 1]}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 0.9, y: 1 }}
+            style={StyleSheet.absoluteFill}
+            pointerEvents="none"
+          />
+          <View style={styles.lowerShade} pointerEvents="none" />
+          <View
+            style={[styles.specular, { backgroundColor: rim }]}
+            pointerEvents="none"
+          />
+        </>
+      )}
       <View
         style={[styles.edge, { borderRadius: radius, borderColor: rim }]}
         pointerEvents="none"
@@ -58,12 +146,28 @@ export function Glass({
 }
 
 const styles = StyleSheet.create({
-  edge: {
+  material: { overflow: "hidden" },
+  lowerShade: {
     position: "absolute",
-    top: 0,
     left: 0,
     right: 0,
     bottom: 0,
+    height: "44%",
+    backgroundColor: "rgba(0,0,0,0.08)",
+  },
+  specular: {
+    position: "absolute",
+    top: 0,
+    left: "18%",
+    right: "18%",
+    height: StyleSheet.hairlineWidth,
+  },
+  edge: {
+    position: "absolute",
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
     borderWidth: StyleSheet.hairlineWidth,
   },
 });

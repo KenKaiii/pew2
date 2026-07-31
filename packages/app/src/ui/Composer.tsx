@@ -17,7 +17,15 @@
  * 11pt from the pill edge, #e0e0e0 glyphs, #828282 placeholder.
  */
 import { useEffect, useRef, useState } from "react";
-import { Animated, Pressable, StyleSheet, TextInput, View } from "react-native";
+import {
+  Animated,
+  Easing,
+  LayoutAnimation,
+  Pressable,
+  StyleSheet,
+  TextInput,
+  View,
+} from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { theme } from "../theme";
 import { touchSlop } from "./controls";
@@ -30,6 +38,10 @@ const INSET = theme.size.composerInset;
 const BUTTON = theme.size.composerButton;
 /** Clearance the inline text needs to avoid the two buttons. */
 const INLINE_SIDE = INSET + BUTTON + theme.space(2);
+/** One fixed curve for expand/collapse, independent of the keyboard's own. */
+const EXPAND_DURATION = 140;
+/** How far the text sits below its expanded position while the pill is closed. */
+const TEXT_DROP = (COLLAPSED - theme.line.body) / 2 - theme.space(3);
 
 /**
  * Lines the box can grow to before the text scrolls internally.
@@ -92,8 +104,9 @@ export function Composer({
   const [contentHeight, setContentHeight] = useState<number>(theme.line.body);
   const reduceMotion = useReducedMotion();
 
-  // Stay expanded while there is a draft: collapsing under the user's own text
-  // would hide it behind the action row.
+  // Focus alone: the keyboard's visibility is a separate event stream with no
+  // fixed ordering against it, and mixing the two left the placeholder resting
+  // in its expanded position after an unfocus.
   const expanded = focused || hasText || busy;
 
   // Grow with the text, then scroll internally rather than eat the thread.
@@ -108,22 +121,35 @@ export function Composer({
     Math.max(MIN_HEIGHT, textHeight + COLLAPSED - theme.space(2) + theme.space(3)),
   );
 
-  const grow = useRef(new Animated.Value(0)).current;
   const sendIn = useRef(new Animated.Value(0)).current;
   const sendTarget = hasText || busy ? 1 : 0;
+  // The text rides its own native transform rather than the surrounding layout,
+  // so its duration is fixed no matter what else is animating in the same commit.
+  const textDrop = useRef(new Animated.Value(expanded ? 0 : TEXT_DROP)).current;
 
   useEffect(() => {
-    const animation = Animated.timing(grow, {
-      toValue: expanded ? 1 : 0,
-      duration: reduceMotion ? 0 : theme.motion.base,
-      easing: theme.easing,
-      // Height and padding are layout properties, so this cannot run on the
-      // native driver. It is one small control, so the cost is negligible.
-      useNativeDriver: false,
+    const animation = Animated.timing(textDrop, {
+      toValue: expanded ? 0 : TEXT_DROP,
+      duration: reduceMotion ? 0 : EXPAND_DURATION,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: true,
     });
     animation.start();
     return () => animation.stop();
-  }, [expanded, reduceMotion, grow]);
+  }, [expanded, reduceMotion, textDrop]);
+
+  const setFocus = (next: boolean) => {
+    // Grow and shrink the surface on one fixed curve. Nothing here borrows the
+    // keyboard's timing: the dock this control sits in is already carried by the
+    // keyboard's own transaction, so a second animation would only fight it.
+    if (!reduceMotion) {
+      LayoutAnimation.configureNext({
+        duration: EXPAND_DURATION,
+        update: { duration: EXPAND_DURATION, type: "easeOut" },
+      });
+    }
+    setFocused(next);
+  };
 
   useEffect(() => {
     const animation = Animated.timing(sendIn, {
@@ -135,25 +161,19 @@ export function Composer({
     return () => animation.stop();
   }, [sendTarget, reduceMotion, sendIn]);
 
-  const lerp = (from: number, to: number) =>
-    grow.interpolate({ inputRange: [0, 1], outputRange: [from, to] });
-
   return (
     <Glass radius={theme.radius.composer} tier="raised">
-      <Animated.View style={{ height: lerp(COLLAPSED, expandedHeight) }}>
+      <View style={{ height: expanded ? expandedHeight : COLLAPSED }}>
         <Animated.View
           style={[
             styles.inputWrap,
             {
-              left: lerp(INLINE_SIDE, INSET + theme.space(1)),
-              right: lerp(INLINE_SIDE, INSET + theme.space(1)),
-              bottom: lerp(0, COLLAPSED - theme.space(2)),
-              // Centres the single line when collapsed, then lifts it to the
-              // top of the taller box as it expands.
-              paddingTop: lerp(
-                (COLLAPSED - theme.line.body) / 2 - HALF_LEADING,
-                theme.space(3) - HALF_LEADING,
-              ),
+              left: expanded ? INSET + theme.space(1) : INLINE_SIDE,
+              right: expanded ? INSET + theme.space(1) : INLINE_SIDE,
+              bottom: expanded ? COLLAPSED - theme.space(2) : 0,
+              // Fixed: the drop below is what moves the text between states.
+              top: theme.space(3) - HALF_LEADING,
+              transform: [{ translateY: textDrop }],
             },
           ]}
         >
@@ -161,8 +181,8 @@ export function Composer({
             style={styles.input}
             value={value}
             onChangeText={onChangeText}
-            onFocus={() => setFocused(true)}
-            onBlur={() => setFocused(false)}
+            onFocus={() => setFocus(true)}
+            onBlur={() => setFocus(false)}
             onContentSizeChange={(event) =>
               setContentHeight(event.nativeEvent.contentSize.height)
             }
@@ -251,7 +271,7 @@ export function Composer({
             </Animated.View>
           </View>
         </View>
-      </Animated.View>
+      </View>
     </Glass>
   );
 }

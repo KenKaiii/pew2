@@ -13,7 +13,7 @@ import {
   Animated,
   Easing,
   Keyboard,
-  LayoutAnimation,
+  PanResponder,
   Platform,
   Pressable,
   ScrollView,
@@ -22,9 +22,17 @@ import {
   View,
 } from "react-native";
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
+import { KeyboardProvider, useKeyboardHandler } from "react-native-keyboard-controller";
+import Reanimated, {
+  useAnimatedStyle,
+  useSharedValue,
+} from "react-native-reanimated";
 import { StatusBar } from "expo-status-bar";
 import { Ionicons } from "@expo/vector-icons";
 import { theme } from "./src/theme";
+import { alignCompletedHistoryToBottom } from "./src/historyScroll";
+import { HISTORY_PAGE_SIZE, nextHistoryLimit, visibleHistoryTurns } from "./src/historyWindow";
+import { isDenyApprovalOption, selectApprovalOptions } from "./src/approvalOptions";
 import { useDaemon, type Provider, type Turn as TurnData } from "./src/useDaemon";
 import { Orb } from "./src/ui/Orb";
 import { Composer } from "./src/ui/Composer";
@@ -36,6 +44,7 @@ import { ConfigPicker, summarise, valueName } from "./src/ui/ConfigPicker";
 import { useReducedMotion } from "./src/ui/useReducedMotion";
 import { ThreadSkeleton } from "./src/ui/Skeleton";
 import { ProgressiveBlur } from "./src/ui/ProgressiveBlur";
+import { Glass } from "./src/ui/Glass";
 import { withLayoutX, type PillX } from "./src/ui/pillAnchor";
 import { PairingScreen } from "./src/ui/PairingScreen";
 import { LaunchScreen } from "./src/ui/LaunchScreen";
@@ -66,9 +75,14 @@ export default function App() {
   }
 
   return (
-    <SafeAreaProvider>
-      <Root />
-    </SafeAreaProvider>
+    // Every keyboard-driven element in this app moves on the keyboard's own
+    // frame-by-frame position rather than a JS animation started alongside it.
+    // Coordinating two animation systems is what made the thread land twice.
+    <KeyboardProvider>
+      <SafeAreaProvider>
+        <Root />
+      </SafeAreaProvider>
+    </KeyboardProvider>
   );
 }
 
@@ -111,7 +125,7 @@ function Root() {
 
   const unpair = useCallback(() => {
     // Same reasoning inverted: forget it locally even if the delete failed, or
-    // "Disconnect" would appear to do nothing.
+    // the confirmed "Forget" action would appear to do nothing.
     clearPairing()
       .catch(() => {})
       .then(() => {
@@ -130,6 +144,37 @@ function Root() {
   return <PairingScreen onPaired={pair} onBack={() => setConnecting(false)} />;
 }
 
+/**
+ * A view exactly as tall as the visible keyboard.
+ *
+ * Written from a worklet on every frame of the keyboard's own animation, so the
+ * layout above shortens in perfect step. No JS re-render can land halfway
+ * through and move things a second time.
+ *
+ * The keyboard is measured from the physical screen edge, so the home-indicator
+ * clearance the dock keeps is handed back while it is open, and the composer
+ * keeps the same gap above either boundary.
+ */
+function useKeyboardSpacer(bottomInset: number) {
+  const height = useSharedValue(0);
+
+  useKeyboardHandler(
+    {
+      onMove: (event) => {
+        "worklet";
+        height.value = Math.max(0, event.height - bottomInset * event.progress);
+      },
+      onEnd: (event) => {
+        "worklet";
+        height.value = Math.max(0, event.height - bottomInset * event.progress);
+      },
+    },
+    [bottomInset],
+  );
+
+  return useAnimatedStyle(() => ({ height: height.value }));
+}
+
 function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void }) {
   // The relay identifies devices by this, and it must match the id baked into
   // the stored pairing URL or the two look like different clients.
@@ -141,36 +186,29 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
   const [picker, setPicker] = useState<"model" | "mode" | null>(null);
   // Measured so the thread's top inset always matches the real nav height.
   const [navHeight, setNavHeight] = useState(0);
-  // The composer floats, so the thread's bottom inset and the frosted zone
-  // track its measured height. iOS overlays the keyboard, so the composer
-  // follows it manually; Android's adjustResize already moves the viewport.
+  // The thread's bottom inset and frosted zone track the dock's measured height.
   const [dockHeight, setDockHeight] = useState(0);
-  const [keyboardHeight, setKeyboardHeight] = useState(0);
-
-  useEffect(() => {
-    if (Platform.OS !== "ios") return;
-
-    const onShow = Keyboard.addListener("keyboardWillShow", (e) => {
-      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-      setKeyboardHeight(e.endCoordinates.height);
-    });
-    const onHide = Keyboard.addListener("keyboardWillHide", () => {
-      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-      setKeyboardHeight(0);
-    });
-    return () => {
-      onShow.remove();
-      onHide.remove();
-    };
-  }, []);
-  // Absolutely-positioned overlays ignore SafeAreaView's padding, so they
-  // must be offset by the inset themselves or they slide under the clock.
   const insets = useSafeAreaInsets();
+  const keyboardSpacer = useKeyboardSpacer(insets.bottom);
+  const scroller = useRef<ScrollView>(null);
+  const pendingPromptAlignment = useRef(false);
+  // Measured so the newest exchange can always be scrolled to the top of the
+  // reading area, whatever its height.
+  const [threadViewport, setThreadViewport] = useState(0);
+  const [exchangeHeight, setExchangeHeight] = useState(0);
+  // True only after *this* client sends. A resumed transcript must open on its
+  // last message like any chat app, so the top-anchoring spacer stays out of it.
+  const [anchorNewestPrompt, setAnchorNewestPrompt] = useState(false);
+  // Drives the scroll-to-latest control below.
+  const [atBottom, setAtBottom] = useState(true);
+  const jumpOpacity = useRef(new Animated.Value(0)).current;
+
   const [pillX, setPillX] = useState<PillX>({
     model: theme.gutter,
     mode: theme.gutter,
   });
-  const scroller = useRef<ScrollView>(null);
+  const historyDragActive = useRef(false);
+  const [historyTurnLimit, setHistoryTurnLimit] = useState(HISTORY_PAGE_SIZE);
   const reduceMotion = useReducedMotion();
   const drawer = useRef(new Animated.Value(0)).current;
   // A resumed transcript first reveals only its newest turn. Older turns are
@@ -178,6 +216,9 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
   // perfectly still, so opening history never performs a visible mega-scroll.
   const [historyPreview, setHistoryPreview] = useState<TurnData[] | null>(null);
   const [showHistorySkeleton, setShowHistorySkeleton] = useState(false);
+  // The turn array may already be complete when the preview swaps out, so this
+  // gives the final scroll-to-bottom its own render signal.
+  const [historyRevealVersion, setHistoryRevealVersion] = useState(0);
   const historyWasLoading = useRef(false);
   const historyTransitionActive = useRef(false);
   const latestTurns = useRef(daemon.turns);
@@ -190,7 +231,52 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
     daemon.providers.find((p) => p.available);
 
   const inThread = daemon.turns.length > 0;
-  const renderedTurns = historyPreview ?? daemon.turns;
+  const completeRenderedTurns = historyPreview ?? daemon.turns;
+  const renderedTurns = visibleHistoryTurns(completeRenderedTurns, historyTurnLimit);
+  const hasEarlierTurns =
+    historyPreview === null && daemon.turns.length > historyTurnLimit;
+  // The newest exchange starts at the last prompt and runs to the end of the
+  // transcript. It is rendered as one measured block so the prompt can be lifted
+  // to the top of the reading area without ever scrolling past the content.
+  const newestPromptIndex = renderedTurns.reduce(
+    (found, turn, index) => (turn.role === "user" ? index : found),
+    -1,
+  );
+  const headTurns =
+    newestPromptIndex === -1 ? renderedTurns : renderedTurns.slice(0, newestPromptIndex);
+  const tailTurns =
+    newestPromptIndex === -1 ? [] : renderedTurns.slice(newestPromptIndex);
+
+  // Where the reading area begins and ends: under the nav, and above the
+  // composer. UIKit adds the keyboard's own inset on top of this.
+  const threadTop = insets.top + (navHeight || theme.space(12)) + theme.space(2);
+  const threadBottom = dockHeight + theme.space(2);
+  // Empty room held below the newest exchange so its prompt can sit at the top
+  // of the reading area. Deliberately independent of the keyboard: the lift
+  // below is switched off by this value, so letting the keyboard shrink it would
+  // re-enable the lift the moment the keyboard opened.
+  const tailSpacer = anchorNewestPrompt
+    ? Math.max(0, threadViewport - threadTop - threadBottom - exchangeHeight)
+    : 0;
+  const working = daemon.busy && !daemon.loadingSession;
+
+  const loadEarlierTurns = useCallback(() => {
+    setHistoryTurnLimit((current) => nextHistoryLimit(current, daemon.turns.length));
+  }, [daemon.turns.length]);
+
+  useEffect(() => {
+    // Each opened conversation begins with one lightweight page. The full fold
+    // remains in memory, so revealing an older page needs no agent round-trip.
+    setHistoryTurnLimit(HISTORY_PAGE_SIZE);
+    historyDragActive.current = false;
+    // A measurement from the previous conversation would size this one's trailing
+    // spacer until its own layout lands, which reads as a jump on open.
+    setExchangeHeight(0);
+    setAnchorNewestPrompt(false);
+    // An opened conversation lands on its newest message, so it starts at the
+    // bottom regardless of where the previous one had been scrolled to.
+    setAtBottom(true);
+  }, [daemon.sessionId]);
 
   // Model, permission mode and thinking level are whatever this agent
   // advertised; pew2 keeps no model list of its own. Mode gets its own pill:
@@ -238,6 +324,7 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
         setHistoryPreview(null);
         setShowHistorySkeleton(false);
         historyTransitionActive.current = false;
+        setHistoryRevealVersion((version) => version + 1);
       };
 
       if (reduceMotion) {
@@ -274,10 +361,27 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
   }, [daemon.loadingSession, historySkeletonOpacity, reduceMotion, threadOpacity]);
 
   useEffect(() => {
-    if (inThread && !daemon.loadingSession && !historyTransitionActive.current) {
-      scroller.current?.scrollToEnd({ animated: !reduceMotion });
-    }
-  }, [daemon.turns, daemon.busy, daemon.loadingSession, inThread, reduceMotion]);
+    if (historyRevealVersion === 0 || anchorNewestPrompt) return;
+    // The full transcript mounts in this commit. Wait one native frame for its
+    // content size, then land directly on the newest message without a mega-scroll.
+    // Re-runs when the composer reports its height, because that changes the
+    // thread's bottom inset and would otherwise leave the last message adrift.
+    const frame = requestAnimationFrame(() =>
+      alignCompletedHistoryToBottom(scroller.current),
+    );
+    return () => cancelAnimationFrame(frame);
+  }, [historyRevealVersion, anchorNewestPrompt, dockHeight]);
+
+  useEffect(() => {
+    if (!daemon.permission) return undefined;
+    // The approval control is taller than the composer it replaces. Once its
+    // measured height lands, move the final tool row above it instead of letting
+    // that row remain underneath the approval buttons.
+    const frame = requestAnimationFrame(() =>
+      scroller.current?.scrollToEnd({ animated: false }),
+    );
+    return () => cancelAnimationFrame(frame);
+  }, [daemon.permission, dockHeight]);
 
   // Feedback for things that happen on their own, rather than because a finger
   // touched the screen. This is the point of a remote control: the agent runs
@@ -300,7 +404,10 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
   const lastPermissionId = useRef<string | undefined>(undefined);
   useEffect(() => {
     const requestId = daemon.permission?.requestId;
-    if (requestId && requestId !== lastPermissionId.current) haptics.attention();
+    if (requestId && requestId !== lastPermissionId.current) {
+      Keyboard.dismiss();
+      haptics.attention();
+    }
     lastPermissionId.current = requestId;
   }, [daemon.permission]);
 
@@ -320,16 +427,22 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
 
   // Push, not overlay: the conversation slides right to uncover the drawer, so
   // both surfaces stay part of one layout instead of becoming a modal layer.
+  // Shared with the edge gesture, which hands the drawer over mid-drag.
+  const settleDrawer = useCallback(
+    (open: boolean) =>
+      Animated.timing(drawer, {
+        toValue: open ? 1 : 0,
+        duration: reduceMotion ? 0 : 280,
+        easing: Easing.out(Easing.cubic),
+        useNativeDriver: true,
+      }).start(),
+    [drawer, reduceMotion],
+  );
+
   useEffect(() => {
-    const animation = Animated.timing(drawer, {
-      toValue: menuOpen ? 1 : 0,
-      duration: reduceMotion ? 0 : 280,
-      easing: Easing.out(Easing.cubic),
-      useNativeDriver: true,
-    });
-    animation.start();
-    return () => animation.stop();
-  }, [menuOpen, reduceMotion, drawer]);
+    settleDrawer(menuOpen);
+    return () => drawer.stopAnimation();
+  }, [menuOpen, settleDrawer, drawer]);
 
   // Translate only. The conversation keeps its exact size as it moves, so no
   // text reflows or resamples mid-animation.
@@ -337,6 +450,61 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
     inputRange: [0, 1],
     outputRange: [0, DRAWER_WIDTH],
   });
+
+  useEffect(() => {
+    const animation = Animated.timing(jumpOpacity, {
+      toValue: atBottom ? 0 : 1,
+      duration: reduceMotion ? 0 : theme.motion.fast,
+      useNativeDriver: true,
+    });
+    animation.start();
+    return () => animation.stop();
+  }, [atBottom, reduceMotion, jumpOpacity]);
+
+  // The drawer tracks the finger in both directions: dragged out from the left
+  // edge when closed, and pushed back by the uncovered pane when open. It is
+  // being moved by the gesture rather than triggered by it.
+  //
+  // Read through a ref because PanResponder is built once and would otherwise
+  // capture the state from that first render forever.
+  const menuOpenRef = useRef(menuOpen);
+  menuOpenRef.current = menuOpen;
+  const edgeSwipe = useRef(
+    PanResponder.create({
+      // Claim only clearly horizontal movement, and only the direction that has
+      // somewhere to go, so a scroll is never stolen.
+      onMoveShouldSetPanResponder: (_event, gesture) => {
+        const enough = Math.abs(gesture.dx) > theme.space(2);
+        const horizontal = Math.abs(gesture.dx) > Math.abs(gesture.dy) * 2;
+        return enough && horizontal && gesture.dx > 0 !== menuOpenRef.current;
+      },
+      onPanResponderGrant: () => {
+        // The effect below animates this same value on `menuOpen`. Stopping it
+        // here means the finger takes over from wherever it currently rests.
+        drawer.stopAnimation();
+      },
+      onPanResponderMove: (_event, gesture) => {
+        const base = menuOpenRef.current ? 1 : 0;
+        drawer.setValue(
+          Math.min(1, Math.max(0, base + gesture.dx / DRAWER_WIDTH)),
+        );
+      },
+      onPanResponderRelease: (_event, gesture) => {
+        // Signed against the one direction that has somewhere to go, so a drag
+        // that is pulled back or flicked in reverse cancels rather than
+        // committing on distance alone.
+        const toward = menuOpenRef.current ? -gesture.dx : gesture.dx;
+        const thrown = menuOpenRef.current ? -gesture.vx : gesture.vx;
+        const commit = toward > DRAWER_WIDTH / 2 || thrown > 0.4;
+        const open = commit ? !menuOpenRef.current : menuOpenRef.current;
+        haptics.tap();
+        // Unchanged state would not re-run the effect, so settle here too.
+        if (open === menuOpenRef.current) settleDrawer(open);
+        else setMenuOpen(open);
+      },
+      onPanResponderTerminate: () => settleDrawer(menuOpenRef.current),
+    }),
+  ).current;
 
   const openSession = (id: string) => {
     const stored = daemon.sessions.find((session) => session.id === id);
@@ -360,12 +528,19 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
     const text = draft.trim();
     if (!text) return;
 
+    // The newly committed user turn owns the reading origin. Its onLayout below
+    // places it directly beneath the nav and then leaves that position alone as
+    // the reply streams in.
     if (daemon.sessionId) {
+      pendingPromptAlignment.current = true;
+      setAnchorNewestPrompt(true);
       daemon.prompt(text);
     } else {
-      // No session yet: start one with the chosen agent and let the daemon
-      // deliver this prompt as soon as it is ready.
+      // No session yet: start one with the chosen available agent and let the
+      // daemon deliver this prompt as soon as it is ready.
       if (!active?.available) return;
+      pendingPromptAlignment.current = true;
+      setAnchorNewestPrompt(true);
       daemon.start(active.id, text);
     }
     setDraft("");
@@ -391,17 +566,28 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
           setMenuOpen(false);
         }}
         historyLoading={daemon.loadingSessions}
+        reduceMotion={reduceMotion}
         machineLabel={pairing.label}
         machineRemote={pairing.remote}
+        connectionStatus={daemon.status}
         onUnpair={onUnpair}
       />
 
       {/* The conversation pane. Slides right to reveal the drawer beneath. */}
       <Animated.View style={[styles.pane, { transform: [{ translateX: slideX }] }]}>
-      {/* Full-bleed: the thread runs behind the status bar too, and the
-          ProgressiveBlur covers that region, so content dissolves all the way
-          to the top edge instead of meeting a solid band under the clock. */}
-      <SafeAreaView style={styles.paneInner} edges={["bottom"]}>
+      {/* Starts below the nav: this strip is the hit target for anything it
+          covers, and over the nav it would swallow taps on the menu button. */}
+      {!menuOpen && (
+        <View
+          style={[styles.edgeSwipe, { top: insets.top + navHeight }]}
+          {...edgeSwipe.panHandlers}
+        />
+      )}
+      {/* Full-bleed on both edges: the thread runs behind the status bar and
+          down to the home indicator, and a ProgressiveBlur covers each of those
+          regions, so content dissolves into frosted chrome at both ends rather
+          than meeting a solid band. The dock carries the bottom inset itself. */}
+      <SafeAreaView style={styles.paneInner} edges={[]}>
 
       {/* Absolute over the thread: messages scroll beneath the nav and
           dissolve into the ProgressiveBlur fade instead of hitting a panel
@@ -512,31 +698,108 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
             // When older history is prepended after the newest-turn reveal,
             // keep that newest turn pinned instead of shifting the viewport.
             maintainVisibleContentPosition={{ minIndexForVisible: 0 }}
+            onLayout={(event) => setThreadViewport(event.nativeEvent.layout.height)}
             accessibilityElementsHidden={showHistorySkeleton}
             importantForAccessibility={showHistorySkeleton ? "no-hide-descendants" : "auto"}
             // Content still dissolves beneath the floating chrome, but the
             // indicator stays sharp inside the unobscured reading area.
             automaticallyAdjustsScrollIndicatorInsets={false}
+            // The spacer below shortens this view's container instead. A second
+            // inset here would be a differently-timed adjustment on top of it.
+            automaticallyAdjustKeyboardInsets={false}
             scrollIndicatorInsets={{
               top: insets.top + navHeight,
-              bottom: dockHeight + keyboardHeight,
+              bottom: dockHeight,
             }}
             contentContainerStyle={[
               styles.threadContent,
               {
                 // Clear the status bar plus the nav before the first message,
-                // and the composer (plus an open keyboard) after the last.
-                paddingTop: insets.top + (navHeight || theme.space(12)) + theme.space(2),
-                paddingBottom: dockHeight + keyboardHeight + theme.space(2),
+                // and the composer after the last.
+                paddingTop: threadTop,
+                paddingBottom: threadBottom,
               },
             ]}
             keyboardDismissMode="interactive"
             keyboardShouldPersistTaps="handled"
+            // 60fps sampling and the platform's own deceleration: anything
+            // coarser makes the paging check below land mid-flick, which reads
+            // as the thread snagging under the finger.
+            scrollEventThrottle={16}
+            decelerationRate="normal"
+            onScrollBeginDrag={() => {
+              historyDragActive.current = true;
+            }}
+            onScrollEndDrag={() => {
+              historyDragActive.current = false;
+            }}
+            onScroll={(event) => {
+              const { contentOffset, contentSize, layoutMeasurement } =
+                event.nativeEvent;
+              // A whole line of slack: a thread resting a few points off the end
+              // is still "at the bottom" to the reader.
+              setAtBottom(
+                contentOffset.y + layoutMeasurement.height >=
+                  contentSize.height - theme.line.body,
+              );
+
+              if (
+                historyDragActive.current &&
+                hasEarlierTurns &&
+                contentOffset.y <= theme.space(4)
+              ) {
+                // One page per upward gesture prevents a single momentum event
+                // from mounting an entire giant transcript again.
+                historyDragActive.current = false;
+                loadEarlierTurns();
+              }
+            }}
           >
-            {renderedTurns.map((turn) => (
+            {hasEarlierTurns && (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Load 15 earlier messages"
+                onPress={loadEarlierTurns}
+                style={({ pressed }) => [
+                  styles.loadEarlier,
+                  pressed && styles.loadEarlierPressed,
+                ]}
+              >
+                <Ionicons name="chevron-up" size={14} color={theme.color.textDim} />
+                <Text style={styles.loadEarlierText}>Earlier messages</Text>
+              </Pressable>
+            )}
+            {headTurns.map((turn) => (
               <Turn key={turn.id} turn={turn} />
             ))}
-            {daemon.busy && !daemon.loadingSession && <Working />}
+
+            {/* The newest exchange is measured as one block: the prompt plus
+                everything the agent has said since. The spacer below it is what
+                lets that prompt reach the top of the reading area by ordinary
+                scrolling, instead of an out-of-bounds jump the user cannot undo. */}
+            {tailTurns.length > 0 && (
+              <View
+                style={styles.exchange}
+                onLayout={(event) => {
+                  const { y, height } = event.nativeEvent.layout;
+                  setExchangeHeight(height);
+                  if (!pendingPromptAlignment.current) return;
+                  pendingPromptAlignment.current = false;
+                  scroller.current?.scrollTo({
+                    y: Math.max(0, y - threadTop),
+                    animated: !reduceMotion,
+                  });
+                }}
+              >
+                {tailTurns.map((turn) => (
+                  <Turn key={turn.id} turn={turn} />
+                ))}
+                {working && <Working />}
+              </View>
+            )}
+            {tailTurns.length === 0 && working && <Working />}
+
+            {tailSpacer > 0 && <View style={{ height: tailSpacer }} />}
           </Animated.ScrollView>
         ) : !daemon.loadingSession && !showHistorySkeleton ? (
           // Tapping the empty state dismisses the keyboard, which collapses the
@@ -568,38 +831,109 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
           </Animated.View>
         )}
 
-        {/* The composer floats over the thread, and its frosted zone is
-            contained to exactly its own height — the mirror of the nav. */}
-        {dockHeight > 0 && (
-          <ProgressiveBlur
-            edge="bottom"
-            height={dockHeight}
-            style={[styles.dockCover, { bottom: keyboardHeight }]}
-          />
-        )}
-        <View
-          style={[
-            styles.dock,
-            styles.dockOverlay,
-            {
-              bottom: keyboardHeight,
-              // SafeAreaView already reserves the home-indicator inset.
-              paddingBottom: theme.space(2),
-            },
-          ]}
-          onLayout={(e) => setDockHeight(e.nativeEvent.layout.height)}
-        >
-          <Composer
-            value={draft}
-            onChangeText={setDraft}
-            onSend={send}
-            busy={daemon.busy}
-            onStop={daemon.cancel}
-            editable={daemon.status === "online"}
-            placeholder={active ? "Ask me. Task me..." : "Waiting for an agent..."}
-          />
+        <View style={[styles.dockOverlay, { bottom: 0 }]}>
+          {/* Only ever a way back down: there is no jump-to-top, because the top
+              of a transcript is history and the end is where work happens. */}
+          <Animated.View
+            pointerEvents={atBottom ? "none" : "auto"}
+            style={[styles.jumpToEnd, { opacity: jumpOpacity }]}
+          >
+            <CircleButton
+              label="Scroll to latest message"
+              onPress={() => {
+                // The thread only rides the keyboard from the bottom, and the
+                // scroll that gets there is animated — so claim the state now
+                // rather than waiting for the last frame's scroll event.
+                setAtBottom(true);
+                scroller.current?.scrollToEnd({ animated: !reduceMotion });
+              }}
+              size={theme.size.chip}
+            >
+              <Ionicons name="arrow-down" size={18} color={theme.color.text} />
+            </CircleButton>
+          </Animated.View>
+          {dockHeight > 0 && (
+            <ProgressiveBlur edge="bottom" height={dockHeight} style={styles.dockCover} />
+          )}
+          <View
+            style={[
+              styles.dock,
+              // Constant. The spacer below the body carries the keyboard, and it
+              // already gives this clearance back, so the composer keeps the
+              // same gap above either boundary without re-laying out.
+              { paddingBottom: insets.bottom + theme.space(2) },
+            ]}
+            onLayout={(event) => setDockHeight(event.nativeEvent.layout.height)}
+          >
+
+          {daemon.permission ? (
+            <Glass radius={theme.radius.composer} tier="raised">
+              <View style={styles.approvalDock} accessibilityLiveRegion="assertive">
+                <View style={styles.approvalHeader}>
+                  <Text style={styles.approvalLabel}>APPROVAL NEEDED</Text>
+                  <Text
+                    numberOfLines={2}
+                    ellipsizeMode="tail"
+                    style={styles.approvalTitle}
+                  >
+                    {daemon.permission.title}
+                  </Text>
+                </View>
+                <View style={styles.approvalActions}>
+                  {selectApprovalOptions(daemon.permission.options).map((option) => {
+                    const deny = isDenyApprovalOption(option);
+                    // Capture the request id before another connected client can
+                    // answer and clear the pending permission.
+                    const requestId = daemon.permission!.requestId;
+                    return (
+                      <Pressable
+                        key={option.optionId}
+                        accessibilityRole="button"
+                        accessibilityLabel={option.name}
+                        onPress={() => {
+                          if (deny) haptics.warned();
+                          else haptics.sent();
+                          daemon.answer(requestId, option.optionId);
+                        }}
+                        style={({ pressed }) => [
+                          styles.approvalButton,
+                          deny ? styles.approvalDeny : styles.approvalAllow,
+                          pressed && styles.approvalPressed,
+                        ]}
+                      >
+                        <Text
+                          style={[
+                            styles.approvalButtonText,
+                            deny && styles.approvalDenyText,
+                          ]}
+                        >
+                          {option.name}
+                        </Text>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+              </View>
+            </Glass>
+          ) : (
+            <Composer
+              value={draft}
+              onChangeText={setDraft}
+              onSend={send}
+              busy={daemon.busy}
+              onStop={daemon.cancel}
+              editable={daemon.status === "online"}
+              placeholder={active ? "Ask me. Task me..." : "Waiting for an agent..."}
+            />
+          )}
+          </View>
         </View>
       </View>
+
+      {/* The one thing the keyboard moves. Everything above is laid out inside
+          the body, so shortening it here raises the thread and the dock as a
+          single layout on the keyboard's own clock. */}
+      <Reanimated.View style={keyboardSpacer} />
 
       {/* One picker, pointed at whichever pill opened it. The mode selector is
           excluded from the model menu so each pill owns exactly one list. */}
@@ -621,64 +955,28 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
           anywhere on it closes, which matches the push metaphor better than a
           separate dimming layer would. */}
       {menuOpen && (
-        <Pressable
-          style={StyleSheet.absoluteFill}
-          accessibilityRole="button"
-          accessibilityLabel="Close menu"
-          onPress={() => {
-            haptics.tap();
-            setMenuOpen(false);
-          }}
-        />
-      )}
-
-      {daemon.permission && (
-        // Blocking on purpose: an approval must not be scrollable away.
-        // accessibilityViewIsModal keeps VoiceOver inside the sheet too.
-        <View style={styles.sheetBackdrop} accessibilityViewIsModal>
-          <View style={styles.sheet}>
-            <Text style={styles.sheetLabel}>APPROVAL NEEDED</Text>
-            <Text style={styles.sheetTitle}>{daemon.permission.title}</Text>
-            <View style={styles.sheetActions}>
-              {daemon.permission.options.map((option) => {
-                const deny = /reject|deny|no/i.test(option.optionId);
-                // Capture the id now. Another device watching this session can
-                // answer first and clear `permission`; dereferencing it inside
-                // the handler would then throw.
-                const requestId = daemon.permission!.requestId;
-                return (
-                  <Pressable
-                    key={option.optionId}
-                    accessibilityRole="button"
-                    accessibilityLabel={option.name}
-                    // Approving hands real capability to the agent, so the two
-                    // answers must not feel identical under the thumb.
-                    onPress={() => {
-                      if (deny) haptics.warned();
-                      else haptics.sent();
-                      daemon.answer(requestId, option.optionId);
-                    }}
-                    style={({ pressed }) => [
-                      styles.sheetButton,
-                      deny ? styles.sheetDeny : styles.sheetAllow,
-                      pressed && styles.sheetPressed,
-                    ]}
-                  >
-                    <Text style={[styles.sheetButtonText, deny && styles.sheetDenyText]}>
-                      {option.name}
-                    </Text>
-                  </Pressable>
-                );
-              })}
-            </View>
-          </View>
+        // The gesture lives on this wrapper, not the Pressable: Pressable spreads
+        // its own responder handlers last and would overwrite them. As the parent
+        // it can still claim the touch from the child once a drag begins.
+        <View style={StyleSheet.absoluteFill} {...edgeSwipe.panHandlers}>
+          <Pressable
+            style={StyleSheet.absoluteFill}
+            accessibilityRole="button"
+            accessibilityLabel="Close menu"
+            onPress={() => {
+              haptics.tap();
+              setMenuOpen(false);
+            }}
+          />
         </View>
       )}
+
       </SafeAreaView>
       </Animated.View>
     </View>
   );
 }
+
 
 /** Three dots that fade in sequence. Calm, and it costs no layout. */
 function Working() {
@@ -716,8 +1014,9 @@ function Working() {
 }
 
 const styles = StyleSheet.create({
-  // Drawer colour, so the strip behind the sliding pane matches it.
-  root: { flex: 1, backgroundColor: theme.color.drawer },
+  // The drawer paints its own panel. Matching the conversation canvas here
+  // removes the stray drawer-coloured band beneath the closed pane/home area.
+  root: { flex: 1, backgroundColor: theme.color.bg },
   // Rounded on all corners: once it slides it is a card over the drawer, and
   // the curve is what makes the two planes legible.
   pane: {
@@ -784,11 +1083,33 @@ const styles = StyleSheet.create({
   thread: { flex: 1 },
   threadContent: {
     flexGrow: 1,
+    // Bottom-anchored, like every chat. This is also what makes the keyboard
+    // feel instant: a short thread rests on the bottom edge, so shortening the
+    // container moves it immediately, instead of leaving it pinned to the top
+    // until the scroll offset is clamped at the end of the animation.
     justifyContent: "flex-end",
     paddingHorizontal: theme.gutter,
     paddingTop: theme.space(4),
     paddingBottom: theme.space(2),
     gap: theme.space(5),
+  },
+  // Matches the gap the thread puts between top-level turns, so grouping the
+  // newest exchange changes nothing about how it reads.
+  exchange: { gap: theme.space(5) },
+  loadEarlier: {
+    alignSelf: "center",
+    minHeight: theme.size.touch,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.space(1),
+    paddingHorizontal: theme.space(3),
+    borderRadius: theme.radius.pill,
+  },
+  loadEarlierPressed: { backgroundColor: theme.color.surfacePressed },
+  loadEarlierText: {
+    color: theme.color.textDim,
+    fontSize: theme.font.small,
+    fontWeight: "600",
   },
   historySkeleton: {
     position: "absolute",
@@ -836,7 +1157,6 @@ const styles = StyleSheet.create({
   dock: {
     paddingHorizontal: theme.gutter,
     paddingTop: theme.space(2),
-    paddingBottom: theme.space(2),
   },
   dockOverlay: {
     position: "absolute",
@@ -844,38 +1164,79 @@ const styles = StyleSheet.create({
     right: 0,
     zIndex: 3,
   },
-  dockCover: { zIndex: 2 },
+  // Behind the composer, filling the wrapper it shares with it.
+  dockCover: { zIndex: 0 },
 
-  sheetBackdrop: {
+  // Rides above the composer it belongs to, at the gutter it shares with the
+  // thread, so it lands over the conversation rather than over the input.
+  jumpToEnd: {
     position: "absolute",
-    top: 0,
+    right: theme.gutter,
+    bottom: "100%",
+    marginBottom: theme.space(2),
+    zIndex: 1,
+  },
+
+  // A narrow strip: wide enough to catch a deliberate edge swipe, too narrow to
+  // interfere with anything the conversation itself does.
+  edgeSwipe: {
+    position: "absolute",
     left: 0,
-    right: 0,
     bottom: 0,
-    backgroundColor: "rgba(0,0,0,0.72)",
-    justifyContent: "flex-end",
+    width: theme.space(5),
+    zIndex: 4,
   },
-  sheet: {
-    backgroundColor: theme.color.surfaceRaised,
-    borderTopLeftRadius: theme.radius.lg,
-    borderTopRightRadius: theme.radius.lg,
-    padding: theme.space(5),
-    gap: theme.space(3),
+
+  approvalDock: {
+    padding: theme.space(2.5),
+    gap: theme.space(2),
   },
-  sheetLabel: { color: theme.color.accent, fontSize: theme.font.tiny, letterSpacing: 1 },
-  sheetTitle: { color: theme.color.text, fontSize: theme.font.title, fontWeight: "600" },
-  sheetActions: { flexDirection: "row", gap: theme.space(3), marginTop: theme.space(2) },
-  sheetButton: {
+  approvalHeader: {
+    maxHeight: 58,
+    overflow: "hidden",
+    gap: theme.space(1),
+    paddingHorizontal: theme.space(1),
+  },
+  approvalLabel: {
+    color: theme.color.accent,
+    fontSize: theme.font.tiny,
+    fontWeight: "700",
+    letterSpacing: 1,
+  },
+  approvalTitle: {
+    color: theme.color.text,
+    fontSize: theme.font.small,
+    maxHeight: 40,
+    overflow: "hidden",
+    lineHeight: 20,
+    fontWeight: "500",
+  },
+  approvalActions: { flexDirection: "row", gap: theme.space(2) },
+  approvalButton: {
     flex: 1,
+    minWidth: 0,
     minHeight: theme.size.touch,
-    paddingVertical: theme.space(3.5),
     borderRadius: theme.radius.md,
     alignItems: "center",
     justifyContent: "center",
+    paddingHorizontal: theme.space(2),
   },
-  sheetAllow: { backgroundColor: theme.color.text },
-  sheetDeny: { backgroundColor: theme.color.surface },
-  sheetPressed: { opacity: 0.75 },
-  sheetButtonText: { color: "#000", fontSize: theme.font.body, fontWeight: "600" },
-  sheetDenyText: { color: theme.color.text },
+  approvalAllow: {
+    backgroundColor: theme.approval.allowFill,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: "rgba(255,255,255,0.42)",
+  },
+  approvalDeny: {
+    backgroundColor: theme.approval.rejectFill,
+    borderWidth: 1,
+    borderColor: theme.approval.rejectRim,
+  },
+  approvalPressed: { opacity: 0.72 },
+  approvalButtonText: {
+    color: theme.approval.allowText,
+    fontSize: theme.font.small,
+    fontWeight: "700",
+    textAlign: "center",
+  },
+  approvalDenyText: { color: theme.approval.rejectText },
 });
