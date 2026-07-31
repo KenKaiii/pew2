@@ -23,6 +23,17 @@ export function agentSessionKey(providerId: string, sessionId: string): string {
   return `agent:${providerId}:${sessionId}`;
 }
 
+/** Replace a disk-history stub with its live session without losing its project. */
+export function replaceAgentSessionStub(existing: Session[], live: Session): Session[] {
+  if (!live.agentSessionId) return [live, ...existing];
+
+  const stub = existing.find((session) => session.agentSessionId === live.agentSessionId);
+  return [
+    { ...live, cwd: live.cwd ?? stub?.cwd },
+    ...existing.filter((session) => session.agentSessionId !== live.agentSessionId),
+  ];
+}
+
 /**
  * Merge an agent's stored conversations into the list already on screen.
  *

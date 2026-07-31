@@ -216,12 +216,10 @@ export class Daemon {
     if (!session || session.live) return;
     session.live = true;
     // The backlog goes out as one batched frame rather than hundreds: the app
-    // folds a replay into a single render, and a resumed conversation's
-    // history arriving frame-by-frame was the visible stall in opening one.
+    // folds it into a single render. An empty frame still matters because it
+    // marks a resumed transcript as fully loaded and dismisses its skeleton.
     const backlog = session.log.since(-1);
-    if (backlog.length > 0) {
-      this.send({ t: "session.replay", sessionId, events: backlog });
-    }
+    this.send({ t: "session.replay", sessionId, events: backlog });
   }
 
   async startSession(providerId: string, cwd: string): Promise<string> {

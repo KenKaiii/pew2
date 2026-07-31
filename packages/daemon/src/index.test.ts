@@ -69,3 +69,12 @@ test("markLive is idempotent and ignores unknown sessions", () => {
   // Flushing twice would duplicate the whole history on every client.
   expect(sent).toHaveLength(1);
 });
+
+test("an empty replay still marks transcript loading complete", () => {
+  const { daemon, sent } = daemonWithCollector();
+  plantSession(daemon, "empty");
+
+  daemon.markLive("empty");
+
+  expect(sent).toEqual([{ t: "session.replay", sessionId: "empty", events: [] }]);
+});

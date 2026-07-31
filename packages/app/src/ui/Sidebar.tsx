@@ -18,7 +18,7 @@ import { touchSlop } from "./controls";
 import { haptics } from "./haptics";
 import { HistorySkeleton } from "./Skeleton";
 import { orderProvidersByRecency } from "../providerRecency";
-import { folderName } from "../projectFolder";
+import { formatHistoryMetadata } from "../historyMetadata";
 import type { Provider, Session } from "../useDaemon";
 
 export const DRAWER_WIDTH = Math.min(Dimensions.get("window").width * 0.82, 330);
@@ -160,42 +160,35 @@ export function Sidebar({
                 </Text>
               )
             }
-            renderItem={({ item: session }) => (
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel={session.title}
-                accessibilityState={{ selected: session.id === activeSessionId }}
-                onPress={() => {
-                  haptics.tap();
-                  onOpenSession(session.id);
-                }}
-                style={({ pressed }) => [
-                  styles.session,
-                  session.id === activeSessionId && styles.sessionActive,
-                  pressed && styles.pressed,
-                ]}
-              >
-                <Text style={styles.sessionTitle} numberOfLines={1}>
-                  {session.title}
-                </Text>
-                {/* Which project this conversation belongs to — how people
-                    actually tell sessions apart. The message count only
-                    stands in when no directory is known (locally started
-                    sessions). */}
-                {folderName(session.cwd) ? (
-                  <Text style={styles.sessionMeta} numberOfLines={1}>
-                    {folderName(session.cwd)}
+            renderItem={({ item: session }) => {
+              const metadata = formatHistoryMetadata(session);
+
+              return (
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={session.title}
+                  accessibilityState={{ selected: session.id === activeSessionId }}
+                  onPress={() => {
+                    haptics.tap();
+                    onOpenSession(session.id);
+                  }}
+                  style={({ pressed }) => [
+                    styles.session,
+                    session.id === activeSessionId && styles.sessionActive,
+                    pressed && styles.pressed,
+                  ]}
+                >
+                  <Text style={styles.sessionTitle} numberOfLines={1}>
+                    {session.title}
                   </Text>
-                ) : (
-                  !(session.agentSessionId && session.turns.length === 0) && (
-                    <Text style={styles.sessionMeta}>
-                      {session.turns.length} message
-                      {session.turns.length === 1 ? "" : "s"}
+                  {metadata ? (
+                    <Text style={styles.sessionMeta} numberOfLines={1}>
+                      {metadata}
                     </Text>
-                  )
-                )}
-              </Pressable>
-            )}
+                  ) : null}
+                </Pressable>
+              );
+            }}
           />
 
           {/* Which machine this phone is driving. Easy to lose track of once

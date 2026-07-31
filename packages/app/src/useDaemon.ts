@@ -8,7 +8,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { USE_FIXTURES, isFixtureSession, sampleSessions } from "./fixtures";
-import { mergeAgentSessions } from "./agentHistory";
+import { mergeAgentSessions, replaceAgentSessionStub } from "./agentHistory";
 import { advance, alreadySeen, type Cursors } from "./cursors";
 import { findDuplicateError } from "./errorDedup";
 import { readChunk } from "./chunks";
@@ -91,6 +91,8 @@ interface State {
    * The drawer shows skeleton rows instead of a false "No conversations yet".
    */
   loadingSessions: boolean;
+  /** A stored transcript is loading and is not ready to reveal yet. */
+  loadingSession: boolean;
 }
 
 /**
@@ -142,6 +144,7 @@ export function useDaemon(url: string, deviceId = "phone") {
     configOptions: [],
     busy: false,
     loadingSessions: false,
+    loadingSession: false,
   });
 
   // Not in State: this is a cache keyed by provider, not part of the session.
@@ -230,18 +233,20 @@ export function useDaemon(url: string, deviceId = "phone") {
         // copied the turns array per event — quadratic work that read on the
         // phone as a stall of seconds after the skeleton.
         if (message.t === "session.replay" && Array.isArray(message.events)) {
+          if (message.sessionId !== sessionRef.current) return;
           const events: ReplayEvent[] = [];
           for (const event of message.events) {
             if (event?.t !== "session.event" || typeof event.seq !== "number") continue;
-            // Same scoping and dedup the live path applies.
-            if (event.sessionId !== sessionRef.current) continue;
             if (alreadySeen(cursors.current, event.sessionId, event.seq)) continue;
             cursors.current = advance(cursors.current, event.sessionId, event.seq);
             events.push(event);
           }
-          if (events.length > 0) {
-            setState((prev) => foldSessionEvents(prev, events));
-          }
+          setState((prev) => {
+            const folded = events.length > 0 ? foldSessionEvents(prev, events) : prev;
+            return folded.loadingSession
+              ? { ...folded, loadingSession: false, busy: false }
+              : folded;
+          });
           return;
         }
 
@@ -363,24 +368,21 @@ export function useDaemon(url: string, deviceId = "phone") {
                 // Keep any prompt already rendered optimistically: it belongs to
                 // this session, which was started to deliver it.
                 turns: prev.turns.filter(isOptimistic),
-                sessions: [
-                  {
-                    id: message.sessionId,
-                    providerId: message.providerId ?? prev.activeProviderId ?? "",
-                    title:
-                      firstUserText(prev.turns.filter(isOptimistic)) ??
-                      resumedFrom?.title ??
-                      "New conversation",
-                    startedAt: Date.now(),
-                    turns: prev.turns.filter(isOptimistic),
-                    configOptions: message.configOptions ?? [],
-                    agentSessionId,
-                  },
-                  ...prev.sessions.filter(
-                    (s) => !agentSessionId || s.agentSessionId !== agentSessionId,
-                  ),
-                ],
-                busy: false,
+                sessions: replaceAgentSessionStub(prev.sessions, {
+                  id: message.sessionId,
+                  providerId: message.providerId ?? prev.activeProviderId ?? "",
+                  title:
+                    firstUserText(prev.turns.filter(isOptimistic)) ??
+                    resumedFrom?.title ??
+                    "New conversation",
+                  startedAt: Date.now(),
+                  turns: prev.turns.filter(isOptimistic),
+                  configOptions: message.configOptions ?? [],
+                  agentSessionId,
+                }),
+                // Keep the skeleton until the batched transcript follows this frame.
+                loadingSession: message.resumed === true,
+                busy: message.resumed === true,
               };
             }
 
@@ -480,11 +482,12 @@ export function useDaemon(url: string, deviceId = "phone") {
                 // Keep the agent's own wording, which may carry more context
                 // than the rejection; only its severity was wrong.
                 turns[duplicate] = { ...turns[duplicate]!, role: "system" };
-                return { ...prev, busy: false, turns };
+                return { ...prev, busy: false, loadingSession: false, turns };
               }
               return {
                 ...prev,
                 busy: false,
+                loadingSession: false,
                 turns: [
                   ...prev.turns,
                   // Date.now() collides when two errors land in the same
@@ -555,7 +558,12 @@ export function useDaemon(url: string, deviceId = "phone") {
         // Spawning the agent and its ACP handshake take seconds; without a local
         // turn the screen would sit empty and look like the send did nothing.
         const turn = localTurn(localSeq.current++, initialText);
-        setState((s) => ({ ...s, busy: true, turns: [...s.turns, turn] }));
+        setState((s) => ({
+          ...s,
+          busy: true,
+          loadingSession: false,
+          turns: [...s.turns, turn],
+        }));
       },
 
       prompt: (text: string) => {
@@ -628,6 +636,7 @@ export function useDaemon(url: string, deviceId = "phone") {
             turns: [],
             configOptions: [],
             busy: true,
+            loadingSession: true,
           }));
           return;
         }
@@ -648,6 +657,7 @@ export function useDaemon(url: string, deviceId = "phone") {
           turns: session.turns,
           configOptions: session.configOptions,
           busy: false,
+          loadingSession: false,
         }));
       },
 
@@ -665,6 +675,7 @@ export function useDaemon(url: string, deviceId = "phone") {
           // show another agent's model name in the top bar.
           configOptions: [],
           busy: false,
+          loadingSession: false,
         }));
       },
 
@@ -677,6 +688,7 @@ export function useDaemon(url: string, deviceId = "phone") {
           turns: [],
           configOptions: [],
           busy: false,
+          loadingSession: false,
         }));
       },
     }),

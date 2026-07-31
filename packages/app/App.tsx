@@ -25,7 +25,7 @@ import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from "react-native-
 import { StatusBar } from "expo-status-bar";
 import { Ionicons } from "@expo/vector-icons";
 import { theme } from "./src/theme";
-import { useDaemon, type Provider } from "./src/useDaemon";
+import { useDaemon, type Provider, type Turn as TurnData } from "./src/useDaemon";
 import { Orb } from "./src/ui/Orb";
 import { Composer } from "./src/ui/Composer";
 import { Turn } from "./src/ui/Turn";
@@ -173,12 +173,24 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
   const scroller = useRef<ScrollView>(null);
   const reduceMotion = useReducedMotion();
   const drawer = useRef(new Animated.Value(0)).current;
+  // A resumed transcript first reveals only its newest turn. Older turns are
+  // prepended after the crossfade while native scroll anchoring holds that turn
+  // perfectly still, so opening history never performs a visible mega-scroll.
+  const [historyPreview, setHistoryPreview] = useState<TurnData[] | null>(null);
+  const [showHistorySkeleton, setShowHistorySkeleton] = useState(false);
+  const historyWasLoading = useRef(false);
+  const historyTransitionActive = useRef(false);
+  const latestTurns = useRef(daemon.turns);
+  latestTurns.current = daemon.turns;
+  const threadOpacity = useRef(new Animated.Value(1)).current;
+  const historySkeletonOpacity = useRef(new Animated.Value(0)).current;
 
   const active: Provider | undefined =
     daemon.providers.find((p) => p.id === daemon.activeProviderId) ??
     daemon.providers.find((p) => p.available);
 
   const inThread = daemon.turns.length > 0;
+  const renderedTurns = historyPreview ?? daemon.turns;
 
   // Model, permission mode and thinking level are whatever this agent
   // advertised; pew2 keeps no model list of its own. Mode gets its own pill:
@@ -188,8 +200,84 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
   const mode = modeOption && modeOption.id !== model?.id ? modeOption : undefined;
 
   useEffect(() => {
-    if (inThread) scroller.current?.scrollToEnd({ animated: !reduceMotion });
-  }, [daemon.turns, daemon.busy, inThread, reduceMotion]);
+    if (daemon.loadingSession) {
+      historyWasLoading.current = true;
+      historyTransitionActive.current = true;
+      setHistoryPreview([]);
+      setShowHistorySkeleton(true);
+      threadOpacity.stopAnimation();
+      historySkeletonOpacity.stopAnimation();
+      threadOpacity.setValue(0);
+      historySkeletonOpacity.setValue(1);
+      return;
+    }
+    if (!historyWasLoading.current) return;
+    historyWasLoading.current = false;
+
+    const turns = latestTurns.current;
+    const newest = turns[turns.length - 1];
+    if (!newest) {
+      threadOpacity.setValue(1);
+      historySkeletonOpacity.setValue(0);
+      setHistoryPreview(null);
+      setShowHistorySkeleton(false);
+      historyTransitionActive.current = false;
+      return;
+    }
+
+    // Commit the anchored newest turn before beginning the reveal. This frame is
+    // what prevents the full transcript from ever painting at scroll position 0.
+    setHistoryPreview([newest]);
+    let cancelled = false;
+    const frame = requestAnimationFrame(() => {
+      if (cancelled) return;
+      const finish = () => {
+        if (cancelled) return;
+        // Prepending the rest is invisible below the opaque thread; the
+        // ScrollView's maintainVisibleContentPosition keeps `newest` stationary.
+        setHistoryPreview(null);
+        setShowHistorySkeleton(false);
+        historyTransitionActive.current = false;
+      };
+
+      if (reduceMotion) {
+        threadOpacity.setValue(1);
+        historySkeletonOpacity.setValue(0);
+        finish();
+        return;
+      }
+
+      Animated.parallel([
+        Animated.timing(threadOpacity, {
+          toValue: 1,
+          duration: 240,
+          easing: Easing.out(Easing.cubic),
+          useNativeDriver: true,
+        }),
+        Animated.timing(historySkeletonOpacity, {
+          toValue: 0,
+          duration: 180,
+          easing: Easing.out(Easing.cubic),
+          useNativeDriver: true,
+        }),
+      ]).start(({ finished }) => {
+        if (finished) finish();
+      });
+    });
+
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(frame);
+      threadOpacity.stopAnimation();
+      historySkeletonOpacity.stopAnimation();
+    };
+  }, [daemon.loadingSession, historySkeletonOpacity, reduceMotion, threadOpacity]);
+
+  useEffect(() => {
+    if (inThread && !daemon.loadingSession && !historyTransitionActive.current) {
+      scroller.current?.scrollToEnd({ animated: !reduceMotion });
+    }
+  }, [daemon.turns, daemon.busy, daemon.loadingSession, inThread, reduceMotion]);
 
   // Feedback for things that happen on their own, rather than because a finger
   // touched the screen. This is the point of a remote control: the agent runs
@@ -250,6 +338,24 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
     outputRange: [0, DRAWER_WIDTH],
   });
 
+  const openSession = (id: string) => {
+    const stored = daemon.sessions.find((session) => session.id === id);
+    if (stored?.agentSessionId) {
+      // Prime the transition in the tap's own render so there is never a blank
+      // frame between the drawer closing and the loading skeleton appearing.
+      historyWasLoading.current = true;
+      historyTransitionActive.current = true;
+      setHistoryPreview([]);
+      setShowHistorySkeleton(true);
+      threadOpacity.stopAnimation();
+      historySkeletonOpacity.stopAnimation();
+      threadOpacity.setValue(0);
+      historySkeletonOpacity.setValue(1);
+    }
+    daemon.openSession(id);
+    setMenuOpen(false);
+  };
+
   const send = () => {
     const text = draft.trim();
     if (!text) return;
@@ -279,10 +385,7 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
         // open so you can pick a conversation from that app straight after —
         // closing here would make choosing an app cost two trips.
         onSelectProvider={daemon.select}
-        onOpenSession={(id) => {
-          daemon.openSession(id);
-          setMenuOpen(false);
-        }}
+        onOpenSession={openSession}
         onNewConversation={() => {
           daemon.leave();
           setMenuOpen(false);
@@ -402,10 +505,22 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
       )}
 
       <View style={styles.body}>
-        {inThread ? (
-          <ScrollView
+        {renderedTurns.length > 0 ? (
+          <Animated.ScrollView
             ref={scroller}
-            style={styles.thread}
+            style={[styles.thread, { opacity: threadOpacity }]}
+            // When older history is prepended after the newest-turn reveal,
+            // keep that newest turn pinned instead of shifting the viewport.
+            maintainVisibleContentPosition={{ minIndexForVisible: 0 }}
+            accessibilityElementsHidden={showHistorySkeleton}
+            importantForAccessibility={showHistorySkeleton ? "no-hide-descendants" : "auto"}
+            // Content still dissolves beneath the floating chrome, but the
+            // indicator stays sharp inside the unobscured reading area.
+            automaticallyAdjustsScrollIndicatorInsets={false}
+            scrollIndicatorInsets={{
+              top: insets.top + navHeight,
+              bottom: dockHeight + keyboardHeight,
+            }}
             contentContainerStyle={[
               styles.threadContent,
               {
@@ -418,17 +533,12 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
             keyboardDismissMode="interactive"
             keyboardShouldPersistTaps="handled"
           >
-            {daemon.turns.map((turn) => (
+            {renderedTurns.map((turn) => (
               <Turn key={turn.id} turn={turn} />
             ))}
-            {daemon.busy && <Working />}
-          </ScrollView>
-        ) : daemon.busy ? (
-          // Resuming a conversation streams its history back from the agent,
-          // which takes a moment. Blocks shaped like the coming messages are a
-          // better wait than a greeting that reads as "nothing here yet".
-          <ThreadSkeleton />
-        ) : (
+            {daemon.busy && !daemon.loadingSession && <Working />}
+          </Animated.ScrollView>
+        ) : !daemon.loadingSession && !showHistorySkeleton ? (
           // Tapping the empty state dismisses the keyboard, which collapses the
           // composer. Without this the greeting is inert and the only way out of
           // the expanded state is the keyboard's own dismiss control.
@@ -447,6 +557,15 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
                   : "No agents available on this machine."}
             </Text>
           </Pressable>
+        ) : null}
+
+        {(daemon.loadingSession || showHistorySkeleton) && (
+          <Animated.View
+            pointerEvents="none"
+            style={[styles.historySkeleton, { opacity: historySkeletonOpacity }]}
+          >
+            <ThreadSkeleton />
+          </Animated.View>
         )}
 
         {/* The composer floats over the thread, and its frosted zone is
@@ -664,10 +783,21 @@ const styles = StyleSheet.create({
 
   thread: { flex: 1 },
   threadContent: {
+    flexGrow: 1,
+    justifyContent: "flex-end",
     paddingHorizontal: theme.gutter,
     paddingTop: theme.space(4),
     paddingBottom: theme.space(2),
     gap: theme.space(5),
+  },
+  historySkeleton: {
+    position: "absolute",
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+    zIndex: 1,
+    backgroundColor: theme.color.bg,
   },
 
   greeting: {
