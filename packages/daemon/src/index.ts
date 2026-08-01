@@ -30,6 +30,14 @@ interface ActiveSession {
   log: SessionLog;
   /** Which agent this belongs to, so a config change knows what to remember. */
   providerId: string;
+  /**
+   * The directory the agent was started in.
+   *
+   * Kept because agent output names files relative to it — an image the agent
+   * generated is `.gg/generated/x.png` and nothing else, so serving it to the
+   * phone needs the root that path was written against.
+   */
+  cwd: string;
   /** Resolves once the agent has loaded and can accept prompts/config changes. */
   ready: Promise<void>;
   /** Whether clients have been told this session exists. */
@@ -269,7 +277,12 @@ export class Daemon {
         ? (await loadClaudeDisplayHistory(loadSessionId, cwd))?.map((message) => ({
             sessionUpdate:
               message.role === "user" ? "user_message_chunk" : "agent_message_chunk",
-            content: { type: "text", text: message.text },
+            // An array only when there are pictures to carry: the single block
+            // is the shape every other replay path emits.
+            content:
+              message.images.length > 0
+                ? [{ type: "text", text: message.text }, ...message.images]
+                : { type: "text", text: message.text },
           }))
         : provider.manifest.id === "ggcoder"
           ? await loadGgCoderDisplayHistory(loadSessionId, cwd)
@@ -496,6 +509,7 @@ export class Daemon {
       handle: undefined,
       log,
       providerId,
+      cwd,
       live: false,
       ready: Promise.resolve(),
     };
@@ -672,6 +686,7 @@ export class Daemon {
       handle: undefined,
       log,
       providerId,
+      cwd,
       live: false,
       ready: Promise.resolve(),
     };
@@ -729,6 +744,15 @@ export class Daemon {
 
   answerPermission(sessionId: string, requestId: string, optionId: string) {
     return this.require(sessionId).handle?.answerPermission(requestId, optionId) ?? false;
+  }
+
+  /**
+   * Where this session's agent is running, for resolving the relative paths it
+   * uses to name files. Undefined once the session is gone, in which case the
+   * caller falls back to the daemon's own workspace.
+   */
+  sessionCwd(sessionId: string): string | undefined {
+    return this.sessions.get(sessionId)?.cwd;
   }
 
   /** Replay everything a reconnecting client has not seen yet. */

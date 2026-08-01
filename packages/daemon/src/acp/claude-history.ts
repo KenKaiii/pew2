@@ -3,10 +3,16 @@ import { homedir } from "node:os";
 import path from "node:path";
 import readline from "node:readline";
 import type { AgentSession } from "./connect.js";
+import { historyImages, type ImageBlock } from "../images.js";
 
 export interface ClaudeDisplayMessage {
   role: "user" | "assistant";
   text: string;
+  /**
+   * Pictures stored with this message. A screenshot pasted into a prompt is a
+   * real part of the conversation, and text-only replay dropped it entirely.
+   */
+  images: ImageBlock[];
 }
 
 const LOCAL_COMMAND_TAGS = [
@@ -63,9 +69,11 @@ async function readDisplayMessages(filePath: string): Promise<ClaudeDisplayMessa
       // not part of the top-level ACP conversation replay.
       if (entry.isMeta === true || entry.isSidechain === true) continue;
       const text = visibleText(entry.message?.content, role).trim();
-      if (!text) continue;
+      const images = historyImages(entry.message?.content);
+      // A message may be nothing but an image, so emptiness is judged on both.
+      if (!text && images.length === 0) continue;
       if (role === "assistant" && text.includes("Please run /login")) continue;
-      messages.push({ role, text });
+      messages.push({ role, text, images });
     }
   } finally {
     lines.close();

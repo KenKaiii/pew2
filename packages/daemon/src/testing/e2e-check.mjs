@@ -5,7 +5,13 @@
  * Drives exactly what the app does: connect, list providers, start a session,
  * prompt, stream, and answer a permission request.
  */
-const ws = new WebSocket("ws://127.0.0.1:8787");
+// Port and token follow the environment, so this can run against a scratch
+// daemon (`PEW2_PORT`/`PEW2_TOKEN`) without disturbing one already on 8787.
+const port = process.env.PEW2_PORT ?? "8787";
+const token = process.env.PEW2_TOKEN;
+const ws = new WebSocket(
+  `ws://127.0.0.1:${port}${token ? `?token=${encodeURIComponent(token)}` : ""}`,
+);
 const inbox = [];
 let failures = 0;
 
@@ -17,6 +23,11 @@ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 const send = (m) => ws.send(JSON.stringify(m));
 
 ws.addEventListener("message", (e) => inbox.push(JSON.parse(e.data)));
+// A rejected upgrade (wrong or missing token) otherwise hangs here forever.
+ws.addEventListener("error", () => {
+  console.log("FAIL  connects to the daemon");
+  process.exit(1);
+});
 await new Promise((r) => ws.addEventListener("open", r));
 
 send({ t: "hello", wire: 1, role: "app", deviceId: "check", cursors: {} });
@@ -109,6 +120,31 @@ if (request) {
     .join("");
   check("approval reaches the agent", after.includes("You chose: allow"));
 }
+
+// Images. The agent names a file on this machine; only the daemon can read it,
+// so this round trip is the whole reason a generated picture is not a blank box.
+const { mkdtempSync, writeFileSync } = await import("node:fs");
+const { join } = await import("node:path");
+const { tmpdir } = await import("node:os");
+const PNG = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+  "base64",
+);
+const imageDir = mkdtempSync(join(tmpdir(), "pew2-e2e-image-"));
+writeFileSync(join(imageDir, "plot.png"), PNG);
+
+inbox.length = 0;
+send({ t: "image.fetch", requestId: "img-1", sessionId: started.sessionId, uri: join(imageDir, "plot.png") });
+await wait(800);
+const image = inbox.find((m) => m.t === "image" && m.requestId === "img-1");
+check("daemon inlines an image the agent named by path", image?.dataUri?.startsWith("data:image/png;base64,"));
+
+inbox.length = 0;
+send({ t: "image.fetch", requestId: "img-2", sessionId: started.sessionId, uri: join(imageDir, "missing.png") });
+await wait(800);
+const missing = inbox.find((m) => m.t === "image" && m.requestId === "img-2");
+// A failure must come back as a reason, or the app shows a blank frame forever.
+check("a missing image answers with a reason, not silence", !!missing?.error);
 
 ws.close();
 console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILED`);

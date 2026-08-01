@@ -6,6 +6,7 @@ import readline from "node:readline";
 import { promisify } from "node:util";
 import { createGunzip, gunzip } from "node:zlib";
 import type { AgentSession } from "./connect.js";
+import { historyImages } from "../images.js";
 
 const gunzipAsync = promisify(gunzip);
 
@@ -386,20 +387,23 @@ export async function loadGgCoderDisplayHistory(
     }
     if (message.role === "user") {
       const text = messageText(message.content).trim();
-      if (text) {
+      const images = historyImages(message.content);
+      // A pasted screenshot may be the whole message, so both are checked.
+      if (text || images.length > 0) {
         updates.push({
           sessionUpdate: "user_message_chunk",
-          content: { type: "text", text },
+          content: images.length > 0 ? [{ type: "text", text }, ...images] : { type: "text", text },
         });
       }
       continue;
     }
     if (message.role === "assistant") {
       const text = messageText(message.content);
-      if (text) {
+      const images = historyImages(message.content);
+      if (text || images.length > 0) {
         updates.push({
           sessionUpdate: "agent_message_chunk",
-          content: { type: "text", text },
+          content: images.length > 0 ? [{ type: "text", text }, ...images] : { type: "text", text },
         });
       }
     }

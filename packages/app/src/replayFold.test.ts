@@ -107,3 +107,49 @@ test("other sessions in the list are untouched", () => {
 
   expect(next.sessions[1]).toBe(other);
 });
+
+test("a replayed picture folds into the bubble it belongs to", () => {
+  const next = foldSessionEvents(state([], [sessionStub]), [
+    agent(0, "Rendered it:"),
+    {
+      sessionId: "s1",
+      seq: 1,
+      payload: {
+        update: {
+          sessionUpdate: "tool_call_update",
+          content: [{ type: "content", content: { type: "resource_link", uri: "out/plot.png" } }],
+        },
+      },
+    },
+  ]);
+
+  // One turn, not two: the picture is part of what the agent just said.
+  expect(next.turns).toEqual([
+    {
+      id: "s1:0",
+      role: "agent",
+      text: "Rendered it:",
+      images: [{ src: "out/plot.png", mimeType: undefined, alt: undefined }],
+    },
+  ]);
+});
+
+test("a picture without words still becomes a turn", () => {
+  // Text-only emptiness checks dropped these, which is what left the thread
+  // blank after an image generation tool ran.
+  const next = foldSessionEvents(state([], [sessionStub]), [
+    {
+      sessionId: "s1",
+      seq: 0,
+      payload: {
+        update: {
+          sessionUpdate: "agent_message_chunk",
+          content: [{ type: "image", mimeType: "image/png", data: "AA" }],
+        },
+      },
+    },
+  ]);
+
+  expect(next.turns).toHaveLength(1);
+  expect(next.turns[0]!.images).toHaveLength(1);
+});

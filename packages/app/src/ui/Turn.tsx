@@ -14,6 +14,7 @@ import { memo } from "react";
 import { StyleSheet, View } from "react-native";
 import { theme } from "../theme";
 import { MarkdownText } from "./MarkdownText";
+import { ChatImages } from "./ChatImage";
 import { CommandToken } from "./CommandToken";
 import { splitCommand } from "../slashCommands";
 import {
@@ -24,9 +25,13 @@ import {
 import type { Turn as TurnModel } from "../useDaemon";
 
 function TurnView({ turn }: { turn: TurnModel }) {
-  if (!turn.text.trim()) return null;
+  const images = turn.images ?? [];
+  // A turn with pictures and no words is normal: an image generation tool's
+  // result arrives as content alone. Only a turn with neither renders nothing.
+  if (!turn.text.trim() && images.length === 0) return null;
   // Preserve leading indentation: CommonMark uses it for indented code blocks.
   const text = turn.text.trimEnd();
+  const hasText = text.trim().length > 0;
 
   if (turn.role === "user") {
     // A sent command keeps the same treatment it had in the composer, so the
@@ -37,7 +42,14 @@ function TurnView({ turn }: { turn: TurnModel }) {
     return (
       <View style={styles.userRow}>
         <View
-          style={[styles.userBubble, userPromptNeedsFullWidth(text) && blockUserBubbleStyle]}
+          style={[
+            styles.userBubble,
+            // Pictures need the same definite rail block markdown does: the
+            // bubble otherwise hugs its text, and a percentage-width image
+            // inside it resolves against an intrinsic width — invisible when
+            // the prompt is an image and nothing else.
+            (images.length > 0 || userPromptNeedsFullWidth(text)) && blockUserBubbleStyle,
+          ]}
         >
           {command ? (
             <View style={styles.commandPrompt}>
@@ -47,8 +59,9 @@ function TurnView({ turn }: { turn: TurnModel }) {
               {!!instructions && <MarkdownText text={instructions} />}
             </View>
           ) : (
-            <MarkdownText text={text} />
+            hasText && <MarkdownText text={text} />
           )}
+          <ChatImages images={images} />
         </View>
       </View>
     );
@@ -57,7 +70,8 @@ function TurnView({ turn }: { turn: TurnModel }) {
   if (turn.role === "system") {
     return (
       <View style={styles.systemRow}>
-        <MarkdownText text={text} tone="system" />
+        {hasText && <MarkdownText text={text} tone="system" />}
+        <ChatImages images={images} />
       </View>
     );
   }
@@ -65,14 +79,16 @@ function TurnView({ turn }: { turn: TurnModel }) {
   if (turn.role === "thought") {
     return (
       <View style={styles.thoughtRow}>
-        <MarkdownText text={text} tone="thought" />
+        {hasText && <MarkdownText text={text} tone="thought" />}
+        <ChatImages images={images} />
       </View>
     );
   }
 
   return (
     <View style={styles.agentRow}>
-      <MarkdownText text={text} />
+      {hasText && <MarkdownText text={text} />}
+      <ChatImages images={images} />
     </View>
   );
 }
@@ -88,7 +104,11 @@ function TurnView({ turn }: { turn: TurnModel }) {
 export const Turn = memo(
   TurnView,
   (before, after) =>
-    before.turn.text === after.turn.text && before.turn.role === after.turn.role,
+    before.turn.text === after.turn.text &&
+    before.turn.role === after.turn.role &&
+    // Identity is enough: images are only ever appended as a new array, and
+    // comparing sources would walk megabytes of inline base64 per render.
+    before.turn.images === after.turn.images,
 );
 
 const styles = StyleSheet.create({

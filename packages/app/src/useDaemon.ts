@@ -11,13 +11,20 @@ import { USE_FIXTURES, isFixtureSession, sampleSessions } from "./fixtures";
 import { mergeAgentSessions, replaceAgentSessionStub } from "./agentHistory";
 import { advance, alreadySeen, type Cursors } from "./cursors";
 import { findDuplicateError } from "./errorDedup";
-import { readChunk } from "./chunks";
+import { isEmptyChunk, readChunk } from "./chunks";
+import type { ChatImage } from "./images";
 import {
   offeredCommands,
   readAvailableCommands,
   type SlashCommand,
 } from "./slashCommands";
-import { foldSessionEvents, isOptimistic, type ReplayEvent } from "./replayFold";
+import {
+  foldSessionEvents,
+  isOptimistic,
+  mergeChunk,
+  turnFromChunk,
+  type ReplayEvent,
+} from "./replayFold";
 
 export type Status = "connecting" | "online" | "offline";
 
@@ -29,6 +36,17 @@ export interface Provider {
   unavailableReason?: string;
   color?: string;
 }
+
+/**
+ * A desktop-local image being brought to the phone.
+ *
+ * `error` is a first-class state, not a silent failure: the whole point of this
+ * path is that a missing picture explains itself instead of leaving a blank.
+ */
+export type ImageEntry =
+  | { status: "loading" }
+  | { status: "ready"; dataUri: string; mimeType?: string }
+  | { status: "error"; message: string };
 
 export interface PermissionRequest {
   requestId: string;
@@ -50,6 +68,12 @@ export interface Turn {
   key?: string;
   role: "user" | "agent" | "thought" | "system";
   text: string;
+  /**
+   * Pictures the agent sent with this message, in order. Kept beside the text
+   * rather than spliced into it: the bytes may be inline base64 (megabytes of
+   * it) and markdown is re-parsed on every streamed chunk.
+   */
+  images?: ChatImage[];
 }
 
 /**
@@ -149,6 +173,21 @@ function localTurn(seq: number, text: string): Turn {
   };
 }
 
+/**
+ * Marks a first prompt that was stopped while its agent was still starting, so
+ * it never reached the daemon. Carries a `local:` id like the prompt above it:
+ * `session.started` keeps only locally-created turns, and this one belongs with
+ * the message it explains.
+ */
+function stoppedBeforeSend(seq: number): Turn {
+  return {
+    id: `local:${seq}`,
+    key: `local:${seq}`,
+    role: "system",
+    text: "Stopped before the agent received this.",
+  };
+}
+
 function firstUserText(turns: Turn[]): string | undefined {
   const first = turns.find((turn) => turn.role === "user");
   return first?.text.trim().slice(0, 60);
@@ -184,6 +223,12 @@ export function useDaemon(url: string, deviceId = "phone") {
   // and then be silently replaced by the truth once a session opened. Only an
   // agent's own advertisement may populate this.
   const [knownConfigs, setKnownConfigs] = useState<Record<string, ConfigOption[]>>({});
+  // Pictures the daemon has been asked to read off the desktop's disk, keyed by
+  // the path the agent named. Outside State because it is a cache belonging to
+  // this device's viewport, not to the conversation: it is never replayed,
+  // never mirrored into history, and a resumed thread re-requests what it can
+  // actually see. Inline `data:` sources never enter here at all.
+  const [images, setImages] = useState<Record<string, ImageEntry>>({});
   // Commands per provider, kept outside the session so opening a conversation
   // does not blank the menu for agents that never send the ACP notification and
   // are served from their project's files instead.
@@ -220,6 +265,9 @@ export function useDaemon(url: string, deviceId = "phone") {
   // socket dies every time the app is backgrounded or the network changes, and
   // without a cursor the tail of every interrupted turn is lost for good.
   const cursors = useRef<Cursors>({});
+  // Images already asked for. A ref, not the state map: the request has to be
+  // deduped at the moment of asking, which happens outside any updater.
+  const requestedImages = useRef(new Set<string>());
   // Mirrors state.sessions so openSession can look one up without doing that
   // work inside a state updater.
   const sessionsRef = useRef<Session[]>(state.sessions);
@@ -385,6 +433,19 @@ export function useDaemon(url: string, deviceId = "phone") {
           pendingCapabilities.current.delete(message.providerId);
         }
 
+        // Answered per request rather than as a session event, so it is handled
+        // here and kept out of the transcript state entirely.
+        if (message.t === "image" && typeof message.uri === "string") {
+          const uri: string = message.uri;
+          setImages((known) => ({
+            ...known,
+            [uri]: message.dataUri
+              ? { status: "ready", dataUri: message.dataUri, mimeType: message.mimeType }
+              : { status: "error", message: message.error ?? "Could not load this image" },
+          }));
+          return;
+        }
+
         setState((prev) => {
           switch (message.t) {
             case "providers":
@@ -421,6 +482,12 @@ export function useDaemon(url: string, deviceId = "phone") {
               const resumedFrom = agentSessionId
                 ? prev.sessions.find((s) => s.agentSessionId === agentSessionId)
                 : undefined;
+              // Same array when nothing is dropped, which is the common case: a
+              // fresh identity re-renders the whole transcript for no change,
+              // seen as the first prompt flickering the instant the session
+              // opens — right after it was sent.
+              const local = prev.turns.filter(isOptimistic);
+              const turns = local.length === prev.turns.length ? prev.turns : local;
               return {
                 ...prev,
                 sessionId: message.sessionId,
@@ -428,16 +495,14 @@ export function useDaemon(url: string, deviceId = "phone") {
                 configOptions: message.configOptions ?? [],
                 // Keep any prompt already rendered optimistically: it belongs to
                 // this session, which was started to deliver it.
-                turns: prev.turns.filter(isOptimistic),
+                turns,
                 sessions: replaceAgentSessionStub(prev.sessions, {
                   id: message.sessionId,
                   providerId: message.providerId ?? prev.activeProviderId ?? "",
                   title:
-                    firstUserText(prev.turns.filter(isOptimistic)) ??
-                    resumedFrom?.title ??
-                    "New conversation",
+                    firstUserText(turns) ?? resumedFrom?.title ?? "New conversation",
                   startedAt: Date.now(),
-                  turns: prev.turns.filter(isOptimistic),
+                  turns,
                   configOptions: message.configOptions ?? [],
                   agentSessionId,
                 }),
@@ -490,14 +555,16 @@ export function useDaemon(url: string, deviceId = "phone") {
               }
 
               const chunk = readChunk(payload);
-              if (!chunk || !chunk.text) return prev;
+              if (!chunk || isEmptyChunk(chunk)) return prev;
 
               const turns = [...prev.turns];
               const last = turns[turns.length - 1];
               // The echo of a prompt this client already rendered: adopt the
-              // server id in place rather than showing the message twice.
+              // server id in place rather than showing the message twice. Text
+              // is the only handle on that identity, so an image-only chunk is
+              // never mistaken for an echo of one.
               const optimistic =
-                chunk.role === "user"
+                chunk.role === "user" && chunk.text
                   ? turns.findIndex(
                       (turn) => isOptimistic(turn) && turn.text === chunk.text,
                     )
@@ -509,15 +576,11 @@ export function useDaemon(url: string, deviceId = "phone") {
                 };
               } else if (last && last.role === chunk.role && chunk.role !== "user") {
                 // Coalesce consecutive chunks of the same role into one bubble.
-                turns[turns.length - 1] = { ...last, text: last.text + chunk.text };
+                turns[turns.length - 1] = mergeChunk(last, chunk);
               } else {
                 // `seq` restarts at 0 for every session, so it alone would
                 // collide across sessions and produce duplicate React keys.
-                turns.push({
-                  id: `${message.sessionId}:${message.seq}`,
-                  role: chunk.role,
-                  text: chunk.text,
-                });
+                turns.push(turnFromChunk(`${message.sessionId}:${message.seq}`, chunk));
               }
               // Mirror into history so the sidebar can reopen this later, and
               // title the session from its first user message.
@@ -609,10 +672,35 @@ export function useDaemon(url: string, deviceId = "phone") {
     };
   }, [url]);
 
+  /** Returns false when nothing was sent, so a caller can report the failure. */
   const post = useCallback((message: unknown) => {
     const ws = socket.current;
-    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(message));
+    if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+    ws.send(JSON.stringify(message));
+    return true;
   }, []);
+
+  // Sent outside any state updater: React may invoke an updater twice, and a
+  // socket write in one would ask the daemon for the same picture twice.
+  const sendImageRequest = useCallback(
+    (uri: string) => {
+      const sent = post({
+        t: "image.fetch",
+        requestId: uri,
+        sessionId: sessionRef.current,
+        uri,
+      });
+      setImages((known) => ({
+        ...known,
+        [uri]: sent
+          ? { status: "loading" }
+          : // Offline: say so rather than spinning forever on a request that was
+            // never written to a socket.
+            { status: "error", message: "Not connected to your computer" },
+      }));
+    },
+    [post],
+  );
 
   const actions = useMemo(
     () => ({
@@ -661,8 +749,30 @@ export function useDaemon(url: string, deviceId = "phone") {
 
       cancel: () => {
         const sessionId = sessionRef.current;
-        if (sessionId) post({ t: "session.cancel", sessionId });
-        setState((s) => ({ ...s, busy: false }));
+        if (sessionId) {
+          post({ t: "session.cancel", sessionId });
+          setState((s) => ({ ...s, busy: false }));
+          return;
+        }
+
+        // Stop pressed while the agent is still booting. The first prompt of a
+        // conversation is not sent yet — it is held in `queued` until
+        // `session.started` names a session to send it to — so there is nothing
+        // for the daemon to cancel, and dropping the queued text *is* the
+        // cancel. Without this the prompt went out the moment the session
+        // opened, and Stop appeared to work only on the second press.
+        const pending = queued.current;
+        queued.current = undefined;
+        // Built out here, not in the updater: React may invoke an updater twice,
+        // and `localSeq.current++` inside one would hand two turns the same id.
+        const note = pending ? stoppedBeforeSend(localSeq.current++) : undefined;
+        setState((s) => ({
+          ...s,
+          busy: false,
+          // The prompt is still on screen but the agent never saw it: say so,
+          // rather than leaving it looking like a message that was ignored.
+          turns: note ? [...s.turns, note] : s.turns,
+        }));
       },
 
       answer: (requestId: string, optionId: string) => {
@@ -770,6 +880,25 @@ export function useDaemon(url: string, deviceId = "phone") {
         }));
       },
 
+      /**
+       * Ask the daemon for an image the agent named by path.
+       *
+       * Idempotent by uri: the transcript is a recycling list, so the same
+       * picture is mounted and unmounted repeatedly while scrolling and must
+       * not re-fetch megabytes each time. A failure is remembered too — only an
+       * explicit retry asks again.
+       */
+      fetchImage: (uri: string) => {
+        if (requestedImages.current.has(uri)) return;
+        requestedImages.current.add(uri);
+        sendImageRequest(uri);
+      },
+
+      /** Forget a failed fetch and ask again, from the placeholder's tap. */
+      retryImage: (uri: string) => {
+        sendImageRequest(uri);
+      },
+
       leave: () => {
         sessionRef.current = undefined;
         queued.current = undefined;
@@ -784,7 +913,7 @@ export function useDaemon(url: string, deviceId = "phone") {
         }));
       },
     }),
-    [post],
+    [post, sendImageRequest],
   );
 
   // Fall back to the last selectors this agent advertised, so the model picker
@@ -809,5 +938,5 @@ export function useDaemon(url: string, deviceId = "phone") {
     ? pendingCapabilities.current.has(effectiveProviderId)
     : false;
 
-  return { ...state, ...actions, configOptions, commands, loadingSessions };
+  return { ...state, ...actions, configOptions, commands, loadingSessions, images };
 }

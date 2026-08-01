@@ -81,3 +81,48 @@ test("unknown payloads produce nothing", () => {
   expect(readChunk({ update: { sessionUpdate: "tool_call", title: "bash" } })).toBeUndefined();
   expect(readChunk(undefined)).toBeUndefined();
 });
+
+test("an image generation tool's result reaches the transcript", () => {
+  // Tool calls are otherwise not rendered, and this picture arrives nowhere
+  // else — the reason a generated image showed up as nothing at all.
+  const chunk = readChunk({
+    update: {
+      sessionUpdate: "tool_call_update",
+      content: [{ type: "content", content: { type: "image", mimeType: "image/png", data: "AA" } }],
+    },
+  });
+  expect(chunk).toEqual({
+    role: "agent",
+    text: "",
+    images: [{ src: "data:image/png;base64,AA", mimeType: "image/png" }],
+  });
+});
+
+test("a tool call with no picture stays out of the conversation", () => {
+  expect(
+    readChunk({
+      update: {
+        sessionUpdate: "tool_call",
+        content: [{ type: "content", content: { type: "text", text: "ran tests" } }],
+      },
+    }),
+  ).toBeUndefined();
+});
+
+test("images travel with message text rather than replacing it", () => {
+  expect(
+    readChunk({
+      update: {
+        sessionUpdate: "agent_message_chunk",
+        content: [
+          { type: "text", text: "Here it is:" },
+          { type: "resource_link", uri: "out/chart.png" },
+        ],
+      },
+    }),
+  ).toEqual({
+    role: "agent",
+    text: "Here it is:",
+    images: [{ src: "out/chart.png", mimeType: undefined, alt: undefined }],
+  });
+});

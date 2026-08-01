@@ -69,3 +69,46 @@ test("counts only rows the official Claude ACP replay renders", async () => {
     "assistant:Any time",
   ]);
 });
+
+test("a pasted screenshot survives replay, even as the whole message", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "pew2-claude-images-"));
+  roots.push(root);
+  const cwd = "/Users/test/shots";
+  const directory = path.join(root, "-Users-test-shots");
+  await mkdir(directory, { recursive: true });
+  const sessionId = "22345678-1234-1234-1234-123456789abc";
+  const entries = [
+    {
+      type: "user",
+      message: {
+        role: "user",
+        content: [
+          { type: "text", text: "what is this" },
+          { type: "image", source: { type: "base64", media_type: "image/png", data: "AAAB" } },
+        ],
+      },
+    },
+    {
+      // No words at all: emptiness is judged on text *and* images, or this
+      // message disappears from a resumed thread.
+      type: "user",
+      message: {
+        role: "user",
+        content: [
+          { type: "image", source: { type: "base64", media_type: "image/jpeg", data: "BBBC" } },
+        ],
+      },
+    },
+  ];
+  await writeFile(
+    path.join(directory, `${sessionId}.jsonl`),
+    `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n`,
+  );
+
+  const display = await loadClaudeDisplayHistory(sessionId, cwd, root);
+
+  expect(display?.map(({ text, images }) => [text, images])).toEqual([
+    ["what is this", [{ type: "image", mimeType: "image/png", data: "AAAB" }]],
+    ["", [{ type: "image", mimeType: "image/jpeg", data: "BBBC" }]],
+  ]);
+});

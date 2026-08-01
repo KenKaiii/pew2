@@ -35,7 +35,15 @@
           "recordAudioAndroid": false
         }
       ],
-      "expo-font"
+      "expo-font",
+      [
+        "expo-media-library",
+        {
+          "savePhotosPermission": "Used only to save images your agent sends you.",
+          "photosPermission": "Used only to save images your agent sends you.",
+          "isAccessMediaLocationEnabled": false
+        }
+      ]
     ]
   }
 }

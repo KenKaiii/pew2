@@ -8,7 +8,7 @@
  * The approval sheet is the reason this app exists, so it is a blocking,
  * unmissable surface rather than an inline row that can scroll away.
  */
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Animated,
   Easing,
@@ -34,6 +34,7 @@ import { useDaemon, type Provider } from "./src/useDaemon";
 import { Orb } from "./src/ui/Orb";
 import { Composer, type ComposerHandle } from "./src/ui/Composer";
 import { ChatThread, type ChatThreadRef } from "./src/ui/ChatThread";
+import { ImageResolverProvider } from "./src/ui/ChatImage";
 import { CommandSheet } from "./src/ui/CommandSheet";
 import { applyCommand, type SlashCommand } from "./src/slashCommands";
 import { CircleButton, Pill, touchSlop } from "./src/ui/controls";
@@ -519,7 +520,22 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
 
   const closePicker = useCallback(() => setPicker(null), []);
 
+  // Images the agent named by path live on the desktop, and the socket is the
+  // only way to them. Provided here rather than passed down because pictures
+  // also appear inside markdown, well below anything this screen renders
+  // directly. Memoised: a new object every keystroke would re-render every
+  // image in the transcript.
+  const imageResolver = useMemo(
+    () => ({
+      images: daemon.images,
+      fetchImage: daemon.fetchImage,
+      retryImage: daemon.retryImage,
+    }),
+    [daemon.images, daemon.fetchImage, daemon.retryImage],
+  );
+
   return (
+    <ImageResolverProvider value={imageResolver}>
     <View style={styles.root}>
       <StatusBar style="light" />
 
@@ -878,6 +894,7 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
       </SafeAreaView>
       </Animated.View>
     </View>
+    </ImageResolverProvider>
   );
 }
 

@@ -194,6 +194,40 @@ export const PermissionReply = z.object({
 });
 
 /**
+ * App -> daemon. Fetch an image the agent referenced by path.
+ *
+ * Agents that generate or inspect images name a file on the *desktop*: a
+ * `resource_link`, or plain markdown like `![](.gg/generated/x.png)`. The phone
+ * cannot read that disk, so the picture is a blank box unless the daemon hands
+ * the bytes over the same socket everything else uses.
+ */
+export const ImageRequest = z.object({
+  t: z.literal("image.fetch"),
+  /** Echoed back, so a client can match a reply to the view that asked. */
+  requestId: z.string(),
+  /** Which session's working directory relative paths resolve against. */
+  sessionId: z.string().optional(),
+  uri: z.string(),
+});
+
+/**
+ * Daemon -> app. The image, inlined.
+ *
+ * Answered as a reply rather than a session event: this is bytes on demand for
+ * one client's viewport, and putting megabytes of base64 into the replayable
+ * log would make every reconnect re-download every picture ever shown.
+ */
+export const ImageData = z.object({
+  t: z.literal("image"),
+  requestId: z.string(),
+  uri: z.string(),
+  /** `data:<mime>;base64,...`, absent when `error` explains why not. */
+  dataUri: z.string().optional(),
+  mimeType: z.string().optional(),
+  error: z.string().optional(),
+});
+
+/**
  * Daemon -> relay -> app. An ordered, append-only event for a session.
  * `payload` mirrors the ACP `session/update` notification so the app renders
  * agent output without pew2 inventing a second content model.
@@ -231,6 +265,7 @@ export const ClientMessage = z.discriminatedUnion("t", [
   Prompt,
   Cancel,
   PermissionReply,
+  ImageRequest,
 ]);
 
 export const ServerMessage = z.discriminatedUnion("t", [
@@ -239,6 +274,7 @@ export const ServerMessage = z.discriminatedUnion("t", [
   ProviderCapabilities,
   SessionEvent,
   Replay,
+  ImageData,
   ErrorMessage,
 ]);
 
@@ -254,6 +290,8 @@ export type StartSession = z.output<typeof StartSession>;
 export type Prompt = z.output<typeof Prompt>;
 export type Cancel = z.output<typeof Cancel>;
 export type PermissionReply = z.output<typeof PermissionReply>;
+export type ImageRequest = z.output<typeof ImageRequest>;
+export type ImageData = z.output<typeof ImageData>;
 export type SessionEvent = z.output<typeof SessionEvent>;
 export type ClientMessage = z.output<typeof ClientMessage>;
 export type ServerMessage = z.output<typeof ServerMessage>;

@@ -9,12 +9,37 @@
  *
  * Pure and React-free so the fold is directly testable.
  */
-import { readChunk } from "./chunks";
+import { isEmptyChunk, readChunk, type Chunk } from "./chunks";
+import { dedupeImages } from "./images";
 import type { Session, Turn } from "./useDaemon";
 
 /** True for a user turn rendered before the daemon echoed it back. */
 export function isOptimistic(turn: Turn): boolean {
   return turn.id.startsWith("local:");
+}
+
+/**
+ * Fold a chunk into the turn above it.
+ *
+ * Shared by the live path and this replay fold so a picture attaches to a
+ * bubble the same way in both; the two drifting is how replayed history ends
+ * up looking unlike the conversation that produced it.
+ */
+export function mergeChunk(turn: Turn, chunk: Chunk): Turn {
+  const images = chunk.images
+    ? dedupeImages([...(turn.images ?? []), ...chunk.images])
+    : turn.images;
+  return { ...turn, text: turn.text + chunk.text, ...(images ? { images } : {}) };
+}
+
+/** A fresh turn for a chunk that starts a new bubble. */
+export function turnFromChunk(id: string, chunk: Chunk): Turn {
+  return {
+    id,
+    role: chunk.role,
+    text: chunk.text,
+    ...(chunk.images ? { images: chunk.images } : {}),
+  };
 }
 
 export interface ReplayEvent {
@@ -49,13 +74,14 @@ export function foldSessionEvents<S extends FoldState>(
   for (const message of events) {
     const payload = message?.payload;
     const chunk = readChunk(payload);
-    if (!chunk || !chunk.text) continue;
+    if (!chunk || isEmptyChunk(chunk)) continue;
 
     const last = turns[turns.length - 1];
     // The echo of a prompt this client already rendered: adopt the server id
-    // in place rather than showing the message twice.
+    // in place rather than showing the message twice. Text is the only handle
+    // on that identity, so an image-only chunk never claims to be an echo.
     const optimistic =
-      chunk.role === "user"
+      chunk.role === "user" && chunk.text
         ? turns.findIndex((turn) => isOptimistic(turn) && turn.text === chunk.text)
         : -1;
     if (optimistic >= 0) {
@@ -65,15 +91,11 @@ export function foldSessionEvents<S extends FoldState>(
       };
     } else if (last && last.role === chunk.role && chunk.role !== "user") {
       // Coalesce consecutive chunks of the same role into one bubble.
-      turns[turns.length - 1] = { ...last, text: last.text + chunk.text };
+      turns[turns.length - 1] = mergeChunk(last, chunk);
     } else {
       // `seq` restarts at 0 per session, so it alone would collide across
       // sessions and produce duplicate React keys.
-      turns.push({
-        id: `${message.sessionId}:${message.seq}`,
-        role: chunk.role,
-        text: chunk.text,
-      });
+      turns.push(turnFromChunk(`${message.sessionId}:${message.seq}`, chunk));
     }
 
     // Mirror into history so the sidebar can reopen this later, and title the

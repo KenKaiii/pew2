@@ -8,6 +8,8 @@ import Markdown, {
   type RenderRules,
 } from "react-native-markdown-renderer";
 import { theme } from "../theme";
+import { ChatImage } from "./ChatImage";
+import { isDisplayableImage } from "../images";
 import { writeCodeToClipboard } from "./codeBlockClipboard";
 import { fencedCodeContainerStyle, fencedCodeTextStyle } from "./markdownCodeStyles";
 import { boundedMarkdownParagraphStyle, boundedMarkdownRootStyle } from "./messageLayoutStyles";
@@ -132,18 +134,45 @@ const renderCodeBlock: RenderFunction = (node, _children, _parents, styles) => {
   );
 };
 
+/**
+ * The parser marks images as *block* tokens, so an `![](x.png)` sits directly
+ * under its paragraph rather than inside the grouped text run.
+ */
+function hasImageChild(node: { children?: { type?: string }[] }): boolean {
+  return (node.children ?? []).some((child) => child?.type === "image");
+}
+
+/**
+ * `![alt](src)` — including `![](.gg/generated/plot.png)`, which is how most
+ * agents announce a picture they just made.
+ *
+ * The library's own image rule renders a bare `Image` with the source as given,
+ * so a desktop path produced a permanently blank box. `ChatImage` knows how to
+ * bring that file across from the daemon; anything that is not a picture
+ * renders nothing, so a stray `![](notes.md)` is not a broken frame.
+ */
+const renderImage: RenderFunction = (node) => {
+  const src: string = node.attributes?.src ?? "";
+  const alt: string = node.attributes?.alt ?? "";
+  if (!isDisplayableImage(src)) return null;
+  return <ChatImage key={node.key} image={{ src, alt: alt || undefined }} />;
+};
+
 const markdownRules: Partial<RenderRules> = {
   // A paragraph must be one measured Text block. The library's default uses a
   // wrapping row of Text children; inside a list that row reports one-line
   // height while its text paints several lines, so following items overlap it.
+  // One exception: a paragraph holding an image becomes a column, because
+  // nesting a View in text layout collapses a percentage-width picture on iOS.
   paragraph: (node, children, _parents, styles) =>
     createElement(
-      Text,
+      hasImageChild(node) ? View : Text,
       { ["key"]: node.key, style: styles.paragraph as never },
       children,
     ),
   code_block: renderCodeBlock,
   fence: renderCodeBlock,
+  image: renderImage,
   // CommonMark preserves raw HTML. Show it as source instead of handing chat
   // output to a web view or leaving the renderer's unstyled black fallback.
   html_block: renderCodeBlock,
@@ -327,8 +356,9 @@ export function MarkdownText({ text, tone = "body" }: { text: string; tone?: Mar
       rules={markdownRules as RenderRules}
       style={markdownStyles[tone]}
       onLinkPress={openLink}
-      allowedImageHandlers={["https://", "data:image/png;base64", "data:image/jpeg;base64"]}
-      defaultImageHandler={null}
+      // No `allowedImageHandlers`: that list only gates the library's own image
+      // rule, which is replaced above precisely because it cannot load a file
+      // that lives on the desktop.
     >
       {text}
     </Markdown>

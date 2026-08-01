@@ -13,6 +13,7 @@
  */
 import type { Daemon } from "./index.js";
 import { humanError } from "./errors.js";
+import { loadImage } from "./images.js";
 import { resolveWorkspace } from "./workspace.js";
 
 export interface HandlerContext {
@@ -38,6 +39,7 @@ interface ClientMessage {
   value?: string | boolean;
   agentSessionId?: string;
   refresh?: boolean;
+  uri?: string;
 }
 
 /**
@@ -213,6 +215,31 @@ export async function handleMessage(raw: string, ctx: HandlerContext): Promise<v
             message.value,
           ),
         });
+        break;
+      }
+
+      case "image.fetch": {
+        // Only this machine can read the path the agent named. Replied to the
+        // asking client rather than broadcast: it is bytes for one viewport,
+        // and it never enters the session log that every client replays.
+        if (!message.uri || !message.requestId) {
+          throw new Error("requestId and uri required");
+        }
+        const uri = message.uri;
+        const requestId = message.requestId;
+        // The root comes from the session the daemon started, never from the
+        // message: a client-supplied `cwd` would let a caller name its own
+        // containment root and read anything on the machine.
+        const root =
+          (message.sessionId ? daemon.sessionCwd(message.sessionId) : undefined) ?? cwd;
+        try {
+          const image = await loadImage(uri, { cwd: root });
+          reply({ t: "image", requestId, uri, ...image });
+        } catch (error) {
+          // A failure is part of the answer, not a transport error: the app
+          // shows the reason in place of the picture instead of a blank frame.
+          reply({ t: "image", requestId, uri, error: humanError(error) });
+        }
         break;
       }
 
