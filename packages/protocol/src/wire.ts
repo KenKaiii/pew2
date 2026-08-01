@@ -103,6 +103,14 @@ export const AgentSession = z.object({
   messageCount: z.number().int().nonnegative().optional(),
 });
 
+/** One slash command an agent offers, e.g. from `.claude/commands`. */
+export const SlashCommand = z.object({
+  name: z.string(),
+  description: z.string(),
+  /** Placeholder for the argument it expects, when it takes one. */
+  hint: z.string().optional(),
+});
+
 /** App -> daemon. What does this provider currently offer? */
 export const ProviderCapabilitiesRequest = z.object({
   t: z.literal("provider.capabilities"),
@@ -123,6 +131,28 @@ export const ProviderCapabilities = z.object({
   sessions: z.array(AgentSession),
   /** Whether those sessions can be reopened, i.e. the agent supports load. */
   canResume: z.boolean(),
+  /**
+   * Slash commands the agent offers, learned from the probe session.
+   *
+   * Optional so a daemon older than this field still validates. They depend on
+   * the project the agent opened, which is why they travel with capabilities
+   * rather than being a fixed property of the provider.
+   */
+  commands: z.array(SlashCommand).optional(),
+});
+
+/**
+ * App -> daemon. Choose a selector before any session exists.
+ *
+ * A conversation is only created by its first prompt, so a model or mode picked
+ * in the empty state has nothing to be applied to yet. The daemon remembers it
+ * against the provider, and the session that prompt creates opens with it set.
+ */
+export const SetProviderConfig = z.object({
+  t: z.literal("provider.config"),
+  providerId: z.string(),
+  configId: z.string(),
+  value: z.union([z.string(), z.boolean()]),
 });
 
 /** App -> daemon. Reopen one of the agent's own past conversations. */
@@ -195,6 +225,7 @@ export const ErrorMessage = z.object({
 export const ClientMessage = z.discriminatedUnion("t", [
   Hello,
   ProviderCapabilitiesRequest,
+  SetProviderConfig,
   StartSession,
   ResumeSession,
   Prompt,
@@ -211,6 +242,7 @@ export const ServerMessage = z.discriminatedUnion("t", [
   ErrorMessage,
 ]);
 
+export type SetProviderConfig = z.output<typeof SetProviderConfig>;
 export type Hello = z.output<typeof Hello>;
 export type ProviderAnnounce = z.output<typeof ProviderAnnounce>;
 export type ConfigOption = z.output<typeof ConfigOption>;

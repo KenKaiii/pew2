@@ -16,7 +16,6 @@ import {
   PanResponder,
   Platform,
   Pressable,
-  ScrollView,
   StyleSheet,
   Text,
   View,
@@ -30,19 +29,18 @@ import Reanimated, {
 import { StatusBar } from "expo-status-bar";
 import { Ionicons } from "@expo/vector-icons";
 import { theme } from "./src/theme";
-import { alignCompletedHistoryToBottom } from "./src/historyScroll";
-import { HISTORY_PAGE_SIZE, nextHistoryLimit, visibleHistoryTurns } from "./src/historyWindow";
 import { isDenyApprovalOption, selectApprovalOptions } from "./src/approvalOptions";
-import { useDaemon, type Provider, type Turn as TurnData } from "./src/useDaemon";
+import { useDaemon, type Provider } from "./src/useDaemon";
 import { Orb } from "./src/ui/Orb";
-import { Composer } from "./src/ui/Composer";
-import { Turn } from "./src/ui/Turn";
-import { CircleButton, Pill } from "./src/ui/controls";
+import { Composer, type ComposerHandle } from "./src/ui/Composer";
+import { ChatThread, type ChatThreadRef } from "./src/ui/ChatThread";
+import { CommandSheet } from "./src/ui/CommandSheet";
+import { applyCommand, type SlashCommand } from "./src/slashCommands";
+import { CircleButton, Pill, touchSlop } from "./src/ui/controls";
 import { haptics } from "./src/ui/haptics";
 import { Sidebar, DRAWER_WIDTH } from "./src/ui/Sidebar";
 import { ConfigPicker, summarise, valueName } from "./src/ui/ConfigPicker";
 import { useReducedMotion } from "./src/ui/useReducedMotion";
-import { ThreadSkeleton } from "./src/ui/Skeleton";
 import { ProgressiveBlur } from "./src/ui/ProgressiveBlur";
 import { Glass } from "./src/ui/Glass";
 import { withLayoutX, type PillX } from "./src/ui/pillAnchor";
@@ -145,34 +143,97 @@ function Root() {
 }
 
 /**
- * A view exactly as tall as the visible keyboard.
+ * The mark's diameter on an empty conversation, with nothing to compete with.
+ *
+ * Large enough to be the subject of the screen rather than an icon above a
+ * sentence, and it reaches the densest grid the geometry offers — so the
+ * drifting light has the most cells to travel across.
+ */
+const ORB_REST_SIZE = 96;
+
+/** What it settles back to once the keyboard is up, as a fraction of that. */
+const ORB_SETTLED_SCALE = 56 / ORB_REST_SIZE;
+
+/**
+ * Raises the thread and the composer by exactly the visible keyboard's height,
+ * and returns a second style for content that is centred rather than
+ * bottom-anchored.
  *
  * Written from a worklet on every frame of the keyboard's own animation, so the
- * layout above shortens in perfect step. No JS re-render can land halfway
- * through and move things a second time.
+ * two move in perfect step. No JS re-render can land halfway through and move
+ * things a second time.
+ *
+ * A transform, deliberately, not a height. The thread is a recycling list, and
+ * `RecyclerView` answers any container resize with a full layout pass in JS — so
+ * shortening the pane per frame queued sixty of them across the keyboard's
+ * animation, which is the stutter. Translating moves the same pixels on the UI
+ * thread and lays out nothing. This is the shape `KeyboardChatScrollView` uses;
+ * that component would do it for us, but it landed in
+ * react-native-keyboard-controller 1.21 and this app is on 1.18.
+ *
+ * Cross-platform by construction rather than by branch: `useKeyboardHandler`
+ * calls the library's `useResizeMode`, which sets Android to `adjustResize`, and
+ * `KeyboardProvider` puts it in edge-to-edge — a pairing that stops Android
+ * resizing the window at all. So on both platforms nothing but this transform
+ * moves, and neither needs a `softwareKeyboardLayoutMode` in app.json.
  *
  * The keyboard is measured from the physical screen edge, so the home-indicator
  * clearance the dock keeps is handed back while it is open, and the composer
  * keeps the same gap above either boundary.
+ *
+ * @returns `pane` for bottom-anchored content, `centred` to cancel half of it,
+ *   `settled` for content that gives up room while the keyboard is open.
  */
-function useKeyboardSpacer(bottomInset: number) {
+function useKeyboardLift(bottomInset: number) {
   const height = useSharedValue(0);
+  const progress = useSharedValue(0);
 
   useKeyboardHandler(
     {
       onMove: (event) => {
         "worklet";
         height.value = Math.max(0, event.height - bottomInset * event.progress);
+        progress.value = event.progress;
       },
       onEnd: (event) => {
         "worklet";
         height.value = Math.max(0, event.height - bottomInset * event.progress);
+        progress.value = event.progress;
       },
     },
     [bottomInset],
   );
 
-  return useAnimatedStyle(() => ({ height: height.value }));
+  const pane = useAnimatedStyle(() => ({
+    transform: [{ translateY: -height.value }],
+  }));
+
+  // The empty state is centred in the pane rather than anchored to its bottom
+  // edge, so the full lift would carry it up by a whole keyboard — twice what
+  // re-centring needs, and far enough to push the greeting under the nav. Half
+  // the lift keeps it centred in what is left of the screen.
+  const centred = useAnimatedStyle(() => ({
+    transform: [{ translateY: height.value / 2 }],
+  }));
+
+  // At rest the mark is the screen: nothing else is there, so it should own it.
+  // Once you start typing the screen belongs to the sentence you are writing,
+  // and the mark steps back to being an emblem above it.
+  //
+  // A scale, not a smaller `size`: the grid resolution is chosen from the size,
+  // so animating that would rebuild the whole dot matrix mid-keyboard — exactly
+  // the per-frame relayout the pane transform exists to avoid. Reserved layout
+  // stays at full size for the same reason: nothing reflows on the keyboard's
+  // clock, and the greeting keeps one still centre to scale about.
+  //
+  // Held in a local because a worklet runs in its own runtime, where this
+  // file's module scope does not exist — only closed-over values cross over.
+  const shrinkBy = 1 - ORB_SETTLED_SCALE;
+  const settled = useAnimatedStyle(() => ({
+    transform: [{ scale: 1 - shrinkBy * progress.value }],
+  }));
+
+  return { pane, centred, settled };
 }
 
 function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void }) {
@@ -184,21 +245,22 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
   // Which pill's menu is open, and where that pill sits, so the menu opens
   // under it instead of always at the gutter.
   const [picker, setPicker] = useState<"model" | "mode" | null>(null);
+  const [commandsOpen, setCommandsOpen] = useState(false);
+  const composer = useRef<ComposerHandle>(null);
+  /** The keyboard is up, so the composer owns the screen. */
+  const [typing, setTyping] = useState(false);
   // Measured so the thread's top inset always matches the real nav height.
   const [navHeight, setNavHeight] = useState(0);
   // The thread's bottom inset and frosted zone track the dock's measured height.
   const [dockHeight, setDockHeight] = useState(0);
   const insets = useSafeAreaInsets();
-  const keyboardSpacer = useKeyboardSpacer(insets.bottom);
-  const scroller = useRef<ScrollView>(null);
-  const pendingPromptAlignment = useRef(false);
-  // Measured so the newest exchange can always be scrolled to the top of the
-  // reading area, whatever its height.
-  const [threadViewport, setThreadViewport] = useState(0);
-  const [exchangeHeight, setExchangeHeight] = useState(0);
-  // True only after *this* client sends. A resumed transcript must open on its
-  // last message like any chat app, so the top-anchoring spacer stays out of it.
-  const [anchorNewestPrompt, setAnchorNewestPrompt] = useState(false);
+  const keyboard = useKeyboardLift(insets.bottom);
+  const scroller = useRef<ChatThreadRef>(null);
+  // Identifies the conversation on screen for remount purposes. Every other way
+  // of changing conversations empties the transcript first, which unmounts the
+  // list on its own; only picking one drawer entry while another is open swaps
+  // the turns in place.
+  const [threadKey, setThreadKey] = useState("new");
   // Drives the scroll-to-latest control below.
   const [atBottom, setAtBottom] = useState(true);
   const jumpOpacity = useRef(new Animated.Value(0)).current;
@@ -207,76 +269,41 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
     model: theme.gutter,
     mode: theme.gutter,
   });
-  const historyDragActive = useRef(false);
-  const [historyTurnLimit, setHistoryTurnLimit] = useState(HISTORY_PAGE_SIZE);
   const reduceMotion = useReducedMotion();
   const drawer = useRef(new Animated.Value(0)).current;
-  // A resumed transcript first reveals only its newest turn. Older turns are
-  // prepended after the crossfade while native scroll anchoring holds that turn
-  // perfectly still, so opening history never performs a visible mega-scroll.
-  const [historyPreview, setHistoryPreview] = useState<TurnData[] | null>(null);
-  const [showHistorySkeleton, setShowHistorySkeleton] = useState(false);
-  // The turn array may already be complete when the preview swaps out, so this
-  // gives the final scroll-to-bottom its own render signal.
-  const [historyRevealVersion, setHistoryRevealVersion] = useState(0);
-  const historyWasLoading = useRef(false);
-  const historyTransitionActive = useRef(false);
-  const latestTurns = useRef(daemon.turns);
-  latestTurns.current = daemon.turns;
-  const threadOpacity = useRef(new Animated.Value(1)).current;
-  const historySkeletonOpacity = useRef(new Animated.Value(0)).current;
 
   const active: Provider | undefined =
     daemon.providers.find((p) => p.id === daemon.activeProviderId) ??
     daemon.providers.find((p) => p.available);
 
   const inThread = daemon.turns.length > 0;
-  const completeRenderedTurns = historyPreview ?? daemon.turns;
-  const renderedTurns = visibleHistoryTurns(completeRenderedTurns, historyTurnLimit);
-  const hasEarlierTurns =
-    historyPreview === null && daemon.turns.length > historyTurnLimit;
-  // The newest exchange starts at the last prompt and runs to the end of the
-  // transcript. It is rendered as one measured block so the prompt can be lifted
-  // to the top of the reading area without ever scrolling past the content.
-  const newestPromptIndex = renderedTurns.reduce(
-    (found, turn, index) => (turn.role === "user" ? index : found),
-    -1,
-  );
-  const headTurns =
-    newestPromptIndex === -1 ? renderedTurns : renderedTurns.slice(0, newestPromptIndex);
-  const tailTurns =
-    newestPromptIndex === -1 ? [] : renderedTurns.slice(newestPromptIndex);
 
   // Where the reading area begins and ends: under the nav, and above the
-  // composer. UIKit adds the keyboard's own inset on top of this.
+  // composer. Both fall back to the resting height of the thing they clear,
+  // because `onLayout` only reports after the first paint — and a zero here is
+  // a first message rendered hard against the composer, corrected a frame later.
   const threadTop = insets.top + (navHeight || theme.space(12)) + theme.space(2);
-  const threadBottom = dockHeight + theme.space(2);
-  // Empty room held below the newest exchange so its prompt can sit at the top
-  // of the reading area. Deliberately independent of the keyboard: the lift
-  // below is switched off by this value, so letting the keyboard shrink it would
-  // re-enable the lift the moment the keyboard opened.
-  const tailSpacer = anchorNewestPrompt
-    ? Math.max(0, threadViewport - threadTop - threadBottom - exchangeHeight)
-    : 0;
-  const working = daemon.busy && !daemon.loadingSession;
-
-  const loadEarlierTurns = useCallback(() => {
-    setHistoryTurnLimit((current) => nextHistoryLimit(current, daemon.turns.length));
-  }, [daemon.turns.length]);
+  // Mirrors `styles.dock`: the composer at rest, plus that view's own padding.
+  const restingDockHeight =
+    theme.size.composerCollapsed + theme.space(2) + (insets.bottom + theme.space(2));
+  const threadBottom = (dockHeight || restingDockHeight) + theme.space(2);
+  // Only until the answer itself starts arriving. The dots occupy exactly one
+  // body line at the same offset as the agent's first line, so text replacing
+  // them lands where they were and the transcript never shifts — whereas dots
+  // held below a growing reply would push it for the whole turn.
+  const newest = daemon.turns[daemon.turns.length - 1];
+  const answering =
+    (newest?.role === "agent" || newest?.role === "thought") && newest.text.trim().length > 0;
+  const working = daemon.busy && !daemon.loadingSession && !answering;
 
   useEffect(() => {
-    // Each opened conversation begins with one lightweight page. The full fold
-    // remains in memory, so revealing an older page needs no agent round-trip.
-    setHistoryTurnLimit(HISTORY_PAGE_SIZE);
-    historyDragActive.current = false;
-    // A measurement from the previous conversation would size this one's trailing
-    // spacer until its own layout lands, which reads as a jump on open.
-    setExchangeHeight(0);
-    setAnchorNewestPrompt(false);
-    // An opened conversation lands on its newest message, so it starts at the
-    // bottom regardless of where the previous one had been scrolled to.
+    // Every transcript opens on its newest message, so it starts at the bottom
+    // regardless of where the previous one had been scrolled to. Keyed on the
+    // thread's own identity rather than `daemon.sessionId`, which stays
+    // undefined across a switch between two unresumed conversations and would
+    // leave the jump-to-latest chip showing over a thread already at its end.
     setAtBottom(true);
-  }, [daemon.sessionId]);
+  }, [threadKey, inThread]);
 
   // Model, permission mode and thinking level are whatever this agent
   // advertised; pew2 keeps no model list of its own. Mode gets its own pill:
@@ -284,104 +311,6 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
   const { model, mode: modeOption, level } = summarise(daemon.configOptions);
   // Never let one selector drive two pills.
   const mode = modeOption && modeOption.id !== model?.id ? modeOption : undefined;
-
-  useEffect(() => {
-    if (daemon.loadingSession) {
-      historyWasLoading.current = true;
-      historyTransitionActive.current = true;
-      setHistoryPreview([]);
-      setShowHistorySkeleton(true);
-      threadOpacity.stopAnimation();
-      historySkeletonOpacity.stopAnimation();
-      threadOpacity.setValue(0);
-      historySkeletonOpacity.setValue(1);
-      return;
-    }
-    if (!historyWasLoading.current) return;
-    historyWasLoading.current = false;
-
-    const turns = latestTurns.current;
-    const newest = turns[turns.length - 1];
-    if (!newest) {
-      threadOpacity.setValue(1);
-      historySkeletonOpacity.setValue(0);
-      setHistoryPreview(null);
-      setShowHistorySkeleton(false);
-      historyTransitionActive.current = false;
-      return;
-    }
-
-    // Commit the anchored newest turn before beginning the reveal. This frame is
-    // what prevents the full transcript from ever painting at scroll position 0.
-    setHistoryPreview([newest]);
-    let cancelled = false;
-    const frame = requestAnimationFrame(() => {
-      if (cancelled) return;
-      const finish = () => {
-        if (cancelled) return;
-        // Prepending the rest is invisible below the opaque thread; the
-        // ScrollView's maintainVisibleContentPosition keeps `newest` stationary.
-        setHistoryPreview(null);
-        setShowHistorySkeleton(false);
-        historyTransitionActive.current = false;
-        setHistoryRevealVersion((version) => version + 1);
-      };
-
-      if (reduceMotion) {
-        threadOpacity.setValue(1);
-        historySkeletonOpacity.setValue(0);
-        finish();
-        return;
-      }
-
-      Animated.parallel([
-        Animated.timing(threadOpacity, {
-          toValue: 1,
-          duration: 240,
-          easing: Easing.out(Easing.cubic),
-          useNativeDriver: true,
-        }),
-        Animated.timing(historySkeletonOpacity, {
-          toValue: 0,
-          duration: 180,
-          easing: Easing.out(Easing.cubic),
-          useNativeDriver: true,
-        }),
-      ]).start(({ finished }) => {
-        if (finished) finish();
-      });
-    });
-
-    return () => {
-      cancelled = true;
-      cancelAnimationFrame(frame);
-      threadOpacity.stopAnimation();
-      historySkeletonOpacity.stopAnimation();
-    };
-  }, [daemon.loadingSession, historySkeletonOpacity, reduceMotion, threadOpacity]);
-
-  useEffect(() => {
-    if (historyRevealVersion === 0 || anchorNewestPrompt) return;
-    // The full transcript mounts in this commit. Wait one native frame for its
-    // content size, then land directly on the newest message without a mega-scroll.
-    // Re-runs when the composer reports its height, because that changes the
-    // thread's bottom inset and would otherwise leave the last message adrift.
-    const frame = requestAnimationFrame(() =>
-      alignCompletedHistoryToBottom(scroller.current),
-    );
-    return () => cancelAnimationFrame(frame);
-  }, [historyRevealVersion, anchorNewestPrompt, dockHeight]);
-
-  useEffect(() => {
-    if (!daemon.permission) return undefined;
-    // The approval control is taller than the composer it replaces. Once its
-    // measured height lands, move the final tool row above it instead of letting
-    // that row remain underneath the approval buttons.
-    const frame = requestAnimationFrame(() =>
-      scroller.current?.scrollToEnd({ animated: false }),
-    );
-    return () => cancelAnimationFrame(frame);
-  }, [daemon.permission, dockHeight]);
 
   // Feedback for things that happen on their own, rather than because a finger
   // touched the screen. This is the point of a remote control: the agent runs
@@ -476,7 +405,17 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
       onMoveShouldSetPanResponder: (_event, gesture) => {
         const enough = Math.abs(gesture.dx) > theme.space(2);
         const horizontal = Math.abs(gesture.dx) > Math.abs(gesture.dy) * 2;
-        return enough && horizontal && gesture.dx > 0 !== menuOpenRef.current;
+        const claim = enough && horizontal && gesture.dx > 0 !== menuOpenRef.current;
+        // Leaving the conversation, even a little: the drawer is a different
+        // place, so the keyboard goes the moment the drag is claimed rather
+        // than once it commits. Switching a model does not do this — that is
+        // still the same conversation.
+        //
+        // Claim time, not `onPanResponderGrant`: the strip only has to win the
+        // responder for the drawer to start moving, and a grant that is later
+        // terminated by another responder would never have dismissed at all.
+        if (claim) Keyboard.dismiss();
+        return claim;
       },
       onPanResponderGrant: () => {
         // The effect below animates this same value on `menuOpen`. Stopping it
@@ -506,45 +445,79 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
     }),
   ).current;
 
-  const openSession = (id: string) => {
-    const stored = daemon.sessions.find((session) => session.id === id);
-    if (stored?.agentSessionId) {
-      // Prime the transition in the tap's own render so there is never a blank
-      // frame between the drawer closing and the loading skeleton appearing.
-      historyWasLoading.current = true;
-      historyTransitionActive.current = true;
-      setHistoryPreview([]);
-      setShowHistorySkeleton(true);
-      threadOpacity.stopAnimation();
-      historySkeletonOpacity.stopAnimation();
-      threadOpacity.setValue(0);
-      historySkeletonOpacity.setValue(1);
-    }
-    daemon.openSession(id);
-    setMenuOpen(false);
-  };
+  // Belt and braces for every other way in: the hamburger, a swipe that the
+  // strip lost, a session opened from the drawer. The drawer is never the place
+  // to be typing into the conversation behind it.
+  useEffect(() => {
+    if (menuOpen) Keyboard.dismiss();
+  }, [menuOpen]);
 
-  const send = () => {
+  // Composing takes the screen. iOS gets `will`, so the button is gone before
+  // the keyboard arrives rather than vanishing once it has settled; Android
+  // only ever emits `did`, and listening for `will` there would never fire.
+  useEffect(() => {
+    const willShow = Platform.OS === "ios";
+    const shown = Keyboard.addListener(
+      willShow ? "keyboardWillShow" : "keyboardDidShow",
+      () => setTyping(true),
+    );
+    const hidden = Keyboard.addListener(
+      willShow ? "keyboardWillHide" : "keyboardDidHide",
+      () => setTyping(false),
+    );
+    return () => {
+      shown.remove();
+      hidden.remove();
+    };
+  }, []);
+
+  const openSession = useCallback(
+    (id: string) => {
+      // Remounts the thread so it re-arms at this transcript's own bottom.
+      // Deliberately not `daemon.sessionId`: a fresh conversation renders its
+      // optimistic first prompt before the daemon assigns an id, and keying on
+      // that would tear the list down mid-reply the moment the id landed.
+      setThreadKey(id);
+      daemon.openSession(id);
+      setMenuOpen(false);
+    },
+    [daemon.openSession],
+  );
+
+  const send = useCallback(() => {
     const text = draft.trim();
     if (!text) return;
 
-    // The newly committed user turn owns the reading origin. Its onLayout below
-    // places it directly beneath the nav and then leaves that position alone as
-    // the reply streams in.
     if (daemon.sessionId) {
-      pendingPromptAlignment.current = true;
-      setAnchorNewestPrompt(true);
       daemon.prompt(text);
     } else {
       // No session yet: start one with the chosen available agent and let the
       // daemon deliver this prompt as soon as it is ready.
       if (!active?.available) return;
-      pendingPromptAlignment.current = true;
-      setAnchorNewestPrompt(true);
       daemon.start(active.id, text);
     }
     setDraft("");
-  };
+  }, [draft, daemon.sessionId, daemon.prompt, daemon.start, active]);
+
+  const newConversation = useCallback(() => {
+    daemon.leave();
+    setMenuOpen(false);
+  }, [daemon.leave]);
+
+  const pickCommand = useCallback((command: SlashCommand) => {
+    // Placed in the composer rather than sent: a command may still want an
+    // argument, and even one that does not should be reviewed before running.
+    setDraft(applyCommand(command));
+    setCommandsOpen(false);
+    // Straight back to typing, caret after the trailing space. Deferred past
+    // this commit because the sheet still holds focus during it, and focusing
+    // a field the system is about to blur does nothing.
+    requestAnimationFrame(() => composer.current?.focus());
+  }, []);
+
+  const closeCommands = useCallback(() => setCommandsOpen(false), []);
+
+  const closePicker = useCallback(() => setPicker(null), []);
 
   return (
     <View style={styles.root}>
@@ -561,10 +534,7 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
         // closing here would make choosing an app cost two trips.
         onSelectProvider={daemon.select}
         onOpenSession={openSession}
-        onNewConversation={() => {
-          daemon.leave();
-          setMenuOpen(false);
-        }}
+        onNewConversation={newConversation}
         historyLoading={daemon.loadingSessions}
         reduceMotion={reduceMotion}
         machineLabel={pairing.label}
@@ -690,146 +660,55 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
         />
       )}
 
-      <View style={styles.body}>
-        {renderedTurns.length > 0 ? (
-          <Animated.ScrollView
+      {/* The one thing the keyboard moves: the thread and the dock ride up as a
+          single transform, so the gap between them never changes and nothing
+          re-lays out on the keyboard's clock. */}
+      <Reanimated.View style={[styles.body, keyboard.pane]}>
+        {inThread ? (
+          // Remounted per conversation so `startRenderingFromBottom` re-arms:
+          // each transcript must open on its own newest message, not on the
+          // scroll offset the previous one happened to be left at.
+          <ChatThread
+            key={threadKey}
             ref={scroller}
-            style={[styles.thread, { opacity: threadOpacity }]}
-            // When older history is prepended after the newest-turn reveal,
-            // keep that newest turn pinned instead of shifting the viewport.
-            maintainVisibleContentPosition={{ minIndexForVisible: 0 }}
-            onLayout={(event) => setThreadViewport(event.nativeEvent.layout.height)}
-            accessibilityElementsHidden={showHistorySkeleton}
-            importantForAccessibility={showHistorySkeleton ? "no-hide-descendants" : "auto"}
-            // Content still dissolves beneath the floating chrome, but the
-            // indicator stays sharp inside the unobscured reading area.
-            automaticallyAdjustsScrollIndicatorInsets={false}
-            // The spacer below shortens this view's container instead. A second
-            // inset here would be a differently-timed adjustment on top of it.
-            automaticallyAdjustKeyboardInsets={false}
-            scrollIndicatorInsets={{
-              top: insets.top + navHeight,
-              bottom: dockHeight,
-            }}
-            contentContainerStyle={[
-              styles.threadContent,
-              {
-                // Clear the status bar plus the nav before the first message,
-                // and the composer after the last.
-                paddingTop: threadTop,
-                paddingBottom: threadBottom,
-              },
-            ]}
-            keyboardDismissMode="interactive"
-            keyboardShouldPersistTaps="handled"
-            // 60fps sampling and the platform's own deceleration: anything
-            // coarser makes the paging check below land mid-flick, which reads
-            // as the thread snagging under the finger.
-            scrollEventThrottle={16}
-            decelerationRate="normal"
-            onScrollBeginDrag={() => {
-              historyDragActive.current = true;
-            }}
-            onScrollEndDrag={() => {
-              historyDragActive.current = false;
-            }}
-            onScroll={(event) => {
-              const { contentOffset, contentSize, layoutMeasurement } =
-                event.nativeEvent;
-              // A whole line of slack: a thread resting a few points off the end
-              // is still "at the bottom" to the reader.
-              setAtBottom(
-                contentOffset.y + layoutMeasurement.height >=
-                  contentSize.height - theme.line.body,
-              );
-
-              if (
-                historyDragActive.current &&
-                hasEarlierTurns &&
-                contentOffset.y <= theme.space(4)
-              ) {
-                // One page per upward gesture prevents a single momentum event
-                // from mounting an entire giant transcript again.
-                historyDragActive.current = false;
-                loadEarlierTurns();
-              }
-            }}
-          >
-            {hasEarlierTurns && (
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel="Load 15 earlier messages"
-                onPress={loadEarlierTurns}
-                style={({ pressed }) => [
-                  styles.loadEarlier,
-                  pressed && styles.loadEarlierPressed,
-                ]}
-              >
-                <Ionicons name="chevron-up" size={14} color={theme.color.textDim} />
-                <Text style={styles.loadEarlierText}>Earlier messages</Text>
-              </Pressable>
-            )}
-            {headTurns.map((turn) => (
-              <Turn key={turn.id} turn={turn} />
-            ))}
-
-            {/* The newest exchange is measured as one block: the prompt plus
-                everything the agent has said since. The spacer below it is what
-                lets that prompt reach the top of the reading area by ordinary
-                scrolling, instead of an out-of-bounds jump the user cannot undo. */}
-            {tailTurns.length > 0 && (
-              <View
-                style={styles.exchange}
-                onLayout={(event) => {
-                  const { y, height } = event.nativeEvent.layout;
-                  setExchangeHeight(height);
-                  if (!pendingPromptAlignment.current) return;
-                  pendingPromptAlignment.current = false;
-                  scroller.current?.scrollTo({
-                    y: Math.max(0, y - threadTop),
-                    animated: !reduceMotion,
-                  });
-                }}
-              >
-                {tailTurns.map((turn) => (
-                  <Turn key={turn.id} turn={turn} />
-                ))}
-                {working && <Working />}
-              </View>
-            )}
-            {tailTurns.length === 0 && working && <Working />}
-
-            {tailSpacer > 0 && <View style={{ height: tailSpacer }} />}
-          </Animated.ScrollView>
-        ) : !daemon.loadingSession && !showHistorySkeleton ? (
-          // Tapping the empty state dismisses the keyboard, which collapses the
-          // composer. Without this the greeting is inert and the only way out of
-          // the expanded state is the keyboard's own dismiss control.
-          <Pressable
-            style={styles.greeting}
-            accessibilityRole="button"
-            accessibilityLabel="Dismiss keyboard"
-            onPress={Keyboard.dismiss}
-          >
-            <Orb color={active?.color} size={56} busy={daemon.busy} />
-            <Text style={styles.greetingText}>
-              {daemon.status !== "online"
-                ? "Connecting to your machine..."
-                : active
-                  ? `What would you like ${active.name} to do?`
-                  : "No agents available on this machine."}
-            </Text>
-          </Pressable>
+            turns={daemon.turns}
+            threadTop={threadTop}
+            threadBottom={threadBottom}
+            working={working}
+            indicatorTop={insets.top + navHeight}
+            indicatorBottom={dockHeight}
+            onAtBottomChange={setAtBottom}
+          />
+        ) : !daemon.loadingSession ? (
+          // Cancels half the pane's lift, so the greeting settles in the middle
+          // of the shrunken screen instead of riding the composer all the way up.
+          <Reanimated.View style={[styles.greetingLift, keyboard.centred]}>
+            {/* Tapping the empty state dismisses the keyboard, which collapses
+                the composer. Without this the greeting is inert and the only way
+                out of the expanded state is the keyboard's own dismiss control. */}
+            <Pressable
+              style={styles.greeting}
+              accessibilityRole="button"
+              accessibilityLabel="Dismiss keyboard"
+              onPress={Keyboard.dismiss}
+            >
+              <Reanimated.View style={keyboard.settled}>
+                <Orb
+                  color={active?.color}
+                  size={ORB_REST_SIZE}
+                  busy={daemon.busy}
+                />
+              </Reanimated.View>
+              <Text style={styles.greetingText}>
+                {daemon.status !== "online"
+                  ? "Connecting to your machine..."
+                  : active
+                    ? `What would you like ${active.name} to do?`
+                    : "No agents available on this machine."}
+              </Text>
+            </Pressable>
+          </Reanimated.View>
         ) : null}
-
-        {(daemon.loadingSession || showHistorySkeleton) && (
-          <Animated.View
-            pointerEvents="none"
-            style={[styles.historySkeleton, { opacity: historySkeletonOpacity }]}
-          >
-            <ThreadSkeleton />
-          </Animated.View>
-        )}
 
         <View style={[styles.dockOverlay, { bottom: 0 }]}>
           {/* Only ever a way back down: there is no jump-to-top, because the top
@@ -916,30 +795,55 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
               </View>
             </Glass>
           ) : (
-            <Composer
-              value={draft}
-              onChangeText={setDraft}
-              onSend={send}
-              busy={daemon.busy}
-              onStop={daemon.cancel}
-              editable={daemon.status === "online"}
-              placeholder={active ? "Ask me. Task me..." : "Waiting for an agent..."}
-            />
+            <>
+              {/* Only when the agent offers some — an empty sheet is worse than
+                  no button — and never while typing: the draft is the subject
+                  then, and the row would only crowd it. */}
+              {daemon.commands.length > 0 && !typing && (
+                <Pressable
+                  style={({ pressed }) => [
+                    styles.commandsButton,
+                    pressed && styles.commandsButtonPressed,
+                  ]}
+                  hitSlop={touchSlop(theme.space(1))}
+                  accessibilityRole="button"
+                  accessibilityLabel="Show commands"
+                  onPress={() => setCommandsOpen(true)}
+                >
+                  <Ionicons name="flash-outline" size={14} color={theme.color.textDim} />
+                  <Text style={styles.commandsLabel}>Commands</Text>
+                </Pressable>
+              )}
+              <Composer
+                ref={composer}
+                value={draft}
+                onChangeText={setDraft}
+                onSend={send}
+                busy={daemon.busy}
+                onStop={daemon.cancel}
+                editable={daemon.status === "online"}
+                placeholder={active ? "Ask me. Task me..." : "Waiting for an agent..."}
+              />
+            </>
           )}
           </View>
         </View>
-      </View>
+      </Reanimated.View>
 
-      {/* The one thing the keyboard moves. Everything above is laid out inside
-          the body, so shortening it here raises the thread and the dock as a
-          single layout on the keyboard's own clock. */}
-      <Reanimated.View style={keyboardSpacer} />
+      {/* Outside the lifted pane: a sheet belongs to the screen's bottom edge,
+          not to the composer, so it must not ride up with the keyboard. */}
+      <CommandSheet
+        visible={commandsOpen}
+        commands={daemon.commands}
+        onSelect={pickCommand}
+        onClose={closeCommands}
+      />
 
       {/* One picker, pointed at whichever pill opened it. The mode selector is
           excluded from the model menu so each pill owns exactly one list. */}
       <ConfigPicker
         visible={picker !== null}
-        onClose={() => setPicker(null)}
+        onClose={closePicker}
         anchorX={picker === "mode" ? pillX.mode : pillX.model}
         options={
           picker === "mode"
@@ -977,41 +881,6 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
   );
 }
 
-
-/** Three dots that fade in sequence. Calm, and it costs no layout. */
-function Working() {
-  const one = useRef(new Animated.Value(0.25)).current;
-  const two = useRef(new Animated.Value(0.25)).current;
-  const three = useRef(new Animated.Value(0.25)).current;
-  const reduceMotion = useReducedMotion();
-
-  useEffect(() => {
-    if (reduceMotion) return;
-    const dots = [one, two, three];
-    const loops = dots.map((dot, index) =>
-      Animated.loop(
-        Animated.sequence([
-          Animated.delay(index * 160),
-          Animated.timing(dot, { toValue: 1, duration: 320, useNativeDriver: true }),
-          Animated.timing(dot, { toValue: 0.25, duration: 320, useNativeDriver: true }),
-          Animated.delay((2 - index) * 160),
-        ]),
-      ),
-    );
-    loops.forEach((loop) => loop.start());
-    return () => loops.forEach((loop) => loop.stop());
-  }, [reduceMotion, one, two, three]);
-
-  return (
-    // `accessible` groups the dots into one node; without it the label is
-    // attached to a container VoiceOver never focuses.
-    <View style={styles.workingRow} accessible accessibilityLabel="Agent is working">
-      <Animated.View style={[styles.dot, { opacity: one }]} />
-      <Animated.View style={[styles.dot, { opacity: two }]} />
-      <Animated.View style={[styles.dot, { opacity: three }]} />
-    </View>
-  );
-}
 
 const styles = StyleSheet.create({
   // The drawer paints its own panel. Matching the conversation canvas here
@@ -1080,47 +949,8 @@ const styles = StyleSheet.create({
     borderColor: theme.color.bg,
   },
 
-  thread: { flex: 1 },
-  threadContent: {
-    flexGrow: 1,
-    // Bottom-anchored, like every chat. This is also what makes the keyboard
-    // feel instant: a short thread rests on the bottom edge, so shortening the
-    // container moves it immediately, instead of leaving it pinned to the top
-    // until the scroll offset is clamped at the end of the animation.
-    justifyContent: "flex-end",
-    paddingHorizontal: theme.gutter,
-    paddingTop: theme.space(4),
-    paddingBottom: theme.space(2),
-    gap: theme.space(5),
-  },
-  // Matches the gap the thread puts between top-level turns, so grouping the
-  // newest exchange changes nothing about how it reads.
-  exchange: { gap: theme.space(5) },
-  loadEarlier: {
-    alignSelf: "center",
-    minHeight: theme.size.touch,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: theme.space(1),
-    paddingHorizontal: theme.space(3),
-    borderRadius: theme.radius.pill,
-  },
-  loadEarlierPressed: { backgroundColor: theme.color.surfacePressed },
-  loadEarlierText: {
-    color: theme.color.textDim,
-    fontSize: theme.font.small,
-    fontWeight: "600",
-  },
-  historySkeleton: {
-    position: "absolute",
-    top: 0,
-    right: 0,
-    bottom: 0,
-    left: 0,
-    zIndex: 1,
-    backgroundColor: theme.color.bg,
-  },
 
+  greetingLift: { flex: 1 },
   greeting: {
     flex: 1,
     alignItems: "center",
@@ -1135,21 +965,6 @@ const styles = StyleSheet.create({
     lineHeight: theme.line.greeting,
     letterSpacing: 0.3,
     textAlign: "center",
-  },
-
-  // Sits on the same left rail as the agent text that replaces it, so the
-  // reply does not jump horizontally when streaming begins.
-  workingRow: {
-    flexDirection: "row",
-    gap: theme.space(1.5),
-    alignItems: "center",
-    height: theme.line.body,
-  },
-  dot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: theme.color.textDim,
   },
 
   // One consistent gap between the thread and the composer, kept when the
@@ -1169,6 +984,26 @@ const styles = StyleSheet.create({
 
   // Rides above the composer it belongs to, at the gutter it shares with the
   // thread, so it lands over the conversation rather than over the input.
+  // Its own row above the composer, left-aligned with the thread's text rail so
+  // it reads as belonging to the conversation rather than to the input.
+  commandsButton: {
+    alignSelf: "flex-start",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.space(1),
+    height: theme.size.control,
+    paddingHorizontal: theme.space(3),
+    marginBottom: theme.space(2),
+    borderRadius: theme.radius.pill,
+    backgroundColor: theme.color.surface,
+  },
+  commandsButtonPressed: { backgroundColor: theme.color.surfacePressed },
+  commandsLabel: {
+    color: theme.color.textDim,
+    fontSize: theme.font.small,
+    fontWeight: "600",
+  },
+
   jumpToEnd: {
     position: "absolute",
     right: theme.gutter,

@@ -80,7 +80,7 @@ export function Glass({
         // child own hit-testing; otherwise UIVisualEffectView can swallow taps.
         isInteractive={interactive}
         pointerEvents="box-none"
-        style={[styles.material, { borderRadius: radius }, style]}
+        style={[styles.material, { borderRadius: radius, borderColor: nativeRim }, style]}
       >
         <LinearGradient
           colors={[highlight, "rgba(255,255,255,0.025)", "rgba(255,255,255,0)"]}
@@ -88,10 +88,6 @@ export function Glass({
           start={{ x: 0, y: 0 }}
           end={{ x: 0.9, y: 1 }}
           style={StyleSheet.absoluteFill}
-          pointerEvents="none"
-        />
-        <View
-          style={[styles.edge, { borderRadius: radius, borderColor: nativeRim }]}
           pointerEvents="none"
         />
         {children}
@@ -103,7 +99,7 @@ export function Glass({
     tier === "raised" ? "rgba(47,47,52,0.98)" : "rgba(35,35,39,0.96)";
 
   return (
-    <View style={[styles.material, { borderRadius: radius }, style]}>
+    <View style={[styles.material, { borderRadius: radius, borderColor: rim }, style]}>
       {!reduceTransparency && (
         <BlurView
           intensity={intensity}
@@ -130,23 +126,22 @@ export function Glass({
             pointerEvents="none"
           />
           <View style={styles.lowerShade} pointerEvents="none" />
-          <View
-            style={[styles.specular, { backgroundColor: rim }]}
-            pointerEvents="none"
-          />
         </>
       )}
-      <View
-        style={[styles.edge, { borderRadius: radius, borderColor: rim }]}
-        pointerEvents="none"
-      />
       {children}
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  material: { overflow: "hidden" },
+  /**
+   * The rim is a border on the clipping view itself, never a second
+   * absolutely-positioned bordered child. Two rounded rects at identical
+   * coordinates are anti-aliased independently, so their curves disagree by a
+   * fraction of a pixel and the edge reads as soft or doubled. One layer means
+   * one rounded path: the platform strokes the same curve it clips to.
+   */
+  material: { overflow: "hidden", borderWidth: StyleSheet.hairlineWidth },
   lowerShade: {
     position: "absolute",
     left: 0,
@@ -154,20 +149,5 @@ const styles = StyleSheet.create({
     bottom: 0,
     height: "44%",
     backgroundColor: "rgba(0,0,0,0.08)",
-  },
-  specular: {
-    position: "absolute",
-    top: 0,
-    left: "18%",
-    right: "18%",
-    height: StyleSheet.hairlineWidth,
-  },
-  edge: {
-    position: "absolute",
-    top: 0,
-    right: 0,
-    bottom: 0,
-    left: 0,
-    borderWidth: StyleSheet.hairlineWidth,
   },
 });

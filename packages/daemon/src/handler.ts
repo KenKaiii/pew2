@@ -138,7 +138,12 @@ export async function handleMessage(raw: string, ctx: HandlerContext): Promise<v
 
       case "session.start": {
         if (!message.providerId) throw new Error("providerId required");
-        const sessionId = await daemon.startSession(message.providerId, message.cwd ?? cwd);
+        // The agent's own most recent project when the app named none: a phone
+        // has no file picker, and defaulting to the home directory gives the
+        // agent no project to work in and no project commands to offer.
+        const workspace =
+          message.cwd ?? (await daemon.lastWorkspace(message.providerId)) ?? cwd;
+        const sessionId = await daemon.startSession(message.providerId, workspace);
         broadcast({
           t: "session.started",
           sessionId,
@@ -176,6 +181,22 @@ export async function handleMessage(raw: string, ctx: HandlerContext): Promise<v
       case "session.cancel": {
         if (!message.sessionId) throw new Error("sessionId required");
         await daemon.cancel(message.sessionId);
+        break;
+      }
+
+      // No session yet: the empty state is a real place to choose from, and a
+      // conversation does not exist until the first prompt is sent. Record the
+      // choice so the session this prompt creates opens with it already set,
+      // instead of the change being dropped on the floor.
+      case "provider.config": {
+        if (!message.providerId || !message.configId || message.value === undefined) {
+          throw new Error("providerId, configId and value required");
+        }
+        await daemon.rememberConfigOption(
+          message.providerId,
+          message.configId,
+          message.value,
+        );
         break;
       }
 

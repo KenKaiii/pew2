@@ -101,6 +101,17 @@ const PewExtensions = z.object({
   requiresWorkspace: z.boolean().default(true),
   /** Marks a provider as a local test fixture; hidden from the app by default. */
   experimental: z.boolean().default(false),
+  /**
+   * Directories holding the agent's markdown slash commands, relative to the
+   * workspace. `~` means the user's home, for commands shared across projects.
+   *
+   * Only a fallback. An agent that advertises `available_commands_update` over
+   * ACP is always believed instead, since only it knows its own built-ins. This
+   * exists because some agents ship no such notification at all, and without it
+   * their commands would be invisible to the app — declared per provider so
+   * adding an agent stays a manifest change rather than a code change.
+   */
+  commandDirs: z.array(z.string()).default([]),
 });
 
 /** Strict so that a mistyped key is a loud error, never a silently ignored field. */

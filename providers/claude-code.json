@@ -10,7 +10,9 @@
     "version": "latest"
   },
   "repository": "https://github.com/zed-industries/claude-agent-acp",
-  "authors": ["Zed Industries"],
+  "authors": [
+    "Zed Industries"
+  ],
   "license": "Apache-2.0",
   "pew": {
     "transport": "acp",
@@ -21,6 +23,10 @@
         "description": "Anthropic API key. Omit if you are already logged in via the Claude Code CLI.",
         "required": false
       }
+    ],
+    "commandDirs": [
+      ".claude/commands",
+      "~/.claude/commands"
     ]
   }
 }

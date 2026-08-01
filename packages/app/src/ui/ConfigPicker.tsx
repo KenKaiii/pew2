@@ -10,12 +10,18 @@
  *
  * Anchored under the model pill in the top left and scaled from that corner, so
  * it reads as the pill opening rather than a dialog arriving from nowhere.
+ *
+ * An in-tree overlay rather than a `Modal`, deliberately. A Modal is its own
+ * native window, and presenting one resigns first responder — so switching model
+ * mid-sentence dropped the keyboard and the composer fell back down. Switching a
+ * setting is not leaving the conversation. Everything here is positioned in
+ * screen coordinates already, so it anchors the same either way.
  */
-import { useEffect, useRef } from "react";
+import { memo, useEffect, useRef } from "react";
 import {
   Animated,
+  BackHandler,
   Easing,
-  Modal,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -62,7 +68,7 @@ interface ConfigPickerProps {
   anchorX?: number;
 }
 
-export function ConfigPicker({
+function ConfigPickerView({
   visible,
   onClose,
   options,
@@ -96,6 +102,18 @@ export function ConfigPicker({
     return () => animation.stop();
   }, [visible, reduceMotion, progress]);
 
+  // A Modal answered the Android back button through `onRequestClose`; an
+  // overlay has to claim it, or back would leave the picker open and exit the
+  // app instead.
+  useEffect(() => {
+    if (!visible) return;
+    const subscription = BackHandler.addEventListener("hardwareBackPress", () => {
+      onClose();
+      return true;
+    });
+    return () => subscription.remove();
+  }, [visible, onClose]);
+
   const sorted = [...options]
     .filter((option) => option.type === "select" && option.options?.length)
     .sort(
@@ -104,114 +122,114 @@ export function ConfigPicker({
         (CATEGORY_RANK[b.category ?? ""] ?? 90),
     );
 
+  // A Modal unmounted its children when hidden; an overlay has to say so itself,
+  // or it would keep swallowing taps across the whole screen.
+  if (!visible) return null;
+
   return (
-    <Modal
-      visible={visible}
-      transparent
-      animationType="none"
-      onRequestClose={onClose}
+    <Animated.View
+      style={[
+        styles.host,
+        { paddingTop: menuTop },
+        { paddingLeft: menuLayout.left },
+        { opacity: progress },
+      ]}
     >
+      <Pressable
+        style={StyleSheet.absoluteFill}
+        accessibilityRole="button"
+        accessibilityLabel="Close picker"
+        onPress={onClose}
+      />
+
       <Animated.View
         style={[
-          styles.host,
-          { paddingTop: menuTop },
-          { paddingLeft: menuLayout.left },
-          { opacity: progress },
+          styles.card,
+          {
+            width: menuLayout.width,
+            maxHeight: menuLayout.maxHeight,
+            // A right-edge clamp should still feel attached to a pill near
+            // that edge instead of growing in from the opposite corner.
+            transformOrigin: menuLayout.origin,
+            transform: [
+              {
+                scale: progress.interpolate({
+                  inputRange: [0, 1],
+                  outputRange: [0.92, 1],
+                }),
+              },
+            ],
+          },
         ]}
       >
-        <Pressable
-          style={StyleSheet.absoluteFill}
-          accessibilityRole="button"
-          accessibilityLabel="Close picker"
-          onPress={onClose}
-        />
-
-        <Animated.View
-          style={[
-            styles.card,
-            {
-              width: menuLayout.width,
-              maxHeight: menuLayout.maxHeight,
-              // A right-edge clamp should still feel attached to a pill near
-              // that edge instead of growing in from the opposite corner.
-              transformOrigin: menuLayout.origin,
-              transform: [
-                {
-                  scale: progress.interpolate({
-                    inputRange: [0, 1],
-                    outputRange: [0.92, 1],
-                  }),
-                },
-              ],
-            },
-          ]}
+        <Glass
+          radius={theme.radius.lg}
+          tier="raised"
+          style={[styles.cardGlass, { maxHeight: menuLayout.maxHeight }]}
         >
-          <Glass
-            radius={theme.radius.lg}
-            tier="raised"
-            style={[styles.cardGlass, { maxHeight: menuLayout.maxHeight }]}
-          >
 
-          {/* Hugs its rows: without this the ScrollView fills maxHeight and
-              leaves dead space under the last option. */}
-          <ScrollView
-            style={styles.scroll}
-            contentContainerStyle={styles.cardInner}
-            showsVerticalScrollIndicator={false}
-          >
-            {sorted.length === 0 && (
-              <Text style={styles.empty}>
-                This agent offers no model options.
-              </Text>
-            )}
+        {/* Hugs its rows: without this the ScrollView fills maxHeight and
+            leaves dead space under the last option. */}
+        <ScrollView
+          style={styles.scroll}
+          contentContainerStyle={styles.cardInner}
+          showsVerticalScrollIndicator={false}
+        >
+          {sorted.length === 0 && (
+            <Text style={styles.empty}>
+              This agent offers no model options.
+            </Text>
+          )}
 
-            {sorted.map((option) => (
-              <View key={option.id} style={styles.group}>
-                <Text style={styles.groupLabel}>{option.name}</Text>
-                {option.options?.map((value) => {
-                  const selected = value.value === option.currentValue;
-                  return (
-                    <Pressable
-                      key={value.value}
-                      accessibilityRole="button"
-                      accessibilityLabel={value.name}
-                      accessibilityState={{ selected }}
-                      onPress={() => {
-                        // Selection, not impact: this is a value changing in a
-                        // list, the same gesture family as a picker wheel.
-                        haptics.select();
-                        onSelect(option.id, value.value);
-                        onClose();
-                      }}
-                      style={({ pressed }) => [
-                        styles.row,
-                        pressed && styles.rowPressed,
-                      ]}
-                    >
-                      <Text style={styles.rowText}>{value.name}</Text>
-                      {selected && (
-                        <Ionicons
-                          name="checkmark"
-                          size={18}
-                          color={theme.color.text}
-                        />
-                      )}
-                    </Pressable>
-                  );
-                })}
-              </View>
-            ))}
-          </ScrollView>
-          </Glass>
-        </Animated.View>
+          {sorted.map((option) => (
+            <View key={option.id} style={styles.group}>
+              <Text style={styles.groupLabel}>{option.name}</Text>
+              {option.options?.map((value) => {
+                const selected = value.value === option.currentValue;
+                return (
+                  <Pressable
+                    key={value.value}
+                    accessibilityRole="button"
+                    accessibilityLabel={value.name}
+                    accessibilityState={{ selected }}
+                    onPress={() => {
+                      // Selection, not impact: this is a value changing in a
+                      // list, the same gesture family as a picker wheel.
+                      haptics.select();
+                      onSelect(option.id, value.value);
+                      onClose();
+                    }}
+                    style={({ pressed }) => [
+                      styles.row,
+                      pressed && styles.rowPressed,
+                    ]}
+                  >
+                    <Text style={styles.rowText}>{value.name}</Text>
+                    {selected && (
+                      <Ionicons
+                        name="checkmark"
+                        size={18}
+                        color={theme.color.text}
+                      />
+                    )}
+                  </Pressable>
+                );
+              })}
+            </View>
+          ))}
+        </ScrollView>
+        </Glass>
       </Animated.View>
-    </Modal>
+    </Animated.View>
   );
 }
 
 const styles = StyleSheet.create({
   host: {
-    flex: 1,
+    ...StyleSheet.absoluteFillObject,
+    // Above the conversation pane (1), its nav (2) and the composer dock (3),
+    // since this opens on top of all of them.
+    zIndex: 10,
     backgroundColor: "rgba(0,0,0,0.55)",
     // Anchored to the pill that opens it; the gutter is the default.
     alignItems: "flex-start",
@@ -252,3 +270,7 @@ const styles = StyleSheet.create({
     padding: theme.space(4),
   },
 });
+
+// Memoized: a streamed chunk re-renders the screen many times a second, and
+// none of those chunks change anything here.
+export const ConfigPicker = memo(ConfigPickerView);

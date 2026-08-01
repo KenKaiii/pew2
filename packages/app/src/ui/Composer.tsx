@@ -16,13 +16,14 @@
  * Metrics and colours are sampled from the reference build: 36pt buttons inset
  * 11pt from the pill edge, #e0e0e0 glyphs, #828282 placeholder.
  */
-import { useEffect, useRef, useState } from "react";
+import { forwardRef, memo, useEffect, useImperativeHandle, useRef, useState } from "react";
 import {
   Animated,
   Easing,
   LayoutAnimation,
   Pressable,
   StyleSheet,
+  Text,
   TextInput,
   View,
 } from "react-native";
@@ -32,6 +33,8 @@ import { touchSlop } from "./controls";
 import { haptics } from "./haptics";
 import { Glass } from "./Glass";
 import { useReducedMotion } from "./useReducedMotion";
+import { CommandToken } from "./CommandToken";
+import { splitCommand } from "../slashCommands";
 
 const COLLAPSED = theme.size.composerCollapsed;
 const INSET = theme.size.composerInset;
@@ -79,6 +82,11 @@ const MAX_TEXT_HEIGHT = MAX_LINES * theme.line.body;
  */
 const HALF_LEADING = Math.max(0, (theme.line.body - theme.font.body * 1.2) / 2);
 
+/** Imperative surface: the command sheet hands focus back after a pick. */
+export interface ComposerHandle {
+  focus(): void;
+}
+
 interface ComposerProps {
   value: string;
   onChangeText: (text: string) => void;
@@ -90,7 +98,7 @@ interface ComposerProps {
   editable?: boolean;
 }
 
-export function Composer({
+function ComposerView({
   value,
   onChangeText,
   onSend,
@@ -98,8 +106,15 @@ export function Composer({
   onStop,
   placeholder = "Ask me. Task me...",
   editable = true,
-}: ComposerProps) {
+}: ComposerProps, ref: React.Ref<ComposerHandle>) {
   const hasText = value.trim().length > 0;
+  const input = useRef<TextInput>(null);
+  useImperativeHandle(ref, () => ({ focus: () => input.current?.focus() }), []);
+
+  // The leading `/command`, which is drawn differently from the rest of the
+  // draft. Undefined for ordinary prose, which is the common case.
+  const split = splitCommand(value);
+
   const [focused, setFocused] = useState(false);
   const [contentHeight, setContentHeight] = useState<number>(theme.line.body);
   const reduceMotion = useReducedMotion();
@@ -178,9 +193,15 @@ export function Composer({
           ]}
         >
           <TextInput
+            ref={input}
             style={styles.input}
-            value={value}
-            onChangeText={onChangeText}
+            // The command is not text here — it is the badge in the action row
+            // below — so the field holds only the instructions after it, and
+            // every edit is put back together before it leaves this component.
+            value={split ? split.rest.replace(/^ /, "") : value}
+            onChangeText={(text) =>
+              onChangeText(split ? `${split.command} ${text}` : text)
+            }
             onFocus={() => setFocus(true)}
             onBlur={() => setFocus(false)}
             onContentSizeChange={(event) =>
@@ -203,13 +224,40 @@ export function Composer({
         {/* Always the bottom 58pt: the entire pill when collapsed, the action
             row once expanded. Anchoring it means the buttons never shift. */}
         <View style={styles.actions}>
-          <View
-            style={[styles.actionButton, styles.notImplemented]}
-            accessibilityRole="button"
-            accessibilityLabel="Add attachment, not available yet"
-            accessibilityState={{ disabled: true }}
-          >
-            <Ionicons name="add" size={22} color={theme.color.glyph} />
+          {/* Grouped, because the row is `space-between`: a third loose child
+              would scatter the three across the width instead of keeping the
+              badge next to the button it belongs beside. */}
+          <View style={styles.leading}>
+            <View
+              style={[styles.actionButton, styles.notImplemented]}
+              accessibilityRole="button"
+              accessibilityLabel="Add attachment, not available yet"
+              accessibilityState={{ disabled: true }}
+            >
+              <Ionicons name="add" size={22} color={theme.color.glyph} />
+            </View>
+
+            {/* Beside the attachment button and the same height as it, so the
+                command reads as another control on that row rather than as text
+                that escaped the field. Removing it is a tap on the badge itself:
+                a separate 'x' inside the input sat exactly where the caret goes. */}
+            {split && (
+              <Pressable
+                style={({ pressed }) => [styles.badge, pressed && styles.badgePressed]}
+                hitSlop={touchSlop(theme.space(1))}
+                accessibilityRole="button"
+                accessibilityLabel={`Remove ${split.command}`}
+                onPress={() => {
+                  // Keeps whatever was typed since: a mis-picked command should
+                  // not also discard the instructions written under it.
+                  onChangeText(split.rest.replace(/^ /, ""));
+                  input.current?.focus();
+                }}
+              >
+                <CommandToken text={split.command} size={theme.font.small} lineHeight={18} />
+                <Ionicons name="close" size={13} color={theme.color.accent} />
+              </Pressable>
+            )}
           </View>
 
           <View style={styles.trailing}>
@@ -278,6 +326,23 @@ export function Composer({
 
 const styles = StyleSheet.create({
   inputWrap: { position: "absolute", top: 0 },
+  leading: { flexDirection: "row", alignItems: "center", flexShrink: 1 },
+  // Same height and radius as the attachment button beside it, so the row reads
+  // as one set of controls. Sized by its content, since a command name's length
+  // is the agent's business, not ours.
+  badge: {
+    height: BUTTON,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.space(1),
+    paddingHorizontal: theme.space(2),
+    marginLeft: theme.space(1),
+    borderRadius: BUTTON / 2,
+    backgroundColor: theme.glass.control.fill,
+  },
+  badgePressed: { opacity: 0.6 },
+  // Small and solid: a deliberate target, but never competing with the word it
+  // belongs to. Vertically centred on the line rather than the whole box.
   input: {
     color: theme.color.text,
     fontSize: theme.font.body,
@@ -320,3 +385,7 @@ const styles = StyleSheet.create({
   sendPressed: { backgroundColor: theme.color.textDim },
   notImplemented: { opacity: 0.4 },
 });
+
+// Memoized: a streamed chunk re-renders the screen many times a second, and
+// none of those chunks change anything here.
+export const Composer = memo(forwardRef<ComposerHandle, ComposerProps>(ComposerView));

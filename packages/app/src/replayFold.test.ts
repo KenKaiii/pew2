@@ -58,6 +58,20 @@ test("an optimistic prompt is adopted, not duplicated", () => {
   expect(isOptimistic(next.turns[0]!)).toBe(false);
 });
 
+test("adoption keeps the render key, so the prompt does not remount", () => {
+  const optimisticTurn: Turn = {
+    id: "local:0",
+    key: "local:0",
+    role: "user",
+    text: "Hello",
+  };
+  const next = foldSessionEvents(state([optimisticTurn], [sessionStub]), [
+    user(0, "Hello"),
+  ]);
+
+  expect(next.turns[0]?.key).toBe("local:0");
+});
+
 test("a replay is history: it never marks the session busy", () => {
   // The looping-indicator bug: the fold used to set busy from the last chunk,
   // and a resumed thread's last chunk is always a message.

@@ -1,10 +1,9 @@
 /**
  * Placeholders shown while content is on its way.
  *
- * A resumed conversation takes a couple of seconds to stream back from the
- * agent, and the drawer's history arrives provider by provider. Without these,
- * both read as "empty" for exactly long enough to feel broken — the worst
- * possible lie a loading state can tell.
+ * The drawer's history arrives provider by provider, and without this it reads
+ * as "empty" for exactly long enough to feel broken — the worst possible lie a
+ * loading state can tell.
  */
 import { useEffect, useRef } from "react";
 import { Animated, StyleSheet, View, type ViewStyle } from "react-native";
@@ -33,22 +32,6 @@ export function Skeleton({ style }: { style?: ViewStyle | ViewStyle[] }) {
   return <Animated.View style={[styles.block, { opacity }, style]} />;
 }
 
-/**
- * The conversation pane while a session is being resumed: blocks shaped like
- * the alternating user/agent messages that are about to land.
- */
-export function ThreadSkeleton() {
-  return (
-    <View style={styles.thread} accessibilityLabel="Loading conversation">
-      <Skeleton style={[styles.bubble, styles.agentBubble, { width: "72%", height: 88 }]} />
-      <Skeleton style={[styles.bubble, styles.userBubble, { width: "46%", height: 40 }]} />
-      <Skeleton style={[styles.bubble, styles.agentBubble, { width: "84%", height: 132 }]} />
-      <Skeleton style={[styles.bubble, styles.agentBubble, { width: "58%", height: 60 }]} />
-      <Skeleton style={[styles.bubble, styles.userBubble, { width: "38%", height: 40 }]} />
-    </View>
-  );
-}
-
 /** The drawer's history list while agents answer what they have on disk. */
 export function HistorySkeleton() {
   return (
@@ -68,15 +51,6 @@ const styles = StyleSheet.create({
     backgroundColor: theme.color.surfacePressed,
     borderRadius: theme.radius.sm,
   },
-  thread: {
-    flex: 1,
-    paddingHorizontal: theme.gutter,
-    paddingTop: theme.space(6),
-    gap: theme.space(4),
-  },
-  bubble: { borderRadius: theme.radius.lg },
-  agentBubble: { alignSelf: "flex-start" },
-  userBubble: { alignSelf: "flex-end" },
   historyRow: {
     paddingVertical: theme.space(3),
     paddingHorizontal: theme.space(1),

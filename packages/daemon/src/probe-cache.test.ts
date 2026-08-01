@@ -18,6 +18,35 @@ const capabilities = {
   canResume: true,
 };
 
+test("cached commands survive the round trip, so the sheet works offline", async () => {
+  // The app offers commands before any session exists, which means it is this
+  // cache — not a live agent — answering on a cold start.
+  const env = await tempEnv();
+  await writeProbeCache(
+    "claude-code",
+    {
+      ...capabilities,
+      commands: [{ name: "commit", description: "Commit the work" }],
+    },
+    env,
+  );
+
+  expect((await readProbeCache("claude-code", env))?.commands).toEqual([
+    { name: "commit", description: "Commit the work" },
+  ]);
+});
+
+test("a cache written before commands existed still reads", async () => {
+  // `commands` is optional precisely so an older daemon's file is not a miss:
+  // dropping it would reprobe every provider on the first launch after upgrade.
+  const env = await tempEnv();
+  await writeProbeCache("ggcoder", capabilities, env);
+
+  const cached = await readProbeCache("ggcoder", env);
+  expect(cached?.commands).toBe(undefined);
+  expect(cached?.sessions).toHaveLength(1);
+});
+
 test("a written probe reads back with its timestamp", async () => {
   const env = await tempEnv();
   await writeProbeCache("ggcoder", capabilities, env);
@@ -84,6 +113,38 @@ test("a daemon answers from disk without spawning the agent", async () => {
     expect(caps.sessions[0]?.title).toBe("Cached conversation");
     // Spawning the echo agent takes hundreds of ms; disk is ~none.
     expect(elapsed).toBeLessThan(200);
+    daemon.closeAll();
+  } finally {
+    if (home === undefined) delete process.env.PEW2_HOME;
+    else process.env.PEW2_HOME = home;
+  }
+});
+
+test("a warm spare is offered before the probe finishes listing history", async () => {
+  // Listing sessions and counting each one's messages is seconds of disk work
+  // for a real agent, and opening a *new* conversation needs none of it. The
+  // spare must therefore be adoptable as soon as the process answers — when the
+  // two were one promise, the first tap paid for the whole history scan.
+  const env = await tempEnv();
+  const home = process.env.PEW2_HOME;
+  process.env.PEW2_HOME = env.PEW2_HOME;
+  try {
+    const { Daemon } = await import("./index.js");
+    const daemon = new Daemon({ id: "test", name: "test" }, true);
+    await daemon.refreshProviders();
+
+    const probe = daemon.probeProvider("echo");
+    let listed = false;
+    void probe.then(() => {
+      listed = true;
+    });
+
+    await (daemon as any).awaitSpare("echo");
+
+    expect((daemon as any).spares.has("echo")).toBe(true);
+    expect(listed).toBe(false);
+
+    await probe;
     daemon.closeAll();
   } finally {
     if (home === undefined) delete process.env.PEW2_HOME;

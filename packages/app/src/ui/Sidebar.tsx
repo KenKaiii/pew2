@@ -9,7 +9,7 @@
  * being covered, so the two surfaces read as one moving layout instead of a
  * modal layer. The panel itself is therefore static — App owns the motion.
  */
-import { useEffect, useRef } from "react";
+import { memo, useEffect, useRef } from "react";
 import {
   Alert,
   Animated,
@@ -146,7 +146,7 @@ function SessionRow({ session, index, active, reduceMotion, onOpen }: SessionRow
   );
 }
 
-export function Sidebar({
+function SidebarView({
   open,
   providers,
   sessions,
@@ -460,3 +460,7 @@ const styles = StyleSheet.create({
     paddingTop: theme.space(2),
   },
 });
+
+// Memoized: a streamed chunk re-renders the screen many times a second, and
+// none of those chunks change anything here.
+export const Sidebar = memo(SidebarView);

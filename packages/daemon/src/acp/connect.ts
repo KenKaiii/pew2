@@ -97,6 +97,16 @@ function modelsAsConfigOption(models: SessionModelState | undefined): ConfigOpti
 export const MODEL_CONFIG_ID = "__acp_model";
 
 /**
+ * Synthetic id for the selector built from `modes`.
+ *
+ * Same story as the model: the legacy `modes` block carries no config id, so
+ * setting it routes to `session/set_mode`. Sending `session/set_config_option`
+ * for an id the agent never advertised is silently accepted and does nothing —
+ * which is exactly what "I picked a mode and nothing happened" looks like.
+ */
+export const MODE_CONFIG_ID = "__acp_mode";
+
+/**
  * A conversation the agent already has on disk.
  *
  * Coding agents keep their own history, so a phone should see the work started
@@ -113,6 +123,31 @@ export interface AgentSession {
   messageCount?: number;
 }
 
+/** A slash command the agent offers, as advertised over ACP. */
+export interface AvailableCommand {
+  name: string;
+  description: string;
+  /** Placeholder for the argument it expects, when it takes one. */
+  hint?: string;
+}
+
+/**
+ * Normalise an `available_commands_update` payload.
+ *
+ * Nothing is filtered here: which commands make sense on a phone is a client
+ * decision, and the daemon also serves clients that are not this app.
+ */
+function readAvailableCommands(raw: unknown): AvailableCommand[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((command: any) => typeof command?.name === "string" && command.name.trim())
+    .map((command: any) => ({
+      name: command.name.trim(),
+      description: typeof command.description === "string" ? command.description : "",
+      ...(typeof command.input?.hint === "string" ? { hint: command.input.hint } : {}),
+    }));
+}
+
 export interface AcpSessionHandle {
   connection: ClientConnection;
   child: ChildProcessWithoutNullStreams;
@@ -120,6 +155,15 @@ export interface AcpSessionHandle {
   readonly sessionId: string;
   /** Selectors for the current session. Empty when it offers none. */
   readonly configOptions: ConfigOption[];
+  /**
+   * Slash commands the agent advertised for the current session.
+   *
+   * Sent as a notification shortly after `session/new`, not as part of its
+   * result, so this fills in a moment after the session opens. The set depends
+   * on the project's own `commands/` directories, so it is per session rather
+   * than a property of the agent.
+   */
+  readonly availableCommands: AvailableCommand[];
   /** True when the agent can replay a past session via `session/load`. */
   canLoadSession: boolean;
   /**
@@ -260,9 +304,22 @@ export async function connectProvider(options: ConnectOptions): Promise<AcpSessi
     | { onUpdate: (payload: unknown) => void; onPermissionRequest: ConnectOptions["onPermissionRequest"] }
     | undefined;
 
+  // Commands arrive as a notification after `session/new` resolves, so they
+  // cannot be part of its result. Captured here rather than only forwarded,
+  // because the capability probe throws its updates away and still needs them:
+  // the app offers commands in the empty state, before a session exists.
+  let availableCommands: AvailableCommand[] = [];
+
   const app = client({ name: "pew2-daemon" })
     .onNotification("session/update", async (ctx: { params: unknown }) => {
-      const sid = (ctx.params as { sessionId?: string })?.sessionId;
+      const params = ctx.params as {
+        sessionId?: string;
+        update?: { sessionUpdate?: string; availableCommands?: unknown };
+      };
+      if (params?.update?.sessionUpdate === "available_commands_update") {
+        availableCommands = readAvailableCommands(params.update.availableCommands);
+      }
+      const sid = params?.sessionId;
       const handler = (sid ? updateHandlers.get(sid) : undefined) ?? pendingRoute?.onUpdate;
       handler?.(ctx.params);
     })
@@ -325,7 +382,7 @@ export async function connectProvider(options: ConnectOptions): Promise<AcpSessi
     const modes: ConfigOption[] = created.modes
       ? [
           {
-            id: "mode",
+            id: MODE_CONFIG_ID,
             name: "Mode",
             category: "mode",
             type: "select",
@@ -364,6 +421,9 @@ export async function connectProvider(options: ConnectOptions): Promise<AcpSessi
       updateHandlers.set(loadSessionId, route.onUpdate);
       permissionHandlers.set(loadSessionId, route.onPermissionRequest);
     }
+    // Belongs to the session being replaced, and the next one may be a
+    // different project entirely.
+    availableCommands = [];
     pendingRoute = route;
     try {
       const created: NewSessionResult = loadSessionId
@@ -400,6 +460,9 @@ export async function connectProvider(options: ConnectOptions): Promise<AcpSessi
     },
     get configOptions() {
       return current.configOptions;
+    },
+    get availableCommands() {
+      return availableCommands;
     },
     canLoadSession,
 
@@ -476,16 +539,23 @@ export async function connectProvider(options: ConnectOptions): Promise<AcpSessi
     },
     async setConfigOption(configId: string, value: string | boolean) {
       try {
-        // The selector synthesised from `models` has no config id the agent
-        // knows, so it routes to the dedicated model method instead.
-        if (configId === MODEL_CONFIG_ID) {
-          await connection.agent.request("session/set_model", {
+        // The selectors synthesised from `models` and `modes` have no config id
+        // the agent knows, so each routes to its own dedicated method instead.
+        const synthetic =
+          configId === MODEL_CONFIG_ID
+            ? { method: "session/set_model", key: "modelId" }
+            : configId === MODE_CONFIG_ID
+              ? { method: "session/set_mode", key: "modeId" }
+              : undefined;
+
+        if (synthetic) {
+          await connection.agent.request(synthetic.method, {
             sessionId: current.sessionId,
-            modelId: String(value),
+            [synthetic.key]: String(value),
           });
-          // That method returns nothing useful, so reflect the change locally.
+          // Neither method returns anything useful, so reflect it locally.
           const updated = current.configOptions.map((option) =>
-            option.id === MODEL_CONFIG_ID ? { ...option, currentValue: value } : option,
+            option.id === configId ? { ...option, currentValue: value } : option,
           );
           current = { ...current, configOptions: updated };
           return updated;
@@ -497,8 +567,18 @@ export async function connectProvider(options: ConnectOptions): Promise<AcpSessi
           ...(typeof value === "boolean" ? { type: "boolean" } : {}),
           value,
         })) as { configOptions?: unknown };
-        // The agent replies with the complete list, so trust it over local state.
-        const updated = normaliseConfigOptions(result?.configOptions);
+        // The agent replies with the complete list, so trust it over local
+        // state — but only when it actually sent one. Not every agent echoes the
+        // list back, and treating a silent reply as "no options" wiped every
+        // selector the session had: pick a model, lose the thinking level and
+        // the mode with it.
+        const echoed = normaliseConfigOptions(result?.configOptions);
+        const updated =
+          echoed.length > 0
+            ? echoed
+            : current.configOptions.map((option) =>
+                option.id === configId ? { ...option, currentValue: value } : option,
+              );
         current = { ...current, configOptions: updated };
         return updated;
       } catch (error) {

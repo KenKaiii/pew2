@@ -12,6 +12,11 @@ import { mergeAgentSessions, replaceAgentSessionStub } from "./agentHistory";
 import { advance, alreadySeen, type Cursors } from "./cursors";
 import { findDuplicateError } from "./errorDedup";
 import { readChunk } from "./chunks";
+import {
+  offeredCommands,
+  readAvailableCommands,
+  type SlashCommand,
+} from "./slashCommands";
 import { foldSessionEvents, isOptimistic, type ReplayEvent } from "./replayFold";
 
 export type Status = "connecting" | "online" | "offline";
@@ -33,6 +38,16 @@ export interface PermissionRequest {
 
 export interface Turn {
   id: string;
+  /**
+   * Stable React identity, fixed for the life of the message.
+   *
+   * `id` is not that: an optimistic prompt adopts the server's id once the
+   * daemon echoes it back, and the thread is a recycling list keyed by this,
+   * so a changing key tears the cell down and re-parses its markdown — the
+   * prompt visibly rendering a second time a moment after you sent it. Absent
+   * on turns born with a server id, which never changes.
+   */
+  key?: string;
   role: "user" | "agent" | "thought" | "system";
   text: string;
 }
@@ -86,6 +101,11 @@ interface State {
   sessions: Session[];
   /** Selectors for the open session, in the agent's own priority order. */
   configOptions: ConfigOption[];
+  /**
+   * Slash commands the agent offers, minus the ones this app hides. Depends on
+   * the project it opened, so it is per session rather than per provider.
+   */
+  commands: SlashCommand[];
   permission?: PermissionRequest;
   busy: boolean;
   /**
@@ -119,7 +139,14 @@ function rememberConfigs(
  * with the server's once the echo arrives, so it never renders twice.
  */
 function localTurn(seq: number, text: string): Turn {
-  return { id: `local:${seq}`, role: "user", text: text.trim() };
+  // `key` outlives the id swap in the echo path, so the cell rendering this
+  // prompt survives reconciliation instead of remounting.
+  return {
+    id: `local:${seq}`,
+    key: `local:${seq}`,
+    role: "user",
+    text: text.trim(),
+  };
 }
 
 function firstUserText(turns: Turn[]): string | undefined {
@@ -144,6 +171,7 @@ export function useDaemon(url: string, deviceId = "phone") {
     // ahead of these and never replaced by them.
     sessions: USE_FIXTURES ? sampleSessions() : [],
     configOptions: [],
+    commands: [],
     busy: false,
     loadingSessions: false,
     loadingSession: false,
@@ -156,6 +184,10 @@ export function useDaemon(url: string, deviceId = "phone") {
   // and then be silently replaced by the truth once a session opened. Only an
   // agent's own advertisement may populate this.
   const [knownConfigs, setKnownConfigs] = useState<Record<string, ConfigOption[]>>({});
+  // Commands per provider, kept outside the session so opening a conversation
+  // does not blank the menu for agents that never send the ACP notification and
+  // are served from their project's files instead.
+  const [knownCommands, setKnownCommands] = useState<Record<string, SlashCommand[]>>({});
 
   const socket = useRef<WebSocket | null>(null);
   const retry = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -196,6 +228,17 @@ export function useDaemon(url: string, deviceId = "phone") {
   useEffect(() => {
     sessionsRef.current = state.sessions;
   }, [state.sessions]);
+
+  // The agent the composer targets, including the implicit first-available one
+  // the user never explicitly chose. `providerRef` only knows about deliberate
+  // selections, so on a fresh launch it is empty while the UI already names an
+  // agent — and a model picked right then would have nowhere to go. Kept in an
+  // effect below for the same reason as `sessionsRef`.
+  const targetProviderRef = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    targetProviderRef.current =
+      state.activeProviderId ?? state.providers.find((p) => p.available)?.id;
+  }, [state.activeProviderId, state.providers]);
 
   useEffect(() => {
     alive.current = true;
@@ -314,6 +357,15 @@ export function useDaemon(url: string, deviceId = "phone") {
               rememberConfigs(known, message.providerId ?? providerRef.current, advertised),
             );
           }
+          // Learned from the probe session, so the sheet works in the empty
+          // state — before a prompt has created a session to ask. Held per
+          // provider, since every available agent is probed at startup and the
+          // last reply to land must not become another agent's menu.
+          const commands = offeredCommands(message.commands);
+          const owner = message.providerId ?? providerRef.current;
+          if (commands.length > 0 && owner) {
+            setKnownCommands((known) => ({ ...known, [owner]: commands }));
+          }
         }
 
         // Ask each available agent what it currently offers. The answer comes
@@ -415,6 +467,11 @@ export function useDaemon(url: string, deviceId = "phone") {
 
             case "session.event": {
               const payload = message.payload;
+
+              // Sent once per session rather than per turn, and specific to the
+              // project the agent opened, so it is held until replaced.
+              const commands = readAvailableCommands(payload);
+              if (commands) return { ...prev, commands };
 
               if (payload?.kind === "permission_request") {
                 const params = payload.params ?? {};
@@ -617,7 +674,27 @@ export function useDaemon(url: string, deviceId = "phone") {
       /** Change a model, thinking level or mode on the open session. */
       setConfig: (configId: string, value: string | boolean) => {
         const sessionId = sessionRef.current;
-        if (sessionId) post({ t: "session.config", sessionId, configId, value });
+        if (sessionId) {
+          post({ t: "session.config", sessionId, configId, value });
+          return;
+        }
+
+        // Nothing to set it on yet: a conversation is only created by its first
+        // prompt, so before then the daemon holds the choice against the
+        // provider and the new session opens with it applied. Without this the
+        // pill in the empty state silently did nothing until you had sent a
+        // message — the one moment you are most likely to be choosing a model.
+        const providerId = providerRef.current ?? targetProviderRef.current;
+        if (!providerId) return;
+        post({ t: "provider.config", providerId, configId, value });
+        // Reflected locally: with no session there is no `session.config` echo
+        // coming back, and the pill has to show what was picked.
+        setKnownConfigs((known) => ({
+          ...known,
+          [providerId]: (known[providerId] ?? []).map((option) =>
+            option.id === configId ? { ...option, currentValue: value } : option,
+          ),
+        }));
       },
 
       /** Reopen a past conversation from the sidebar. */
@@ -644,6 +721,9 @@ export function useDaemon(url: string, deviceId = "phone") {
             activeProviderId: session.providerId,
             turns: [],
             configOptions: [],
+            // Cleared so the previous conversation's menu is not offered for
+            // this one; the provider's own list below fills it back in.
+            commands: [],
             busy: true,
             loadingSession: true,
           }));
@@ -681,8 +761,10 @@ export function useDaemon(url: string, deviceId = "phone") {
           sessionId: undefined,
           turns: [],
           // Selectors belong to the old agent's session; keeping them would
-          // show another agent's model name in the top bar.
+          // show another agent's model name in the top bar. Its slash commands
+          // are wrong here for the same reason.
           configOptions: [],
+          commands: [],
           busy: false,
           loadingSession: false,
         }));
@@ -696,6 +778,7 @@ export function useDaemon(url: string, deviceId = "phone") {
           sessionId: undefined,
           turns: [],
           configOptions: [],
+          commands: [],
           busy: false,
           loadingSession: false,
         }));
@@ -716,9 +799,15 @@ export function useDaemon(url: string, deviceId = "phone") {
     state.configOptions.length > 0
       ? state.configOptions
       : (effectiveProviderId ? knownConfigs[effectiveProviderId] : undefined) ?? [];
+  // The live session's own list wins; otherwise the provider's, which is what
+  // agents that never send the notification rely on entirely.
+  const commands =
+    state.commands.length > 0
+      ? state.commands
+      : (effectiveProviderId ? knownCommands[effectiveProviderId] : undefined) ?? [];
   const loadingSessions = effectiveProviderId
     ? pendingCapabilities.current.has(effectiveProviderId)
     : false;
 
-  return { ...state, ...actions, configOptions, loadingSessions };
+  return { ...state, ...actions, configOptions, commands, loadingSessions };
 }

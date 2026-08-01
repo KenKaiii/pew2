@@ -7,13 +7,21 @@
   "distribution": {
     "type": "command",
     "command": "ggcoder",
-    "args": ["acp"]
+    "args": [
+      "acp"
+    ]
   },
   "repository": "https://github.com/kenkaiiii/gg-framework",
-  "authors": ["kenkaiiii"],
+  "authors": [
+    "kenkaiiii"
+  ],
   "license": "MIT",
   "pew": {
     "transport": "acp",
-    "color": "#4ade80"
+    "color": "#4ade80",
+    "commandDirs": [
+      ".gg/commands",
+      "~/.gg/commands"
+    ]
   }
 }

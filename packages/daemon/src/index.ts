@@ -13,6 +13,7 @@ import {
   connectProvider,
   type AcpSessionHandle,
   type AgentSession,
+  type AvailableCommand,
   type ConfigOption,
 } from "./acp/connect.js";
 import { loadClaudeDisplayHistory } from "./acp/claude-history.js";
@@ -20,11 +21,15 @@ import { loadGgCoderDisplayHistory } from "./acp/ggcoder-history.js";
 import { SessionLog } from "./session/log.js";
 import { resolveWorkspace } from "./workspace.js";
 import { readProbeCache, writeProbeCache } from "./probe-cache.js";
+import { readConfigPrefs, writeConfigPref } from "./config-prefs.js";
+import { readCommandDirs } from "./commands/from-disk.js";
 import { wire } from "@pew2/protocol";
 
 interface ActiveSession {
   handle?: AcpSessionHandle;
   log: SessionLog;
+  /** Which agent this belongs to, so a config change knows what to remember. */
+  providerId: string;
   /** Resolves once the agent has loaded and can accept prompts/config changes. */
   ready: Promise<void>;
   /** Whether clients have been told this session exists. */
@@ -42,12 +47,42 @@ export interface ProviderCapabilities {
   sessions: AgentSession[];
   /** Whether those sessions can actually be reopened. */
   canResume: boolean;
+  /**
+   * Slash commands the agent offers for this project.
+   *
+   * Learned from the throwaway probe session, so the app can offer them in the
+   * empty state — before the first prompt has created a session to ask.
+   */
+  commands?: AvailableCommand[];
+}
+
+/**
+ * Show a selector at the value it will actually take.
+ *
+ * A stored preference is applied when a session opens, so a capability reply
+ * that reported the agent's default would be describing a state that never
+ * reaches the screen. Only values the option really offers are used: a model
+ * dropped between agent versions must not leave a pill naming something that
+ * cannot be chosen.
+ */
+export function withStoredPrefs(
+  options: ConfigOption[],
+  prefs: Record<string, string | boolean>,
+): ConfigOption[] {
+  return options.map((option) => {
+    const preferred = prefs[option.id];
+    if (preferred === undefined) return option;
+    const offered =
+      !option.options || option.options.some((choice) => choice.value === preferred);
+    return offered ? { ...option, currentValue: preferred } : option;
+  });
 }
 
 const EMPTY_CAPABILITIES: ProviderCapabilities = {
   configOptions: [],
   sessions: [],
   canResume: false,
+  commands: [],
 };
 
 const REPLAY_BATCH_SIZE = 64;
@@ -71,6 +106,18 @@ export class Daemon {
   private readonly spares = new Map<string, { handle: AcpSessionHandle; timer: NodeJS.Timeout }>();
   /** Provider boots already in flight, shared by a tap instead of duplicated. */
   private readonly warming = new Map<string, Promise<void>>();
+  /**
+   * Resolves as soon as a boot has a usable process, well before the probe it
+   * belongs to has finished listing history.
+   *
+   * These used to be one promise, so the first tap waited on a `session/list`
+   * plus a message count read for every stored conversation — seconds of disk
+   * work that opening a new conversation does not need at all.
+   */
+  private readonly spareReady = new Map<
+    string,
+    { ready: Promise<void>; announce: () => void }
+  >();
   private static readonly SPARE_TTL_MS = 15 * 60 * 1000;
 
   /**
@@ -86,14 +133,90 @@ export class Daemon {
   }
 
   private warmProvider(providerId: string): Promise<void> {
-    if (this.spares.has(providerId)) return Promise.resolve();
+    if (this.spares.has(providerId)) {
+      // A spare is already waiting, so anyone armed by a probe that took the
+      // disk-cache path has nothing left to wait for. Releasing here is what
+      // stops `awaitSpare` blocking on a boot that will never be started.
+      this.spareReady.get(providerId)?.announce();
+      this.spareReady.delete(providerId);
+      return Promise.resolve();
+    }
     const existing = this.warming.get(providerId);
     if (existing) return existing;
+    // Armed before the probe starts, not inside it: `probeProvider` awaits the
+    // disk cache first, so a tap arriving in that window would find no promise
+    // to wait on and spawn a second process alongside this one.
+    this.armSpare(providerId);
     const warming = this.revalidate(providerId).finally(() => {
       if (this.warming.get(providerId) === warming) this.warming.delete(providerId);
+      // Release anyone still waiting; a finished boot either left a spare or
+      // failed, and both answers are "stop waiting".
+      this.spareReady.get(providerId)?.announce();
+      this.spareReady.delete(providerId);
     });
     this.warming.set(providerId, warming);
     return warming;
+  }
+
+  /** The pending boot for a provider, created on first use. */
+  private armSpare(providerId: string) {
+    const existing = this.spareReady.get(providerId);
+    if (existing) return existing;
+    let announce!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      announce = resolve;
+    });
+    const entry = { ready, announce };
+    this.spareReady.set(providerId, entry);
+    return entry;
+  }
+
+  /**
+   * Publish the project's own command files alongside whatever the agent sent.
+   *
+   * Merged rather than used only on silence: a command file is something the
+   * user wrote in *this* project a moment ago, and an agent that enumerated its
+   * built-ins at startup may not have noticed it. The agent's own entry wins on
+   * a name collision, since only it knows what its built-in actually does.
+   *
+   * Emitted as the same `available_commands_update` an agent would send, so
+   * clients keep one path for commands rather than a second, special one.
+   *
+   * This is where the workspace is real. The capability probe runs from the
+   * daemon's cwd — `/` under launchd, so `resolveWorkspace()` gives home — and
+   * therefore has no project to read.
+   */
+  private async announceDiskCommands(
+    session: ActiveSession,
+    provider: LoadedProvider,
+    cwd: string,
+  ) {
+    const dirs = provider.manifest.pew.commandDirs;
+    if (dirs.length === 0) return;
+
+    const advertised = session.handle?.availableCommands ?? [];
+    const known = new Set(advertised.map((command) => command.name));
+    const fromDisk = (await readCommandDirs(dirs, cwd)).filter(
+      (command) => !known.has(command.name),
+    );
+    if (fromDisk.length === 0) return;
+
+    const commands = [...advertised, ...fromDisk];
+
+    // The agent's own envelope, verbatim: the app reads `payload.update`, and a
+    // bare update here would be a second shape it had to learn.
+    this.record(session, {
+      sessionId: session.handle?.sessionId,
+      update: {
+        sessionUpdate: "available_commands_update",
+        availableCommands: commands,
+      },
+    });
+  }
+
+  /** Wait only for a warm process, never for the history probe around it. */
+  private async awaitSpare(providerId: string): Promise<void> {
+    await this.spareReady.get(providerId)?.ready;
   }
 
   private stashSpare(providerId: string, handle: AcpSessionHandle) {
@@ -168,8 +291,9 @@ export class Daemon {
     let spare = this.takeSpare(provider.manifest.id);
     if (!spare) {
       // Join the background boot started alongside a disk-cached history list
-      // instead of spawning a duplicate process on tap.
-      await this.warming.get(provider.manifest.id)?.catch(() => {});
+      // instead of spawning a duplicate process on tap. Only the process is
+      // waited for: the probe's own `session/list` keeps running behind this.
+      await this.awaitSpare(provider.manifest.id);
       spare = this.takeSpare(provider.manifest.id);
     }
     if (spare) {
@@ -191,9 +315,46 @@ export class Daemon {
     }
     loadingDuplicateReplay = false;
 
+    // New conversations only. A resumed one already carries the settings it was
+    // held at, and overwriting those would silently rewrite a conversation
+    // started at the desk to match whatever was last picked on the phone.
+    if (!loadSessionId) await this.applyConfigPrefs(session, provider.manifest.id);
+    await this.announceDiskCommands(session, provider, cwd);
+
     // The spare is spent; quietly boot the next one so the session after this
     // opens instantly too. Failure here only means that open is cold again.
     void this.warmProvider(provider.manifest.id);
+  }
+
+  /**
+   * Re-apply the selectors this user last chose for the provider.
+   *
+   * ACP hands every new session the agent's own defaults, so without this,
+   * picking a model and starting the next conversation silently reverts it.
+   * Awaited, so `session.started` already carries the restored values and the
+   * pills never show the default for a frame first.
+   *
+   * New sessions only — see the call site.
+   */
+  private async applyConfigPrefs(session: ActiveSession, providerId: string) {
+    const handle = session.handle;
+    if (!handle) return;
+    const prefs = await readConfigPrefs(providerId);
+
+    for (const [configId, value] of Object.entries(prefs)) {
+      const option = handle.configOptions.find((o) => o.id === configId);
+      // Only what this session actually offers, and only when it differs: an
+      // agent that dropped an option between versions must not break the
+      // session, and re-sending the current value is a round trip for nothing.
+      if (!option || option.currentValue === value) continue;
+      try {
+        await handle.setConfigOption(configId, value);
+      } catch (error) {
+        // A stale preference is not worth failing a session over. The agent
+        // keeps its default and the user can pick again.
+        console.error(`[${providerId}] could not restore '${configId}':`, error);
+      }
+    }
   }
 
   constructor(
@@ -306,6 +467,21 @@ export class Daemon {
     session.streamingReplay = false;
   }
 
+  /**
+   * The project a new session should open in, when the client named none.
+   *
+   * The agent's own most recent workspace, which is very likely the one the
+   * user was last at their desk in. Without this a phone-started session lands
+   * in the home directory: no project files, no project commands, and an agent
+   * writing its state somewhere the user never chose.
+   */
+  async lastWorkspace(providerId: string): Promise<string | undefined> {
+    // The probe is already resolved by the time a session starts, so this is a
+    // map lookup in practice rather than a wait on the agent.
+    const probed = await this.probes.get(providerId);
+    return probed?.sessions[0]?.cwd ?? (await readProbeCache(providerId))?.sessions[0]?.cwd;
+  }
+
   async startSession(providerId: string, cwd: string): Promise<string> {
     const provider = this.providers.find((p) => p.manifest.id === providerId);
     if (!provider) throw new Error(`Unknown provider '${providerId}'`);
@@ -319,6 +495,7 @@ export class Daemon {
     const session: ActiveSession = {
       handle: undefined,
       log,
+      providerId,
       live: false,
       ready: Promise.resolve(),
     };
@@ -363,6 +540,11 @@ export class Daemon {
     const provider = this.providers.find((p) => p.manifest.id === providerId);
     if (!provider || !isAvailable(provider)) return EMPTY_CAPABILITIES;
 
+    // Armed here, while still synchronous with the call: everything below is
+    // behind an await, and a tap landing in that window must find a promise to
+    // wait on rather than spawning a second process next to this one.
+    const { announce: announceSpare } = this.armSpare(providerId);
+
     // A spawn plus session/list is seconds per provider. Serve the last good
     // answer from disk instantly and refresh it in the background instead of
     // making the drawer wait on the agent's boot time.
@@ -379,37 +561,85 @@ export class Daemon {
         // The first tap can then adopt this process instead of starting cold.
         void this.warmProvider(providerId);
         const served = Promise.resolve<ProviderCapabilities>({
-          configOptions: disk.configOptions,
+          // Same correction as the live probe: the cache holds whatever the
+          // agent reported when it was written, which predates any preference
+          // chosen since.
+          configOptions: withStoredPrefs(disk.configOptions, await readConfigPrefs(providerId)),
           sessions: disk.sessions,
           canResume: disk.canResume,
+          // A cache written by an older daemon predates commands entirely; the
+          // background refresh below fills them in.
+          commands: disk.commands ?? [],
         });
         this.probes.set(providerId, served);
         return served;
       }
     }
 
+    // `announceSpare` settles the moment the process answers, so a tap can
+    // adopt it while the history probe below is still reading the disk. It only
+    // ever resolves: a failed boot leaves no spare, which the caller already
+    // handles by spawning cold, and rejecting would be an unhandled rejection
+    // whenever nobody happened to be waiting.
+
     const probe = (async (): Promise<ProviderCapabilities> => {
       let handle: AcpSessionHandle | undefined;
       try {
+        const workspace = resolveWorkspace();
         handle = await connectProvider({
           provider,
           // Same rule as session.start: under launchd cwd is `/`, which is not a
           // project directory. Probing from it hid every agent's sessions.
-          cwd: resolveWorkspace(),
+          cwd: workspace,
           // A probe session is never shown, so its output goes nowhere.
           onUpdate: () => {},
           onPermissionRequest: () => {},
         });
-        const capabilities: ProviderCapabilities = {
-          configOptions: handle.configOptions,
-          // The agent's own history, including everything started at the desk.
-          sessions: await handle.listSessions(),
-          canResume: handle.canLoadSession,
-        };
-        // Keep the booted process as the warm spare: the next session open
-        // adopts it instead of paying the multi-second spawn again.
-        this.stashSpare(providerId, handle);
+        const booted = handle;
+        // Read once, before the awaits below, so the reply describes the same
+        // settings the session this probe warms will actually open with.
+        const storedPrefs = await readConfigPrefs(providerId);
+        // Published before the history below, which is the slow half: listing
+        // sessions and counting each one's messages is seconds of disk work,
+        // and a new conversation needs none of it. Whoever adopts this calls
+        // `session/new` on the same process; `listSessions` does not touch the
+        // adopted session, so the two can safely overlap.
+        this.stashSpare(providerId, booted);
         handle = undefined;
+        announceSpare();
+
+        // Needed twice below, and `listSessions` is the slow call: once only.
+        const sessions = await booted.listSessions();
+
+        const capabilities: ProviderCapabilities = {
+          // The user's remembered choices, not the agent's defaults. The probe
+          // session is a throwaway that never had preferences applied, so
+          // reporting its own values showed "Default" in the pills right up
+          // until the first prompt created a real session and corrected them.
+          configOptions: withStoredPrefs(booted.configOptions, storedPrefs),
+          // The agent's own history, including everything started at the desk.
+          sessions,
+          canResume: booted.canLoadSession,
+          // Read after `listSessions` deliberately. Commands arrive as a
+          // notification rather than in `session/new`'s result, so reading them
+          // the instant the session opened would find none; that round trip is
+          // the window they land in.
+          //
+          // Falling back to the project's own files when the agent sent none:
+          // some agents ship no such notification at all, and their commands
+          // would otherwise be invisible. The agent always wins when it does
+          // answer, since only it knows its built-ins.
+          commands: booted.availableCommands.length
+            ? booted.availableCommands
+            : await readCommandDirs(
+                provider.manifest.pew.commandDirs,
+                // The agent's own most recent project, not the daemon's cwd.
+                // Under launchd that cwd is `/` and `resolveWorkspace()` falls
+                // back to home, which holds no project's commands — so the
+                // fallback would find nothing for every agent that needs it.
+                sessions[0]?.cwd ?? workspace,
+              ),
+        };
         // Persist so the next ask — and the next daemon boot — answers from
         // disk instead of spawning again.
         void writeProbeCache(providerId, capabilities).catch(() => {});
@@ -419,6 +649,8 @@ export class Daemon {
         // exists, and failing here must not stop the user starting a real one.
         console.error(`[${providerId}] capability probe failed:`, error);
         this.probes.delete(providerId);
+        // Releases anyone waiting on the boot. Harmless once already announced.
+        announceSpare();
         return EMPTY_CAPABILITIES;
       } finally {
         handle?.close();
@@ -439,6 +671,7 @@ export class Daemon {
     const session: ActiveSession = {
       handle: undefined,
       log,
+      providerId,
       live: false,
       ready: Promise.resolve(),
     };
@@ -458,10 +691,26 @@ export class Daemon {
     }
   }
 
+  /**
+   * Record a choice made before any session exists.
+   *
+   * The empty state offers the same selectors a live conversation does, but a
+   * session is only created by the first prompt — so there is nothing to set
+   * the option on yet. Storing it here is what makes the pill stick: the
+   * session that prompt creates applies it on connect.
+   */
+  async rememberConfigOption(providerId: string, configId: string, value: string | boolean) {
+    await writeConfigPref(providerId, configId, value);
+  }
+
   async setConfigOption(sessionId: string, configId: string, value: string | boolean) {
     const session = this.require(sessionId);
     await session.ready;
-    return session.handle!.setConfigOption(configId, value);
+    const updated = await session.handle!.setConfigOption(configId, value);
+    // Only after the agent accepted it: remembering a rejected choice would
+    // reapply a broken setting to every session that follows.
+    void writeConfigPref(session.providerId, configId, value).catch(() => {});
+    return updated;
   }
 
   async prompt(sessionId: string, text: string) {
