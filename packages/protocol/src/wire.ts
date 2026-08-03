@@ -114,6 +114,25 @@ export const AgentSession = z.object({
   messageCount: z.number().int().nonnegative().optional(),
 });
 
+/**
+ * A project the agent has worked in, derived from its stored sessions.
+ *
+ * The drawer's history is capped at the newest conversations, so it is not a
+ * list of projects: a busy week in one repo hides every other. This is folded
+ * from the agent's *whole* `session/list` instead, which is why it carries its
+ * own counts and its own last-activity stamp.
+ */
+export const AgentProject = z.object({
+  /** Absolute path, and the identity of the project everywhere. */
+  path: z.string(),
+  /** Last path segment: the project as people say it. */
+  name: z.string(),
+  /** How many stored conversations live in it. */
+  sessions: z.number().int().nonnegative(),
+  /** ISO 8601 of the newest of those, when the agent dates them. */
+  updatedAt: z.string().optional(),
+});
+
 /** One slash command an agent offers, e.g. from `.claude/commands`. */
 export const SlashCommand = z.object({
   name: z.string(),
@@ -150,6 +169,37 @@ export const ProviderCapabilities = z.object({
    * rather than being a fixed property of the provider.
    */
   commands: z.array(SlashCommand).optional(),
+  /**
+   * Every project this agent holds history for, newest first.
+   *
+   * Optional so an older daemon still validates; the app then falls back to
+   * the projects it can see in `sessions`.
+   */
+  projects: z.array(AgentProject).optional(),
+});
+
+/**
+ * App -> daemon. The agent's conversations in one project.
+ *
+ * `sessions` above is the newest handful across everything, which is the wrong
+ * list once a project is chosen — a repo touched last month has none of its
+ * conversations in it. The daemon answers from the full list it already read.
+ */
+export const ProviderSessionsRequest = z.object({
+  t: z.literal("provider.sessions"),
+  providerId: z.string(),
+  /** Absolute project path, as given in `AgentProject.path`. */
+  cwd: z.string(),
+});
+
+/** Daemon -> app. Answer to `provider.sessions`. */
+export const ProviderSessions = z.object({
+  t: z.literal("provider.sessions"),
+  providerId: z.string(),
+  cwd: z.string(),
+  sessions: z.array(AgentSession),
+  /** Same gate as capabilities: rows that cannot be reopened are not listed. */
+  canResume: z.boolean(),
 });
 
 /**
@@ -281,10 +331,19 @@ export const WorkspaceRequest = z.object({
   sessionId: z.string().optional(),
   /**
    * Fallback before a session exists: the agent's own last project, which is
-   * where the daemon would open one. No path is accepted from the client — the
-   * daemon resolves the directory itself.
+   * where the daemon would open one. No arbitrary path is accepted from the
+   * client — the daemon resolves the directory itself.
    */
   providerId: z.string().optional(),
+  /**
+   * A project the user picked, so the composer can name where the next prompt
+   * will land before any session exists.
+   *
+   * Honoured only when it is one of the projects this daemon itself announced
+   * for that provider; anything else falls back as if it were absent, so this
+   * cannot be used to ask whether some other directory exists.
+   */
+  cwd: z.string().optional(),
 });
 
 /** Daemon -> app. The answer to `workspace.status`. */
@@ -350,6 +409,7 @@ export const ErrorMessage = z.object({
 export const ClientMessage = z.discriminatedUnion("t", [
   Hello,
   ProviderCapabilitiesRequest,
+  ProviderSessionsRequest,
   SetProviderConfig,
   StartSession,
   ResumeSession,
@@ -364,6 +424,7 @@ export const ServerMessage = z.discriminatedUnion("t", [
   Ready,
   ProviderAnnounce,
   ProviderCapabilities,
+  ProviderSessions,
   SessionEvent,
   SessionIdle,
   Replay,
@@ -380,6 +441,9 @@ export type AgentSession = z.output<typeof AgentSession>;
 export type ResumeSession = z.output<typeof ResumeSession>;
 export type ProviderCapabilitiesRequest = z.output<typeof ProviderCapabilitiesRequest>;
 export type ProviderCapabilities = z.output<typeof ProviderCapabilities>;
+export type AgentProject = z.output<typeof AgentProject>;
+export type ProviderSessionsRequest = z.output<typeof ProviderSessionsRequest>;
+export type ProviderSessions = z.output<typeof ProviderSessions>;
 export type StartSession = z.output<typeof StartSession>;
 export type PromptAttachment = z.output<typeof PromptAttachment>;
 export type Prompt = z.output<typeof Prompt>;

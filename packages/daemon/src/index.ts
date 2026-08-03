@@ -22,6 +22,9 @@ import { SessionLog } from "./session/log.js";
 import { discardAttachments, storeAttachments } from "./attachments.js";
 import { folderName, resolveWorkspace } from "./workspace.js";
 import { readProbeCache, writeProbeCache } from "./probe-cache.js";
+import { hydrateMessageCounts } from "./acp/messageCounts.js";
+import { sessionsInProject, type AgentProject } from "./projects.js";
+import { SESSION_HISTORY_LIMIT } from "./session-history.js";
 import { readConfigPrefs, writeConfigPref, type ConfigPrefs } from "./config-prefs.js";
 import { readSessionPrefs, writeSessionPrefs } from "./session-prefs.js";
 import { readCommandDirs } from "./commands/from-disk.js";
@@ -73,6 +76,14 @@ export interface ProviderCapabilities {
    * empty state — before the first prompt has created a session to ask.
    */
   commands?: AvailableCommand[];
+  /**
+   * Every project the agent holds history for, newest first.
+   *
+   * Folded from the whole session list rather than the capped `sessions`
+   * above, so the phone's project menu is complete even when a single repo
+   * fills the recent history.
+   */
+  projects?: AgentProject[];
 }
 
 /**
@@ -102,7 +113,16 @@ const EMPTY_CAPABILITIES: ProviderCapabilities = {
   sessions: [],
   canResume: false,
   commands: [],
+  projects: [],
 };
+
+/**
+ * How many of a project's conversations the phone is offered.
+ *
+ * The same window the drawer already applies to recent history: a project is
+ * chosen to get back to work in it, not to browse a year of archives.
+ */
+const PROJECT_SESSION_LIMIT = SESSION_HISTORY_LIMIT;
 
 const REPLAY_BATCH_SIZE = 64;
 
@@ -114,6 +134,15 @@ export class Daemon {
   // conversations it already has on disk. Keyed by provider id, and stored in
   // flight rather than resolved so concurrent asks share one spawn.
   private readonly probes = new Map<string, Promise<ProviderCapabilities>>();
+  /**
+   * Every session a provider reported, uncapped, keyed by provider id.
+   *
+   * The app is only ever sent the newest handful, because message counts cost
+   * a disk read each. Choosing a project then needs a *different* handful —
+   * one repo's newest — and this is what answers that without spawning the
+   * agent again.
+   */
+  private readonly projectHistory = new Map<string, AgentSession[]>();
 
   /**
    * One already-booted agent process per provider, left over from the last
@@ -647,6 +676,39 @@ export class Daemon {
   }
 
   /**
+   * Is this one of the projects this daemon announced for that agent?
+   *
+   * The gate on accepting a path from a client at all: it returns only strings
+   * this process already published, so a caller cannot use it to ask whether
+   * some other directory on the machine exists.
+   */
+  knownProject(providerId: string, cwd: string): string | undefined {
+    const known = this.projectHistory.get(providerId);
+    return known?.some((session) => session.cwd === cwd) ? cwd : undefined;
+  }
+
+  /**
+   * The agent's own conversations in one project, newest first.
+   *
+   * Counts are hydrated here rather than up front: doing every project at probe
+   * time is hundreds of file reads for the one the user will actually pick.
+   * Agents without a local index answer without counts, which the drawer omits.
+   */
+  async sessionsForProject(providerId: string, cwd: string): Promise<AgentSession[]> {
+    const known = this.projectHistory.get(providerId);
+    // No probe has landed yet. The app asked for capabilities first, so the
+    // answer is on its way; an empty list here is corrected by that reply
+    // rather than by a second spawn started from a menu tap.
+    if (!known) return [];
+    // Copied before hydrating: `hydrateMessageCounts` writes counts into the
+    // objects it is given, and these are the cached list itself. Mutating them
+    // would leave counts on rows the next probe overwrites wholesale.
+    const picked = sessionsInProject(known, cwd, PROJECT_SESSION_LIMIT).map((s) => ({ ...s }));
+    await hydrateMessageCounts(providerId, picked);
+    return picked;
+  }
+
+  /**
    * Ask a provider what it currently offers, without starting a conversation.
    *
    * Selectors are a property of a live session, so the only honest way to learn
@@ -688,6 +750,9 @@ export class Daemon {
         // Return disk history immediately while booting the matching provider.
         // The first tap can then adopt this process instead of starting cold.
         void this.warmProvider(providerId);
+        // Survives a daemon restart, so the first project chosen after a reboot
+        // is answered from disk rather than waiting on the background reprobe.
+        if (disk.allSessions?.length) this.projectHistory.set(providerId, disk.allSessions);
         const served = Promise.resolve<ProviderCapabilities>({
           // Same correction as the live probe: the cache holds whatever the
           // agent reported when it was written, which predates any preference
@@ -695,6 +760,10 @@ export class Daemon {
           configOptions: withStoredPrefs(disk.configOptions, await readConfigPrefs(providerId)),
           sessions: disk.sessions,
           canResume: disk.canResume,
+          // A cache from an older daemon has neither; the background refresh
+          // below fills both in, and until then the app falls back to the
+          // projects it can see in the history it holds.
+          projects: disk.projects ?? [],
           // A cache written by an older daemon predates commands entirely; the
           // background refresh below fills them in.
           commands: disk.commands ?? [],
@@ -736,8 +805,14 @@ export class Daemon {
         handle = undefined;
         announceSpare();
 
-        // Needed twice below, and `listSessions` is the slow call: once only.
-        const sessions = await booted.listSessions();
+        // Needed several times below, and `listSessions` is the slow call:
+        // once only.
+        const { sessions, projects, all } = await booted.listSessions();
+        // Held so choosing a project can be answered from memory. The agent was
+        // already asked for every session it has; asking again per project
+        // would pay the spawn and the list a second time for data this process
+        // is already holding.
+        this.projectHistory.set(providerId, all);
 
         const capabilities: ProviderCapabilities = {
           // The user's remembered choices, not the agent's defaults. The probe
@@ -748,6 +823,9 @@ export class Daemon {
           // The agent's own history, including everything started at the desk.
           sessions,
           canResume: booted.canLoadSession,
+          // The complete set of places this agent has worked, which the capped
+          // `sessions` above cannot describe.
+          projects,
           // Read after `listSessions` deliberately. Commands arrive as a
           // notification rather than in `session/new`'s result, so reading them
           // the instant the session opened would find none; that round trip is
@@ -770,7 +848,7 @@ export class Daemon {
         };
         // Persist so the next ask — and the next daemon boot — answers from
         // disk instead of spawning again.
-        void writeProbeCache(providerId, capabilities).catch(() => {});
+        void writeProbeCache(providerId, capabilities, process.env, all).catch(() => {});
         return capabilities;
       } catch (error) {
         // A probe is best-effort: this is what the app shows before a session

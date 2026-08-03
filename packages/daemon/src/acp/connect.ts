@@ -13,8 +13,8 @@ import { humanError } from "../errors.js";
 import type { StoredAttachment } from "../attachments.js";
 import { promptBlocks, type PromptCapabilities } from "./promptBlocks.js";
 import { SESSION_HISTORY_LIMIT } from "../session-history.js";
-import { hydrateClaudeMessageCounts } from "./claude-history.js";
-import { hydrateGgCoderMessageCounts } from "./ggcoder-history.js";
+import { hydrateMessageCounts } from "./messageCounts.js";
+import { foldProjects, type AgentProject } from "../projects.js";
 
 /**
  * A session-level selector advertised by the agent: model, thinking level, mode.
@@ -125,6 +125,21 @@ export interface AgentSession {
   messageCount?: number;
 }
 
+/**
+ * What one `session/list` call yields.
+ *
+ * Three views of the same answer because they serve different screens: the
+ * capped `sessions` are the drawer's recent history (the only ones whose
+ * message counts are worth reading from disk up front), `projects` is the
+ * complete set of places this agent has worked, and `all` is kept so choosing
+ * one of those projects can be answered without asking the agent again.
+ */
+export interface AgentSessionList {
+  sessions: AgentSession[];
+  projects: AgentProject[];
+  all: AgentSession[];
+}
+
 /** A slash command the agent offers, as advertised over ACP. */
 export interface AvailableCommand {
   name: string;
@@ -174,7 +189,7 @@ export interface AcpSessionHandle {
    * Empty when the agent does not advertise `session/list` — not every agent
    * persists history, and asking one that doesn't is an error, not an empty list.
    */
-  listSessions(): Promise<AgentSession[]>;
+  listSessions(): Promise<AgentSessionList>;
   /**
    * Open another session on this same agent process.
    *
@@ -564,15 +579,15 @@ export async function connectProvider(options: ConnectOptions): Promise<AcpSessi
       exitHandler = adoptOptions.onExit;
     },
 
-    async listSessions() {
-      if (!canListSessions) return [];
+    async listSessions(): Promise<AgentSessionList> {
+      if (!canListSessions) return { sessions: [], projects: [], all: [] };
       const result = (await connection.agent.request("session/list", {})) as {
         sessions?: (AgentSession & { _meta?: { messageCount?: unknown } })[];
       };
       const listed = Array.isArray(result?.sessions) ? result.sessions : [];
       // ACP keeps agent-specific list data in `_meta`. Promote the one field the
       // drawer understands so it survives the typed daemon/app wire boundary.
-      const sessions: AgentSession[] = listed
+      const all: AgentSession[] = listed
         .map(({ _meta, ...session }) => {
           const messageCount = _meta?.messageCount;
           return {
@@ -584,18 +599,22 @@ export async function connectProvider(options: ConnectOptions): Promise<AcpSessi
               : {}),
           };
         })
-        // Newest first, then cap before hydrating counts. This turns a provider
-        // with 600 archived chats into 30 small local reads instead of 600.
-        .sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""))
-        .slice(0, SESSION_HISTORY_LIMIT);
+        // Newest first, so both the project fold and the cap below see the
+        // list in the order the drawer renders it.
+        .sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""));
+
+      // Folded from the uncapped list deliberately: the cap below is a
+      // recent-work window, and grouping *that* would offer only the projects
+      // the user has touched this week as if they were all that existed.
+      const projects = foldProjects(all);
+      // Capped before counts are hydrated. This turns a provider with 600
+      // archived chats into 30 small local reads instead of 600. The rows are
+      // shared with `all`, so the newest ones carry their counts either way.
+      const sessions = all.slice(0, SESSION_HISTORY_LIMIT);
 
       // Both agents have local indexes that are dramatically faster than
       // loading 30 transcripts one-by-one over ACP just to count visible rows.
-      if (provider.manifest.id === "claude-code") {
-        await hydrateClaudeMessageCounts(sessions);
-      } else if (provider.manifest.id === "ggcoder") {
-        await hydrateGgCoderMessageCounts(sessions);
-      }
+      await hydrateMessageCounts(provider.manifest.id, sessions);
 
       // Other older agents get the protocol-only fallback. Nothing is broadcast
       // and the phone still has not opened any of these sessions.
@@ -625,7 +644,7 @@ export async function connectProvider(options: ConnectOptions): Promise<AcpSessi
           }
         }
       }
-      return sessions;
+      return { sessions, projects, all };
     },
     async setConfigOption(configId: string, value: string | boolean) {
       try {

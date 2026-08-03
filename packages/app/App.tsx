@@ -56,6 +56,7 @@ import { applyCommand, type SlashCommand } from "./src/slashCommands";
 import { CircleButton, Pill } from "./src/ui/controls";
 import { haptics } from "./src/ui/haptics";
 import { Sidebar, DRAWER_WIDTH } from "./src/ui/Sidebar";
+import { projectsForProvider } from "./src/projects";
 import { ConfigPicker, summarise, valueName } from "./src/ui/ConfigPicker";
 import { useReducedMotion } from "./src/ui/useReducedMotion";
 import { ProgressiveBlur } from "./src/ui/ProgressiveBlur";
@@ -339,6 +340,21 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
   const active: Provider | undefined =
     daemon.providers.find((p) => p.id === daemon.effectiveProviderId) ??
     daemon.providers.find((p) => p.available);
+
+  // Projects the selected agent has worked in, and which one the drawer is
+  // narrowed to. Derived here rather than in the drawer so both the list and
+  // the empty state read from one answer.
+  const projects = useMemo(
+    () => projectsForProvider(daemon.projects[active?.id ?? ""], daemon.sessions, active?.id),
+    [daemon.projects, daemon.sessions, active?.id],
+  );
+  const selectedProjectPath = active ? daemon.projectPath[active.id] : undefined;
+  const selectProject = useCallback(
+    (path?: string) => {
+      if (active) daemon.selectProject(active.id, path);
+    },
+    [active?.id, daemon.selectProject],
+  );
 
   const inThread = daemon.turns.length > 0;
 
@@ -742,6 +758,11 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
         onSelectProvider={daemon.select}
         onOpenSession={openSession}
         onNewConversation={newConversation}
+        // Which project the history is narrowed to, and where the next
+        // conversation will open.
+        projects={projects}
+        selectedProjectPath={selectedProjectPath}
+        onSelectProject={selectProject}
         historyLoading={daemon.loadingSessions}
         reduceMotion={reduceMotion}
         machineLabel={pairing.label}
@@ -1164,6 +1185,11 @@ const styles = StyleSheet.create({
     bottom: "100%",
     marginBottom: theme.space(2),
     zIndex: 1,
+    // Opaque disc behind the glass. Every other glass control sits over the
+    // dock's blur; this one floats on the bare transcript, so without a fill
+    // the words it covers read straight through the arrow.
+    backgroundColor: theme.color.surfaceRaised,
+    borderRadius: theme.size.chip / 2,
   },
 
   // A narrow strip: wide enough to catch a deliberate edge swipe, too narrow to

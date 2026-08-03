@@ -98,6 +98,28 @@ export async function handleMessage(raw: string, ctx: HandlerContext): Promise<v
         break;
       }
 
+      case "provider.sessions": {
+        // One project's conversations. Answered as a `reply` rather than a
+        // broadcast: it is a menu choice on one phone, not a change to the
+        // session log every client shares.
+        if (!message.providerId || !message.cwd) {
+          throw new Error("providerId and cwd required");
+        }
+        const providerId = message.providerId;
+        const projectCwd = message.cwd;
+        const sessions = await daemon.sessionsForProject(providerId, projectCwd);
+        reply({
+          t: "provider.sessions",
+          providerId,
+          cwd: projectCwd,
+          sessions,
+          // These come from the same list the probe answered from, so they are
+          // reopenable on exactly the same terms.
+          canResume: (await daemon.probeProvider(providerId)).canResume,
+        });
+        break;
+      }
+
       case "session.resume": {
         // Reopen a conversation the agent already had on disk, including ones
         // this app never started.
@@ -275,8 +297,19 @@ export async function handleMessage(raw: string, ctx: HandlerContext): Promise<v
         // The directory comes from the session (or the provider's last
         // project), never from the message: a client-supplied path would let a
         // caller probe any directory on this machine for its existence.
+        //
+        // One exception, and it is not really one: a path this daemon itself
+        // announced as a project. The phone sends it back after the user picks
+        // that project, so the composer can name where the next prompt will
+        // land before a session exists. Nothing is learned by asking about a
+        // directory the answer already listed.
+        const chosen =
+          message.providerId && message.cwd
+            ? daemon.knownProject(message.providerId, message.cwd)
+            : undefined;
         const root =
           (message.sessionId ? daemon.sessionCwd(message.sessionId) : undefined) ??
+          chosen ??
           (message.providerId ? await daemon.lastWorkspace(message.providerId) : undefined) ??
           cwd;
         reply({

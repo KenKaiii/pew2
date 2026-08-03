@@ -33,6 +33,7 @@ import {
   readAvailableCommands,
   type SlashCommand,
 } from "./slashCommands";
+import type { WireProject } from "./projects";
 import {
   foldSessionEvents,
   isOptimistic,
@@ -203,6 +204,32 @@ interface State {
   loadingSession: boolean;
   /** Project and git state for the session on screen. Absent until asked. */
   workspace?: Workspace;
+  /**
+   * Every project each agent has worked in, keyed by provider id.
+   *
+   * Folded by the daemon from the agent's whole history, not from `sessions`:
+   * that list is capped at the newest conversations and so describes a week's
+   * work rather than the set of projects a user can return to.
+   */
+  projects: Record<string, WireProject[]>;
+  /**
+   * The project the drawer is narrowed to, per agent. Absent means all of
+   * them, which is where every agent starts.
+   *
+   * Per agent rather than one global choice: the projects belong to an agent,
+   * so switching apps and back must not carry a path the new agent has never
+   * opened — and must not silently forget the one you just picked either.
+   */
+  projectPath: Record<string, string>;
+  /**
+   * `providerId:cwd` of the project whose conversations are being fetched.
+   *
+   * In state rather than a ref because it decides between the skeleton and
+   * "No conversations in pew2 yet" — a ref would be read during a render
+   * nothing schedules, so the false empty state would show until the reply
+   * landed, which is the flash this exists to prevent.
+   */
+  loadingProject?: string;
 }
 
 /**
@@ -315,6 +342,8 @@ export function useDaemon(url: string, deviceId = "phone", options: DaemonOption
     activity: IDLE_ACTIVITY,
     loadingSessions: false,
     loadingSession: false,
+    projects: {},
+    projectPath: {},
   });
 
   // Not in State: this is a cache keyed by provider, not part of the session.
@@ -345,6 +374,10 @@ export function useDaemon(url: string, deviceId = "phone", options: DaemonOption
   // Mirrors activeProviderId for the same reason sessionRef exists: message
   // handlers must not read state inside an updater.
   const providerRef = useRef<string | undefined>(undefined);
+  // The chosen project per provider, mirrored out of state for the same reason
+  // `providerRef` exists: `start` must read the choice made moments ago, not
+  // the one captured when its callback was memoized.
+  const projectRef = useRef<Record<string, string>>({});
   // The message entered before a session existed — text and any files with it.
   // Sent as soon as the daemon confirms one, so the composer works straight
   // from the empty state.
@@ -361,6 +394,10 @@ export function useDaemon(url: string, deviceId = "phone", options: DaemonOption
   // Capability requests in flight, keyed by provider. One slow or broken agent
   // must not keep another provider's already-loaded history behind a skeleton.
   const pendingCapabilities = useRef(new Set<string>());
+  // Per-project session requests in flight, keyed by `providerId:cwd`, so
+  // choosing a project shows the loading skeleton rather than the empty state
+  // it is about to replace.
+  const pendingProjectSessions = useRef(new Set<string>());
   // Highest `seq` seen per session.
   //
   // This is what makes reconnecting gap-free. ACP does not replay messages
@@ -464,6 +501,10 @@ export function useDaemon(url: string, deviceId = "phone", options: DaemonOption
 
       ws.onopen = () => {
         attempts.current = 0;
+        // A request written to the socket that died is never answered, and its
+        // entry would hold the drawer in a skeleton forever. Dropping them here
+        // also lets the open project be asked for again.
+        pendingProjectSessions.current.clear();
         setState((s) => ({
           ...s,
           status: "online",
@@ -697,6 +738,16 @@ export function useDaemon(url: string, deviceId = "phone", options: DaemonOption
         if (message.t === "provider.capabilities") {
           pendingCapabilities.current.delete(message.providerId);
         }
+        if (message.t === "provider.sessions") {
+          pendingProjectSessions.current.delete(`${message.providerId}:${message.cwd}`);
+        }
+        // A daemon older than this app rejects `provider.sessions` outright, and
+        // the rejection names no request. Dropping every in-flight key is the
+        // safe read: the alternative is a set that never empties, so choosing
+        // that project again would be ignored for the life of the socket.
+        if (message.t === "error" && message.code === "unknown_message") {
+          pendingProjectSessions.current.clear();
+        }
 
         // Project and git state, answered per request. An answer for a
         // conversation the user has already left describes the wrong project,
@@ -760,7 +811,33 @@ export function useDaemon(url: string, deviceId = "phone", options: DaemonOption
               return {
                 ...prev,
                 sessions,
+                projects: message.providerId
+                  ? { ...prev.projects, [message.providerId]: message.projects ?? [] }
+                  : prev.projects,
                 loadingSessions: pendingCapabilities.current.size > 0,
+              };
+            }
+
+            case "provider.sessions": {
+              // One project's conversations, asked for when it was chosen. The
+              // capped history in `provider.capabilities` is the newest work
+              // across every project, so a project touched before that window
+              // has nothing in the list until this lands.
+              return {
+                ...prev,
+                sessions: mergeAgentSessions(
+                  prev.sessions,
+                  message.providerId,
+                  message.sessions,
+                  message.canResume === true,
+                ),
+                // Cleared only by the answer it was set for: a reply for a
+                // project the user has already moved on from must not end the
+                // skeleton over the one they are waiting on.
+                loadingProject:
+                  prev.loadingProject === `${message.providerId}:${message.cwd}`
+                    ? undefined
+                    : prev.loadingProject,
               };
             }
 
@@ -936,7 +1013,17 @@ export function useDaemon(url: string, deviceId = "phone", options: DaemonOption
               // into the transcript and clear `busy` mid-stream, killing the
               // spinner on a turn that is still running. The bar simply stays
               // empty until that daemon is updated.
-              if (message.code === "unknown_message") return prev;
+              //
+              // One thing must still be undone: a `provider.sessions` this
+              // daemon cannot answer would otherwise leave the drawer on its
+              // skeleton forever — an endless spinner over the project whose
+              // conversations are the one thing an old daemon cannot list.
+              // Falling back to the history already held is the honest state.
+              if (message.code === "unknown_message") {
+                return prev.loadingProject === undefined
+                  ? prev
+                  : { ...prev, loadingProject: undefined };
+              }
 
               // Agents usually stream a failure as message text and then reject
               // the turn, so the same sentence arrives twice. Promote the copy
@@ -1052,7 +1139,10 @@ export function useDaemon(url: string, deviceId = "phone", options: DaemonOption
       ) => {
         const started = Date.now();
         queued.current = initialText ? { text: initialText, attachments } : undefined;
-        post({ t: "session.start", providerId });
+        // A chosen project is where this conversation opens. Without it the
+        // daemon falls back to the agent's last workspace, which is the whole
+        // reason picking a project from the phone was impossible before.
+        post({ t: "session.start", providerId, cwd: projectRef.current[providerId] });
         if (!initialText) return;
         // Spawning the agent and its ACP handshake take seconds; without a local
         // turn the screen would sit empty and look like the send did nothing.
@@ -1272,6 +1362,38 @@ export function useDaemon(url: string, deviceId = "phone", options: DaemonOption
         }));
       },
 
+      /**
+       * Narrow the drawer to one project, and start the next conversation in
+       * it. `path` undefined is "all projects", the state every agent opens in.
+       *
+       * Asks the daemon for that project's conversations as well as filtering
+       * what is already here: the history this client holds is the newest work
+       * across every project, so a project last touched a month ago has none
+       * of its own rows in it.
+       */
+      selectProject: (providerId: string, path?: string) => {
+        if (path) projectRef.current = { ...projectRef.current, [providerId]: path };
+        else {
+          const { [providerId]: _dropped, ...rest } = projectRef.current;
+          projectRef.current = rest;
+        }
+        setState((s) => ({
+          ...s,
+          projectPath: path
+            ? { ...s.projectPath, [providerId]: path }
+            : Object.fromEntries(
+                Object.entries(s.projectPath).filter(([id]) => id !== providerId),
+              ),
+          // Any fetch still in flight is for the project just left, so its
+          // skeleton no longer describes this list. Back to "all projects"
+          // especially: nothing is being fetched at all, and leaving this set
+          // would hold the drawer in a skeleton over history it already has.
+          loadingProject: undefined,
+        }));
+        // The request itself is an effect below, so a project chosen while
+        // offline is still asked for the moment the socket comes back.
+      },
+
       /** Choose which agent the composer targets. Ends any open session. */
       select: (providerId: string) => {
         sessionRef.current = undefined;
@@ -1349,8 +1471,18 @@ export function useDaemon(url: string, deviceId = "phone", options: DaemonOption
       t: "workspace.status",
       sessionId: state.sessionId,
       providerId: workspaceProviderId,
+      // Before a session exists this is what the context row describes: the
+      // project the next prompt will open in, rather than whichever one the
+      // agent happened to use last.
+      cwd: workspaceProviderId ? state.projectPath[workspaceProviderId] : undefined,
     });
-  }, [post, state.status, state.sessionId, workspaceProviderId]);
+  }, [
+    post,
+    state.status,
+    state.sessionId,
+    workspaceProviderId,
+    workspaceProviderId ? state.projectPath[workspaceProviderId] : undefined,
+  ]);
 
   // Fall back to the last selectors this agent advertised, so the model picker
   // is available on an empty screen instead of only mid-conversation.
@@ -1370,8 +1502,34 @@ export function useDaemon(url: string, deviceId = "phone", options: DaemonOption
       ? state.commands
       : (effectiveProviderId ? knownCommands[effectiveProviderId] : undefined) ?? [];
   const loadingSessions = effectiveProviderId
-    ? pendingCapabilities.current.has(effectiveProviderId)
+    ? pendingCapabilities.current.has(effectiveProviderId) ||
+      state.loadingProject !== undefined
     : false;
+
+  // Fetch the chosen project's conversations.
+  //
+  // An effect rather than part of `selectProject` so the one rule covers a
+  // reconnect too: the socket dies on every backgrounding, and a request
+  // written to the dead one is never answered.
+  const openProjectPath = effectiveProviderId
+    ? state.projectPath[effectiveProviderId]
+    : undefined;
+  useEffect(() => {
+    if (state.status !== "online" || !effectiveProviderId || !openProjectPath) return;
+    const key = `${effectiveProviderId}:${openProjectPath}`;
+    if (pendingProjectSessions.current.has(key)) return;
+    pendingProjectSessions.current.add(key);
+    const sent = post({
+      t: "provider.sessions",
+      providerId: effectiveProviderId,
+      cwd: openProjectPath,
+    });
+    if (!sent) {
+      pendingProjectSessions.current.delete(key);
+      return;
+    }
+    setState((s) => ({ ...s, loadingProject: key }));
+  }, [post, state.status, effectiveProviderId, openProjectPath]);
 
   return {
     ...state,

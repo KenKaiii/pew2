@@ -79,6 +79,71 @@ test("cached history is capped at the 30 newest sessions", async () => {
   expect(cached?.sessions.at(-1)?.sessionId).toBe("s29");
 });
 
+test("the project list survives the round trip, so the menu works on a cold start", async () => {
+  // The phone offers projects before any agent has been spawned this boot,
+  // which means it is this cache answering — same reason `commands` is here.
+  const env = await tempEnv();
+  await writeProbeCache(
+    "claude-code",
+    { ...capabilities, projects: [{ path: "/a/pew2", name: "pew2", sessions: 12 }] },
+    env,
+  );
+
+  expect((await readProbeCache("claude-code", env))?.projects).toEqual([
+    { path: "/a/pew2", name: "pew2", sessions: 12 },
+  ]);
+});
+
+test("the uncapped history is cached alongside the capped one", async () => {
+  // `sessions` is the drawer's recent-work window; choosing a project needs a
+  // different slice, so the whole list is kept — past the 30-row cap.
+  const env = await tempEnv();
+  const all = Array.from({ length: 40 }, (_, index) => ({
+    sessionId: `s${index}`,
+    cwd: index % 2 === 0 ? "/a/pew2" : "/a/site",
+    title: `Session ${index}`,
+    messageCount: index,
+  }));
+  await writeProbeCache("ggcoder", capabilities, env, all);
+
+  const cached = await readProbeCache("ggcoder", env);
+  expect(cached?.sessions).toHaveLength(1);
+  expect(cached?.allSessions).toHaveLength(40);
+  // Counts are dropped deliberately: they are read per project, on demand, so
+  // caching them would pin a number that goes stale the next time the agent is
+  // used at the desk.
+  expect(cached?.allSessions?.[0]?.messageCount).toBeUndefined();
+  expect(cached?.allSessions?.[0]?.cwd).toBe("/a/pew2");
+});
+
+test("a pathological history is capped before it becomes a megabyte to parse", async () => {
+  const env = await tempEnv();
+  await writeProbeCache(
+    "ggcoder",
+    capabilities,
+    env,
+    Array.from({ length: 600 }, (_, index) => ({
+      sessionId: `s${index}`,
+      cwd: "/a/pew2",
+      title: `Session ${index}`,
+    })),
+  );
+
+  expect((await readProbeCache("ggcoder", env))?.allSessions).toHaveLength(500);
+});
+
+test("a cache written before projects existed still reads", async () => {
+  // Same contract as `commands`: an older daemon's file must not be a miss, or
+  // every provider reprobes on the first launch after an upgrade.
+  const env = await tempEnv();
+  await writeProbeCache("ggcoder", capabilities, env);
+
+  const cached = await readProbeCache("ggcoder", env);
+  expect(cached?.projects).toBeUndefined();
+  expect(cached?.allSessions).toBeUndefined();
+  expect(cached?.sessions).toHaveLength(1);
+});
+
 test("a missing or corrupt cache is a miss, never an error", async () => {
   const env = await tempEnv();
   expect(await readProbeCache("nobody", env)).toBeUndefined();

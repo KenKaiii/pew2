@@ -9,7 +9,7 @@
  * being covered, so the two surfaces read as one moving layout instead of a
  * modal layer. The panel itself is therefore static — App owns the motion.
  */
-import { memo, useEffect, useRef } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import {
   Alert,
   Animated,
@@ -33,6 +33,9 @@ import { HistorySkeleton } from "./Skeleton";
 import { orderProvidersByRecency } from "../providerRecency";
 import { formatHistoryMetadata } from "../historyMetadata";
 import { recentSessionsForProvider } from "../sessionHistory";
+import { ProjectSelect } from "./ProjectSelect";
+import { ProjectMenu } from "./ProjectMenu";
+import { sessionsInProject, type Project } from "../projects";
 import type { Provider, Session, Status } from "../useDaemon";
 
 export const DRAWER_WIDTH = Math.min(Dimensions.get("window").width * 0.88, 380);
@@ -46,6 +49,12 @@ interface SidebarProps {
   onSelectProvider: (id: string) => void;
   onOpenSession: (id: string) => void;
   onNewConversation: () => void;
+  /** Projects the selected agent has worked in, newest first. */
+  projects: Project[];
+  /** The chosen one, or undefined for all of them. */
+  selectedProjectPath?: string;
+  /** `undefined` clears the filter back to every project. */
+  onSelectProject: (path?: string) => void;
   /** Host and port, retained for accessible detail and the Forget confirmation. */
   machineLabel: string;
   /** True when reached via a relay, so it works away from home. */
@@ -232,6 +241,9 @@ function SidebarView({
   onSelectProvider,
   onOpenSession,
   onNewConversation,
+  projects,
+  selectedProjectPath,
+  onSelectProject,
   machineLabel,
   machineRemote,
   connectionStatus,
@@ -240,12 +252,34 @@ function SidebarView({
   reduceMotion = false,
 }: SidebarProps) {
   const insets = useSafeAreaInsets();
+  const [menuOpen, setMenuOpen] = useState(false);
+  // Measured rather than computed: the chip row above scrolls horizontally and
+  // the select row's own height comes from the type inside it, so the only
+  // honest place to hang the menu from is where the row actually ended up.
+  const [menuTop, setMenuTop] = useState(0);
+
+  // Closing the drawer, or switching app, ends the menu.
+  //
+  // The drawer is only translated off screen, never unmounted, so an open menu
+  // survives both and is waiting on top of the history the next time the drawer
+  // is pulled out. Switching app matters twice over: the projects underneath it
+  // belong to the agent, so the list would silently become another agent's
+  // while open.
+  useEffect(() => {
+    setMenuOpen(false);
+  }, [open, activeProviderId]);
 
   // Most recently used app first, so the daily driver is never off-screen
   // behind apps that were tried once.
   const orderedProviders = orderProvidersByRecency(providers, sessions);
 
-  const visible = recentSessionsForProvider(sessions, activeProviderId);
+  const selectedProject = projects.find((project) => project.path === selectedProjectPath);
+  // Narrowed before the recent-work cap, or a project's older conversations
+  // would be cut away by a window they were never in.
+  const visible = recentSessionsForProvider(
+    sessionsInProject(sessions, selectedProject),
+    activeProviderId,
+  );
   // Spoken only. The dot beside the title carries this at a glance; a screen
   // reader gets the sentence, including which computer it is about.
   const connectionLabel =
@@ -340,7 +374,24 @@ function SidebarView({
             ))}
           </ScrollView>
 
-          <Text style={styles.sectionLabel}>Chat history</Text>
+          {/* Under the apps, above the history: it belongs to the app chosen
+              above and it governs the list below. */}
+          <ProjectSelect
+            selected={selectedProject}
+            count={projects.length}
+            open={menuOpen}
+            onToggle={() => setMenuOpen((was) => !was)}
+            onLayout={(event) => {
+              const { y, height } = event.nativeEvent.layout;
+              setMenuTop(y + height);
+            }}
+          />
+
+          {/* "Latest chats", not "Chat history": the list is capped at the
+              newest conversations, and calling that history promises an archive
+              it does not have — the project selector above is what reaches the
+              rest. */}
+          <Text style={styles.sectionLabel}>Latest chats</Text>
 
           {/* A provider can hold hundreds of conversations. Rendering them
               all in a ScrollView was the stall when switching to a well-used
@@ -348,7 +399,7 @@ function SidebarView({
           <FlatList
             // Remount on app selection: this resets a previously scrolled list
             // to its newest session and gives each new row one clean entrance.
-            key={activeProviderId ?? "all-providers"}
+            key={`${activeProviderId ?? "all-providers"}:${selectedProjectPath ?? "all"}`}
             style={styles.sessions}
             contentContainerStyle={styles.sessionsContent}
             showsVerticalScrollIndicator={false}
@@ -364,7 +415,9 @@ function SidebarView({
                 <HistorySkeleton />
               ) : (
                 <Text style={styles.empty}>
-                  No conversations yet. Send a message to start one.
+                  {selectedProject
+                    ? `No conversations in ${selectedProject.name} yet. Send a message to start one there.`
+                    : "No conversations yet. Send a message to start one."}
                 </Text>
               )
             }
@@ -413,6 +466,21 @@ function SidebarView({
               <Text style={styles.machineAction}>Forget</Text>
             </Pressable>
           </View>
+
+          {/* Last child, so it paints over the history it drops across. Inside
+              the panel rather than over the whole screen: it is the drawer's
+              own menu, and the panel's clip keeps it off the conversation. */}
+          <ProjectMenu
+            visible={menuOpen}
+            projects={projects}
+            selectedPath={selectedProjectPath}
+            top={menuTop}
+            onSelect={(path) => {
+              onSelectProject(path);
+              setMenuOpen(false);
+            }}
+            onClose={() => setMenuOpen(false)}
+          />
       </View>
     </View>
   );
@@ -513,7 +581,7 @@ const styles = StyleSheet.create({
 
   sessions: { flex: 1 },
   // The row's own inset is subtracted from the list inset so session text lands
-  // on exactly the same left rail as the "Chat history" label, while the
+  // on exactly the same left rail as the "Latest chats" label, while the
   // selected-row highlight still extends past the text on both sides.
   sessionsContent: {
     paddingHorizontal: theme.gutter - theme.space(2),
