@@ -137,6 +137,9 @@ test("the scan does not follow a symlink out of the allowlist", async () => {
 
   const found = await discoverRepos({ roots });
   expect(found.map((entry) => entry.path)).not.toContain(join(elsewhere, "private-repo"));
+  // The repos inside home are still found: a containment check that refused
+  // everything would satisfy the assertion below without protecting anything.
+  expect(found.map((entry) => entry.path)).toContain(join(home, "code/api"));
   // And nothing at all from outside, however it was reached.
   expect(found.every((entry) => entry.path.startsWith(home))).toBe(true);
 });
