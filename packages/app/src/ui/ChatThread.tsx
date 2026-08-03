@@ -21,7 +21,7 @@ import {
 } from "react";
 import {
   Animated,
-  Platform,
+  Keyboard,
   StyleSheet,
   View,
   type NativeScrollEvent,
@@ -98,6 +98,23 @@ function ChatThreadView(
   // end" without re-running every time the answer changes.
   const atBottom = useRef(true);
 
+  // Put the keyboard away the moment the transcript is dragged.
+  //
+  // `keyboardDismissMode` alone is not enough here. iOS's "interactive" never
+  // fires at all: `useKeyboardLift` translates this pane to sit entirely above
+  // the keyboard, so the finger never enters the frame that drives it. And
+  // "on-drag" waits for the scroll to actually move content, which reads as the
+  // keyboard hanging on for the first part of the gesture. `onScrollBeginDrag`
+  // fires as soon as the pan is recognised, which is the "boom, gone" the
+  // gesture should feel like.
+  //
+  // `dismiss()` blurs the composer, so this is the same state as tapping away
+  // from the input rather than a second way of hiding the keyboard. It is a
+  // no-op when nothing is focused, so an ordinary scroll costs nothing.
+  const handleScrollBeginDrag = useCallback(() => {
+    Keyboard.dismiss();
+  }, []);
+
   const handleScroll = useCallback(
     (event: NativeSyntheticEvent<NativeScrollEvent>) => {
       const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
@@ -144,9 +161,28 @@ function ChatThreadView(
   const list = useRef<ChatThreadRef>(null);
   useImperativeHandle(ref, () => list.current as ChatThreadRef, []);
 
+  // Only on the way *up*, and never animated.
+  //
+  // A shrinking dock gives empty space back below the last message: nothing was
+  // hidden, so there is nothing to catch up to.
+  //
+  // Growth is the case that bites, because the dock also grows *as the keyboard
+  // leaves* — `typing` goes false on `keyboardWillHide` and the context row
+  // remounts into it. An animated `scrollToEnd` then runs its own curve across
+  // the keyboard's dismissal, and two animations of different durations landing
+  // at different times is the thread visibly re-seating itself. Unanimated, the
+  // offset changes in the same frame as the layout that caused it, so it reads
+  // as one motion. There is no lost information: the rows are already where the
+  // reader left them and only the slack below moves.
+  //
+  // Only ever felt at the bottom of the thread, since that is the one place
+  // this effect does anything at all.
+  const lastBottom = useRef(threadBottom);
   useEffect(() => {
-    if (!atBottom.current) return;
-    list.current?.scrollToEnd({ animated: true });
+    const grew = threadBottom > lastBottom.current;
+    lastBottom.current = threadBottom;
+    if (!grew || !atBottom.current) return;
+    list.current?.scrollToEnd({ animated: false });
   }, [threadBottom]);
 
   return (
@@ -165,10 +201,12 @@ function ChatThreadView(
       // every state of it is one body line tall, in the same place.
       ListFooterComponent={footer}
       ListFooterComponentStyle={footerStyle}
-      // Android supports only "none" and "on-drag"; passing iOS's "interactive"
-      // there degrades to never dismissing at all, so dragging the transcript
-      // would leave the keyboard up with no way down.
-      keyboardDismissMode={DISMISS_MODE}
+      // Kept beside the explicit dismiss above as the native backstop: it needs
+      // no JS, so a drag during a heavy streaming frame still puts the keyboard
+      // away. Whichever fires first wins and the other is a no-op. Never iOS's
+      // "interactive" — see `handleScrollBeginDrag`.
+      keyboardDismissMode="on-drag"
+      onScrollBeginDrag={handleScrollBeginDrag}
       keyboardShouldPersistTaps="handled"
       automaticallyAdjustsScrollIndicatorInsets={false}
       // The whole pane is lifted by one transform instead (see `useKeyboardLift`).
@@ -195,8 +233,6 @@ const MAINTAIN_POSITION = {
   startRenderingFromBottom: true,
   autoscrollToBottomThreshold: FOLLOW_THRESHOLD,
 } as const;
-
-const DISMISS_MODE = Platform.OS === "ios" ? "interactive" : "on-drag";
 
 // `key` where the turn has one: an optimistic prompt's `id` is replaced by the
 // server's when the echo lands, and keying on that would recycle the cell out

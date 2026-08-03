@@ -10,9 +10,17 @@
  * runs there. A top-level import would turn "dictation is unavailable" into a
  * red screen on launch that takes the whole app down with it. Instead
  * `speechAvailable()` answers false and the composer simply has no mic button.
+ *
+ * The `try` is not enough on its own, though. Expo Go *logs* the failure with
+ * `console.error` on its way to throwing, and in dev that is a LogBox error
+ * screen — indistinguishable from a real crash, and it was read as one. So the
+ * native side is probed with `requireOptionalNativeModule` first, which answers
+ * null instead of throwing, and the package's JS entry point (which resolves
+ * the native module at import time) is only reached when there is something to
+ * resolve. Expo Go now says nothing at all.
  */
 import { Platform } from "react-native";
-import type { EventSubscription } from "expo-modules-core";
+import { requireOptionalNativeModule, type EventSubscription } from "expo-modules-core";
 
 type SpeechModule = typeof import("expo-speech-recognition");
 
@@ -20,10 +28,17 @@ let cached: SpeechModule | null | undefined;
 
 function speechModule(): SpeechModule | null {
   if (cached !== undefined) return cached;
+  // The name the native side registers, which is not the package name.
+  if (!requireOptionalNativeModule("ExpoSpeechRecognition")) {
+    cached = null;
+    return cached;
+  }
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     cached = require("expo-speech-recognition") as SpeechModule;
   } catch {
+    // The probe passed, so this is not "missing": kept because a throw here
+    // would still take the composer down with it.
     cached = null;
   }
   return cached;
