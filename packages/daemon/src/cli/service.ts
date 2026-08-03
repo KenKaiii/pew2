@@ -14,6 +14,7 @@ import { homedir, platform } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
+import { logDir } from "../logs.js";
 
 export const LABEL = "dev.pew2.daemon";
 
@@ -39,9 +40,10 @@ export function plistPath(home = homedir()): string {
   return join(home, "Library", "LaunchAgents", `${LABEL}.plist`);
 }
 
-export function logDir(env: NodeJS.ProcessEnv = process.env): string {
-  return join(env.PEW2_HOME ?? join(homedir(), ".pew2"), "logs");
-}
+// Re-exported rather than redefined. The plist below and the daemon's own
+// rotation must resolve to the identical path, or rotation trims one file while
+// launchd goes on appending to another.
+export { logDir };
 
 /**
  * The daemon entry point, resolved from this file.

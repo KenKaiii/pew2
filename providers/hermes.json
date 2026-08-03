@@ -1,0 +1,19 @@
+{
+  "$schema": "../schemas/provider.schema.json",
+  "id": "hermes",
+  "name": "Hermes",
+  "version": "1.0.0",
+  "description": "Nous Research's Hermes Agent. Speaks ACP natively over stdio — no adapter process. Credentials come from ~/.hermes/.env, set up with `hermes model`.",
+  "distribution": {
+    "type": "command",
+    "command": "hermes",
+    "args": ["acp"]
+  },
+  "repository": "https://github.com/NousResearch/hermes-agent",
+  "authors": ["Nous Research"],
+  "license": "MIT",
+  "pew": {
+    "transport": "acp",
+    "color": "#6366f1"
+  }
+}

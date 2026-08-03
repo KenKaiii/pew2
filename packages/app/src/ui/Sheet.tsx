@@ -55,32 +55,68 @@ function SheetView({ visible, title, onClose, onBack, dismissLabel, children }: 
   // Kept mounted while animating out, then removed: an always-mounted overlay
   // would swallow every touch meant for the conversation behind it. Declared
   // with the other hooks, above any early return.
-  const mounted = useMountedWhileVisible(visible, progress);
+  const [mounted, setMounted] = useState(visible);
+  useEffect(() => {
+    if (visible) setMounted(true);
+  }, [visible]);
+
+  // The travel distance is the sheet's own height, and that is not known until
+  // it has been laid out once. Animating before then is what made the arrival
+  // look broken: the spring ran against an *estimated* height, `onLayout`
+  // reported the real one part-way through, and the sheet jumped by the
+  // difference — mid-flight, every first open.
+  //
+  // A boolean rather than the height itself, so that a sheet which resizes while
+  // open (a step changing panes) does not restart its entry animation.
+  const measured = height > 0;
 
   useEffect(() => {
+    if (!measured) {
+      // Closed again before it was ever laid out — a double tap, or a sheet
+      // dismissed by the same action that opened it. There is no animation to
+      // play and none will start, so unmount now: leaving it mounted would
+      // strand a full-screen scrim at zero opacity over the conversation,
+      // invisible and eating every touch.
+      if (!visible) setMounted(false);
+      return;
+    }
     if (reduceMotion) {
       progress.setValue(visible ? 1 : 0);
+      if (!visible) setMounted(false);
       return;
     }
     // A spring, not a duration. A sheet is a physical object arriving under the
     // thumb, and a fixed curve reads as a slide being played at you — the
     // travel is long enough here that the difference is the whole feel.
-    // Critically damped: it settles without a bounce, which on a list of
-    // commands would look like a toy rather than a control.
+    //
+    // Critically damped, and now actually so: `2 * sqrt(stiffness * mass)` is
+    // 30.6 for these values, and the 26 that used to be here left it underdamped
+    // enough to overshoot ~0.6%. On a sheet that rests flush against the bottom
+    // edge that overshoot is not a bounce, it is the card briefly lifting *off*
+    // the screen edge and showing a couple of points of daylight underneath it
+    // before settling back.
     const animation = Animated.spring(progress, {
       toValue: visible ? 1 : 0,
-      damping: 26,
+      damping: 31,
       stiffness: 260,
       mass: 0.9,
-      // The interpolations below are pixel offsets, so the default thresholds
-      // (tuned for unit-scale values) would settle a couple of points short.
+      // `progress` is unit-scale but drives a translation of the sheet's whole
+      // height, so the defaults — which are judged against the animated value
+      // itself — would call it settled while it was still several points short.
       restDisplacementThreshold: 0.001,
       restSpeedThreshold: 0.01,
       useNativeDriver: true,
     });
-    animation.start();
+    // Unmounted from the animation's own completion rather than by watching the
+    // value cross zero. A native-driven spring reports back to JS on its own
+    // schedule, so an exact-zero reading is not guaranteed to arrive — and if it
+    // never did, the sheet stayed mounted with a full-screen scrim over a
+    // conversation that then could not be tapped at all.
+    animation.start(({ finished }) => {
+      if (finished && !visible) setMounted(false);
+    });
     return () => animation.stop();
-  }, [visible, reduceMotion, progress]);
+  }, [visible, measured, reduceMotion, progress]);
 
   if (!mounted) return null;
 
@@ -112,14 +148,24 @@ function SheetView({ visible, title, onClose, onBack, dismissLabel, children }: 
           // the content clears the indicator while the surface still reaches the
           // physical edge.
           { paddingBottom: insets.bottom + theme.space(3) },
+          // Hidden for the one frame between mounting and being measured.
+          //
+          // That frame is laid out with an *estimated* height, which put the
+          // card partly on screen before the real measurement moved it back off
+          // and the spring started — a visible flash-and-snap on every first
+          // open. It still has to be laid out to be measured, so this hides it
+          // rather than skipping it.
+          { opacity: measured ? 1 : 0 },
           {
             transform: [
               {
                 translateY: progress.interpolate({
                   inputRange: [0, 1],
                   // Exactly its own height, since it rests flush on the edge.
-                  // Falls back to a generous estimate for the first frame,
-                  // before `onLayout` has reported.
+                  // Before the first layout this is a guess, but nothing is
+                  // animating yet and `progress` is pinned at 0 — so the sheet
+                  // simply waits off screen rather than travelling the wrong
+                  // distance and correcting itself in view.
                   outputRange: [height || SHEET_CARD_HEIGHT + theme.size.touch * 4, 0],
                 }),
               },
@@ -236,29 +282,6 @@ function CrossfadeIcon({ name }: { name: keyof typeof Ionicons.glyphMap }) {
       <Ionicons name={name} size={18} color={theme.color.text} />
     </Animated.View>
   );
-}
-
-/**
- * Mounted for as long as the sheet is on screen, including its exit.
- *
- * Unmounting on `visible === false` would cut the close animation; staying
- * mounted forever would put an invisible scrim over the conversation.
- */
-function useMountedWhileVisible(visible: boolean, progress: Animated.Value) {
-  const [mounted, setMounted] = useState(visible);
-
-  useEffect(() => {
-    if (visible) {
-      setMounted(true);
-      return;
-    }
-    const id = progress.addListener(({ value }) => {
-      if (value === 0) setMounted(false);
-    });
-    return () => progress.removeListener(id);
-  }, [visible, progress]);
-
-  return mounted;
 }
 
 const styles = StyleSheet.create({

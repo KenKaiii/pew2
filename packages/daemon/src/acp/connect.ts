@@ -252,6 +252,63 @@ export interface ConnectOptions {
    * resolves, which is how a phone picks up a thread started at the desk.
    */
   loadSessionId?: string;
+  /**
+   * How long to wait for the agent to answer `initialize`.
+   *
+   * Overridable mainly so tests do not have to wait out the real budget.
+   */
+  handshakeTimeoutMs?: number;
+}
+
+/**
+ * How long an agent may take to answer `initialize` before we give up.
+ *
+ * Deliberately generous. An `npx` provider downloads its package on first run,
+ * which is genuinely minutes on a slow link for a large agent, and killing a
+ * working install because it was cold would be the worse failure. This exists to
+ * catch the case that never ends — a corrupt npx cache, an agent prompting for
+ * login on stdin nobody is reading — not to make slow things fast.
+ */
+const HANDSHAKE_TIMEOUT_MS = 180_000;
+
+/**
+ * Marks a timeout, so it is not re-wrapped as a startup failure below.
+ *
+ * A shared constant rather than a literal in two places: the two failures give
+ * deliberately different advice — "it is stuck" versus "it died, here is what it
+ * said" — and rewording one copy would silently start reporting hung agents as
+ * crashed ones, pointing the user at a problem they never had.
+ */
+export const HANDSHAKE_TIMEOUT_MARKER = "did not respond to the ACP handshake";
+
+/**
+ * Reject with `onTimeout()` if `promise` has not settled in `ms`.
+ *
+ * The message is built lazily so it can describe what was on stderr by the time
+ * we gave up, rather than what was there when the wait started — which is
+ * usually nothing at all.
+ *
+ * The timer is cleared on both paths: an un-cleared timer holds the event loop
+ * open, which for a daemon means it never exits cleanly.
+ */
+export function withTimeout<T>(
+  promise: Promise<T>,
+  ms: number,
+  onTimeout: () => Error,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(onTimeout()), ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
 }
 
 /**
@@ -346,14 +403,27 @@ export async function connectProvider(options: ConnectOptions): Promise<AcpSessi
   let exitHandler = options.onExit;
   child.on("exit", (code, signal) => exitHandler?.(code, signal));
 
-  if (options.onStderr) {
+  // Always read stderr, even with no `onStderr` listener. An agent that fails to
+  // hand shake explains itself there and nowhere else — `npm error ENOENT` from a
+  // corrupt npx cache, or a login prompt — and without it the only thing to
+  // report is that nothing happened. Also drains the pipe: a child that fills
+  // its stderr buffer with nobody reading blocks forever, which is itself a way
+  // to hang the handshake.
+  const stderrTail: string[] = [];
+  {
     let buffer = "";
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (chunk: string) => {
       buffer += chunk;
       const lines = buffer.split("\n");
       buffer = lines.pop() ?? "";
-      for (const line of lines) if (line.trim()) options.onStderr!(line);
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        options.onStderr?.(line);
+        // Bounded: a chatty agent must not accumulate its whole log here.
+        stderrTail.push(line);
+        if (stderrTail.length > 12) stderrTail.shift();
+      }
     });
   }
 
@@ -438,15 +508,47 @@ export async function connectProvider(options: ConnectOptions): Promise<AcpSessi
 
   const connection = app.connect(stream);
 
-  const initialized = (await connection.agent.request("initialize", {
-    protocolVersion: 1,
-    clientCapabilities: {
-      fs: { readTextFile: false, writeTextFile: false },
-      terminal: false,
-      // Opt in to boolean selectors; agents must not send them otherwise.
-      session: { configOptions: { boolean: {} } },
+  // How the agent was started, and whatever it said before failing. Both
+  // failures below are otherwise unattributable: "ACP connection closed" does
+  // not say which agent, what was run, or why it died.
+  const failureContext = () => {
+    const invocation = `It was started with: ${provider.command} ${provider.args.join(" ")}`;
+    return stderrTail.length > 0 ? `${invocation}\n${stderrTail.join("\n")}` : invocation;
+  };
+
+  // Bounded, because this await is the one that used to hang forever. Nothing
+  // downstream — the capability probe, the app's session list — has a timeout of
+  // its own, so an agent that never answers left the phone on a loading skeleton
+  // with no error, no log line and no way back except restarting the daemon.
+  const handshake = withTimeout(
+    connection.agent.request("initialize", {
+      protocolVersion: 1,
+      clientCapabilities: {
+        fs: { readTextFile: false, writeTextFile: false },
+        terminal: false,
+        // Opt in to boolean selectors; agents must not send them otherwise.
+        session: { configOptions: { boolean: {} } },
+      },
+      clientInfo: { name: "pew2", title: "pew2", version: "0.1.0" },
+    }),
+    options.handshakeTimeoutMs ?? HANDSHAKE_TIMEOUT_MS,
+    () => {
+      // The process is wedged, not merely slow: leaving it running would leak a
+      // child per attempt for as long as the user keeps tapping.
+      child.kill("SIGKILL");
+      return new Error(
+        `'${provider.manifest.name}' ${HANDSHAKE_TIMEOUT_MARKER}. ${failureContext()}`,
+      );
     },
-    clientInfo: { name: "pew2", title: "pew2", version: "0.1.0" },
+  );
+
+  // An agent that dies immediately — bad arguments, missing config — already
+  // rejects here promptly, but as a bare "ACP connection closed" that names
+  // neither the agent nor the reason it printed on the way out.
+  const initialized = (await handshake.catch((error: unknown) => {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes(HANDSHAKE_TIMEOUT_MARKER)) throw error;
+    throw new Error(`'${provider.manifest.name}' failed to start: ${message}. ${failureContext()}`);
   })) as {
     agentCapabilities?: {
       loadSession?: boolean;

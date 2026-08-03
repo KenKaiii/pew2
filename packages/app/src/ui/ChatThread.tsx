@@ -208,6 +208,17 @@ function ChatThreadView(
       keyboardDismissMode="on-drag"
       onScrollBeginDrag={handleScrollBeginDrag}
       keyboardShouldPersistTaps="handled"
+      // The transcript stops where its content stops.
+      //
+      // Both edges of this list run under something translucent — the floating
+      // nav above, the composer dock below — so rubber-banding does not read as
+      // the usual give at the end of a list. It drags the newest message *under*
+      // the composer, where it is still legible through the blur but half
+      // covered, which looks like a layout fault rather than a gesture. The
+      // reading area is deliberately inset to clear both; letting a drag undo
+      // that gives the inset away.
+      bounces={false}
+      overScrollMode="never"
       automaticallyAdjustsScrollIndicatorInsets={false}
       // The whole pane is lifted by one transform instead (see `useKeyboardLift`).
       // UIKit's own keyboard inset would be a second, differently-timed

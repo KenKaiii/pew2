@@ -232,14 +232,22 @@ export function renderQr(modules: Uint8Array, size: number, quiet = 2): string {
   return lines.join("\n");
 }
 
-/** Encode a string as a scannable QR block, or `undefined` if it cannot be. */
-export async function qrCode(content: string): Promise<string | undefined> {
+/**
+ * Encode a string as a scannable QR block, or `undefined` if it cannot be.
+ *
+ * `quiet` defaults to 2 to keep the block narrow in constrained output. Pass 4,
+ * the value the QR specification actually requires, wherever a human is
+ * expected to point a camera at it: phone scanners locate the finder patterns
+ * by the margin around them, and a thin quiet zone against scrolled-back
+ * terminal text is the most common reason a printed code will not scan.
+ */
+export async function qrCode(content: string, quiet = 2): Promise<string | undefined> {
   try {
     const { toQR } = await import("toqr");
     const modules = toQR(content);
     const size = Math.sqrt(modules.length);
     if (!Number.isInteger(size)) return undefined;
-    return renderQr(modules, size);
+    return renderQr(modules, size, quiet);
   } catch {
     // A missing or broken encoder must not stop pairing: the URL alone is
     // enough to pair by hand.

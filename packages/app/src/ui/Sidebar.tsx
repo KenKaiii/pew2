@@ -280,6 +280,10 @@ function SidebarView({
   // Most recently used app first, so the daily driver is never off-screen
   // behind apps that were tried once.
   const orderedProviders = orderProvidersByRecency(providers, sessions);
+  // Ready to use right now. `providers` also carries the ones that are known but
+  // unusable — not installed, or missing an API key — and they are shown greyed
+  // out rather than hidden, so the total would overstate what works.
+  const availableCount = providers.filter((provider) => provider.available).length;
 
   const selectedProject = projects.find((project) => project.path === selectedProjectPath);
   // Narrowed before the recent-work cap, or a project's older conversations
@@ -319,6 +323,16 @@ function SidebarView({
                 opened, and it belongs to the list of apps it describes. */}
             <View style={styles.headerTitleRow}>
               <Text style={styles.headerTitle}>Connected Apps</Text>
+              {/* The count is of apps that can actually be tapped, not of
+                  manifests: the list also holds agents that are installed but
+                  missing a key, or not installed at all, and counting those
+                  would promise more than the drawer delivers. Hidden entirely at
+                  zero — a lone "0" beside the title reads as an error state
+                  rather than as "still looking".
+
+                  Placed after the dot, not between it and the title: the dot is
+                  the title's own status and the two belong together, so pushing
+                  them a full gap apart would break that pairing. */}
               <View
                 style={[styles.connectionDot, { backgroundColor: connectionColor }]}
                 accessibilityRole="text"
@@ -326,6 +340,17 @@ function SidebarView({
                   machineRemote ? "Reachable from anywhere." : "Same network only."
                 }`}
               />
+              {availableCount > 0 && (
+                <View
+                  style={styles.headerCount}
+                  accessibilityRole="text"
+                  // Without this it is announced as a bare number after the
+                  // title, which says nothing about what was counted.
+                  accessibilityLabel={`${availableCount} ${availableCount === 1 ? "app" : "apps"} ready to use`}
+                >
+                  <Text style={styles.headerCountText}>{availableCount}</Text>
+                </View>
+              )}
             </View>
             {/* No button here. A "new chat" in the drawer header sits above the
                 app chips and the project selector both, so it could only mean
@@ -618,6 +643,23 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: theme.space(2),
+  },
+  // Sized from its own text rather than given a fixed width, so a two-digit
+  // count cannot clip. `minWidth` keeps a single digit from looking pinched.
+  headerCount: {
+    minWidth: 22,
+    paddingHorizontal: theme.space(1.5),
+    paddingVertical: 2,
+    borderRadius: theme.radius.pill,
+    backgroundColor: theme.color.surfaceRaised,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  headerCountText: {
+    color: theme.color.textDim,
+    fontFamily: theme.display.semibold,
+    fontSize: theme.font.tiny,
+    textAlign: "center",
   },
   // Colour is the whole message, so it needs no glyph and no label beside it.
   connectionDot: { width: 8, height: 8, borderRadius: 4 },

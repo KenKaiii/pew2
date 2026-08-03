@@ -4,7 +4,8 @@
  *
  * Deliberately small and verb-oriented:
  *   pew2 setup [--json]              detect, verify and diagnose in one call
- *   pew2 pair [--json] [--rotate]    show the QR a phone scans to connect
+ *   pew2 pair [--json] [--rotate] [--no-wait]
+ *                                    show the QR a phone scans, then wait for it
  *   pew2 relay <url|off>             reach this machine from anywhere
  *   pew2 service install|restart|uninstall
  *                                    keep the daemon running across reboots
@@ -31,8 +32,9 @@ import {
   unavailableReason,
 } from "../providers/registry.js";
 import { detectProviders } from "../providers/detect.js";
+import { fetchRegistry, syncRegistry } from "./registry-sync.js";
 import { verifyProvider } from "../providers/verify.js";
-import { doctor, daemonPort, type Problem } from "./doctor.js";
+import { doctor, type Problem } from "./doctor.js";
 import { setup } from "./setup.js";
 import {
   installService,
@@ -41,14 +43,8 @@ import {
   uninstallService,
   type ServiceStatus,
 } from "./service.js";
-import {
-  lanAddresses,
-  loadPairing,
-  pairingUrl,
-  qrCode,
-  rotatePairing,
-  setRelay,
-} from "../pairing.js";
+import { loadPairing, setRelay } from "../pairing.js";
+import { cmdPair } from "./pair.js";
 
 const GREEN = "\x1b[32m";
 const RED = "\x1b[31m";
@@ -154,49 +150,8 @@ async function cmdSetup(flags: Set<string>) {
   return 1;
 }
 
-async function cmdPair(flags: Set<string>) {
-  const pairing = flags.has("--rotate") ? await rotatePairing() : await loadPairing();
-  const port = daemonPort();
-  const addresses = lanAddresses();
-  const url = pairingUrl({ token: pairing.token, port, relay: pairing.relay });
-  const remote = Boolean(pairing.relay);
-
-  if (flags.has("--json")) {
-    // The token is deliberately included: an agent driving setup has to be able
-    // to hand it to the user. It is already on disk in their home directory.
-    console.log(
-      JSON.stringify(
-        { url, token: pairing.token, port, addresses, relay: pairing.relay ?? null, remote },
-        null,
-        2,
-      ),
-    );
-    return 0;
-  }
-
-  if (!remote && addresses.length === 0) {
-    console.log(warn("No network address. A phone cannot reach this machine."));
-    console.log(`${DIM}Connect to Wi-Fi, or run: pew2 relay <url>${RESET}\n`);
-  }
-
-  const qr = await qrCode(url);
-  if (qr) console.log(`\n${qr}`);
-
-  console.log(`\n${BOLD}Scan this${RESET}, or paste into the app:`);
-  console.log(`  ${url}\n`);
-
-  if (remote) {
-    console.log(`${GREEN}Works from anywhere.${RESET} ${DIM}Keep the daemon running.${RESET}`);
-  } else {
-    if (addresses.length > 1) {
-      console.log(`${DIM}Also on: ${addresses.slice(1).join(", ")}${RESET}`);
-    }
-    console.log(`${YELLOW}Same network only.${RESET} ${DIM}For anywhere: ${BOLD}pew2 relay <url>${RESET}`);
-  }
-  console.log(`${DIM}This token is a password. Do not share it.${RESET}`);
-  if (flags.has("--rotate")) console.log(`\n${YELLOW}Token rotated. Paired devices must scan again.${RESET}`);
-  return 0;
-}
+// `pew2 pair` lives in ./pair.ts: it is the one command with a real screen to
+// draw and a live state to track, and inlining that here would bury it.
 
 async function cmdRelay(arg: string | undefined, flags: Set<string>) {
   const current = await loadPairing();
@@ -479,6 +434,70 @@ async function cmdVerify(id: string | undefined, flags: Set<string>) {
   return failures > 0 || errors.length > 0 ? 1 : 0;
 }
 
+/**
+ * Pull the public ACP registry.
+ *
+ * Reports conflicts rather than resolving them: a manifest pew2 did not write is
+ * someone else's — hand-edited, or left by `pew2 detect` — and a routine refresh
+ * silently reverting an added API key or changed args is the kind of quiet loss
+ * that stops people running a command at all. `--force` says otherwise.
+ */
+async function cmdRegistry(command: string | undefined, flags: Set<string>) {
+  if (command !== "sync") {
+    console.error(`Unknown command 'registry ${command ?? ""}'. Did you mean 'registry sync'?`);
+    return 1;
+  }
+
+  const dryRun = flags.has("--dry-run");
+  let raw: unknown;
+  try {
+    raw = await fetchRegistry();
+  } catch (error) {
+    console.error(bad(`Could not reach the ACP registry: ${(error as Error).message}`));
+    return 1;
+  }
+
+  const result = await syncRegistry({ raw, force: flags.has("--force"), dryRun });
+
+  if (flags.has("--json")) {
+    console.log(JSON.stringify(result, null, 2));
+    return 0;
+  }
+
+  console.log(`${BOLD}ACP registry${RESET} ${DIM}v${result.registryVersion}${RESET}\n`);
+
+  for (const id of result.written) {
+    console.log(ok(`${id}${dryRun ? ` ${DIM}(would add)${RESET}` : ""}`));
+  }
+  for (const id of result.conflicts) {
+    // Deliberately not phrased as "you edited this": the file may equally have
+    // come from `pew2 detect`, and the point is only that pew2 did not write it
+    // and so will not silently replace it.
+    console.log(warn(`${id} ${DIM}already has a manifest, left alone — --force to replace${RESET}`));
+  }
+
+  // The skip reasons are the useful part when an agent someone expected is
+  // absent, but listing 20 of them buries the result. Summarise, and only name
+  // the ones that genuinely cannot run here — an agent we already ship under
+  // another name is not a problem to go looking for.
+  const unavailable = result.skipped.filter((s) => s.kind === "unsupported");
+  const bundled = result.skipped.length - unavailable.length;
+
+  console.log(
+    `\n${result.written.length} ${dryRun ? "to add" : "added"}, ${result.unchanged.length} unchanged` +
+      `${result.conflicts.length > 0 ? `, ${result.conflicts.length} left alone` : ""}.`,
+  );
+  if (bundled > 0) console.log(`${DIM}${bundled} already ship with pew2.${RESET}`);
+  if (unavailable.length > 0) {
+    console.log(`${DIM}${unavailable.length} unavailable here: ${unavailable.map((s) => s.id).join(", ")}${RESET}`);
+  }
+  if (result.written.length > 0 && !dryRun) {
+    console.log(`${DIM}Written to ${result.targetDir}${RESET}`);
+    console.log(`\nNext: ${BOLD}pew2 providers list${RESET}`);
+  }
+  return 0;
+}
+
 async function main() {
   const argv = process.argv.slice(2);
   const flags = new Set(argv.filter((a) => a.startsWith("--")));
@@ -490,15 +509,19 @@ async function main() {
   if (group === "service") return cmdService(command, flags);
   if (group === "doctor") return cmdDoctor(flags);
   if (group === "detect") return cmdDetect(flags);
+  if (group === "registry") return cmdRegistry(command, flags);
 
   if (group !== "providers") {
     console.log(`${BOLD}pew2${RESET}\n`);
     console.log("  pew2 setup [--json]              Detect, verify and diagnose in one call");
-    console.log("  pew2 pair [--json] [--rotate]    Show the QR a phone scans to connect");
+    console.log("  pew2 pair [--rotate]           Show the QR a phone scans, then confirm it connected");
+    console.log("    --no-wait                      Print the code and exit instead of waiting");
     console.log("  pew2 relay <url|off>             Reach this machine from anywhere");
     console.log("  pew2 service install|restart     Keep the daemon running across reboots");
     console.log("  pew2 doctor [--json]             What is wrong, and the command that fixes it");
     console.log("  pew2 detect [--json]             Find installed agents and configure them");
+    console.log("  pew2 registry sync               Add every agent in the public ACP registry");
+    console.log("    --dry-run --force --json       Preview / overwrite edited files / machine output");
     console.log("  pew2 providers list              List installed providers");
     console.log("  pew2 providers validate          Validate every manifest");
     console.log("  pew2 providers add <id>          Scaffold a new manifest");

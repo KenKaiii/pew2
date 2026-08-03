@@ -145,6 +145,16 @@ export class Daemon {
   private readonly projectHistory = new Map<string, AgentSession[]>();
 
   /**
+   * Directories recently shown to a browsing client.
+   *
+   * A path only becomes a "known project" once a session exists in it, so a
+   * folder reached by browsing would otherwise be unrecognised at exactly the
+   * moment it is chosen. Insertion-ordered and capped, so it stays an echo check
+   * rather than a growing record of what is on the disk.
+   */
+  private readonly offeredWorkspaces = new Set<string>();
+
+  /**
    * One already-booted agent process per provider, left over from the last
    * probe. Spawning is the slow part of opening a conversation — GG Coder
    * takes ~5s to boot while `session/load` answers in ~30ms — so the next
@@ -684,7 +694,35 @@ export class Daemon {
    */
   knownProject(providerId: string, cwd: string): string | undefined {
     const known = this.projectHistory.get(providerId);
-    return known?.some((session) => session.cwd === cwd) ? cwd : undefined;
+    if (known?.some((session) => session.cwd === cwd)) return cwd;
+    // A directory this daemon just offered in a `workspaces` answer counts for
+    // the same reason: it published the string, so echoing it back reveals
+    // nothing new. Without this a project reached by browsing is unknown until
+    // its first session exists, and the composer would name the agent's
+    // *previous* project while pointing at this one — which is worse than no
+    // label, because it is confidently wrong.
+    return this.offeredWorkspaces.has(cwd) ? cwd : undefined;
+  }
+
+  /**
+   * Remember the directories just offered to a browsing client.
+   *
+   * Bounded, and not persisted: this is a short-lived echo check, not a record
+   * of anything. Only the most recent listings need to be recognised, since a
+   * path is chosen within seconds of being shown.
+   */
+  rememberOfferedWorkspaces(paths: string[]): void {
+    for (const path of paths) {
+      // Re-inserting moves it to the end of the Map's order, so a directory the
+      // user keeps seeing is not the one evicted.
+      this.offeredWorkspaces.delete(path);
+      this.offeredWorkspaces.add(path);
+    }
+    while (this.offeredWorkspaces.size > 2_000) {
+      const oldest = this.offeredWorkspaces.values().next().value;
+      if (oldest === undefined) break;
+      this.offeredWorkspaces.delete(oldest);
+    }
   }
 
   /**

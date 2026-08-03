@@ -180,6 +180,46 @@ test("relayed messages reach the daemon handler", async () => {
   relay.stop();
 });
 
+test("a phone on the relay is visible to clients on the LAN", async () => {
+  // The two transports must be a two-way mirror. Before `onBroadcast` existed,
+  // a broadcast triggered by a relay client went back out the relay only, so a
+  // desktop client on the same machine never saw a phone that arrived over a
+  // mobile network — despite the daemon owning one log precisely so that both
+  // can watch the same conversation.
+  const local: unknown[] = [];
+  const { relay } = client({ onBroadcast: (message) => local.push(message) });
+
+  relay.start();
+  const socket = FakeSocket.instances[0]!;
+  socket.open();
+  socket.receive({ t: "hello", wire: 1, role: "app", deviceId: "Kens-iPhone" });
+  // `hello` awaits a provider refresh before broadcasting, so let the
+  // microtask queue drain the same way the neighbouring cases do.
+  await new Promise((r) => setTimeout(r, 20));
+
+  const joined = local.find((m) => (m as { t?: string }).t === "device.joined");
+  expect(joined).toMatchObject({ t: "device.joined", deviceId: "Kens-iPhone" });
+
+  // Still sent up the relay as well: the fan-out is additional, not a redirect.
+  expect(socket.sent.some((raw) => raw.includes("device.joined"))).toBe(true);
+  relay.stop();
+});
+
+test("a relay client with no local listener is still handled", async () => {
+  // `onBroadcast` is optional, and omitting it must not turn every relay
+  // message into a crash inside the daemon's only remote transport.
+  const { relay } = client();
+
+  relay.start();
+  const socket = FakeSocket.instances[0]!;
+  socket.open();
+  socket.receive({ t: "hello", wire: 1, role: "app", deviceId: "Kens-iPhone" });
+  await new Promise((r) => setTimeout(r, 20));
+
+  expect(socket.sent.some((raw) => raw.includes("device.joined"))).toBe(true);
+  relay.stop();
+});
+
 test("a malformed frame is answered, not fatal", async () => {
   const { relay } = client();
 

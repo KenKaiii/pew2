@@ -16,9 +16,16 @@ import { loadPairing, pairingUrl, qrCode, tokenMatches } from "./pairing.js";
 import { handleMessage } from "./handler.js";
 import { RelayClient } from "./relay-client.js";
 import { hostname } from "node:os";
+import { daemonLogPaths, rotateLog } from "./logs.js";
 import type { ServerWebSocket } from "bun";
 
 const PORT = Number(process.env.PEW2_PORT ?? 8787);
+
+// Under launchd this process's stdout is an append-only file that nothing else
+// ever trims. Startup is the one moment it can be resized safely, so it is done
+// here, before anything is written.
+const rotations = await Promise.all(daemonLogPaths().map((path) => rotateLog(path)));
+const trimmed = rotations.reduce((total, r) => total + (r.rotated ? r.before - r.after : 0), 0);
 
 // Minted on first run and reused thereafter, so restarting the daemon does not
 // unpair the phone.
@@ -56,6 +63,9 @@ const relay = pairing.relay
       url: pairing.relay,
       token: pairing.token,
       deviceId: hostname(),
+      // Relay traffic is fanned out locally too, so a desktop client and a
+      // phone on 5G genuinely see the same conversation.
+      onBroadcast: (message) => broadcast(message),
       onStatus: (status, detail) =>
         console.log(`[relay] ${status}${detail ? ` — ${detail}` : ""}`),
     })
@@ -134,11 +144,20 @@ const url = pairingUrl({
   port: server.port ?? PORT,
   relay: pairing.relay,
 });
-const qr = await qrCode(url);
+// Drawn only for a human at a terminal. Under launchd stdout is a log file, and
+// writing a 27-line block of colour escapes there on every restart was both the
+// bulk of the log's growth and a copy of the pairing token in plain text on
+// disk. Four modules of quiet zone when it is drawn, because this banner is
+// scanned by a phone camera exactly as `pew2 pair` is.
+const interactive = Boolean(process.stdout.isTTY);
+const qr = interactive ? await qrCode(url, 4) : undefined;
 
 console.log(`\npew2 daemon listening on port ${server.port}\n`);
+if (trimmed > 0) console.log(`[logs] trimmed ${Math.round(trimmed / 1024)}KB of old log\n`);
 if (qr) console.log(`${qr}\n`);
-console.log(`Scan this, or paste into the app:\n  ${url}\n`);
+// The URL carries the token, so it follows the QR: shown to whoever ran this,
+// withheld from the log file. `pew2 pair` is where it belongs either way.
+console.log(interactive ? `Scan this, or paste into the app:\n  ${url}\n` : `Pair with: pew2 pair\n`);
 console.log(
   pairing.relay
     ? `Works from anywhere via ${pairing.relay}\n`

@@ -1,0 +1,23 @@
+{
+  "$schema": "../schemas/provider.schema.json",
+  "id": "goose",
+  "name": "goose",
+  "version": "1.0.0",
+  "description": "Block's local, extensible open source agent. Install from block.github.io/goose, then it speaks ACP over stdio.",
+  "distribution": {
+    "type": "command",
+    "command": "goose",
+    "args": [
+      "acp"
+    ]
+  },
+  "repository": "https://github.com/block/goose",
+  "authors": [
+    "Block"
+  ],
+  "license": "Apache-2.0",
+  "pew": {
+    "transport": "acp",
+    "color": "#26c6da"
+  }
+}

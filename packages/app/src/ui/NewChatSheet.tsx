@@ -14,9 +14,16 @@
  * something, taken from the conversation, and it belongs on the same bottom
  * edge as commands and approvals rather than behind a menu in another panel.
  *
- * The two steps are a **push**, not a swap: the list arrives from the right as
- * the choices leave to the left, and the card resizes under them. Both steps
- * stay mounted so neither has to be rebuilt mid-travel, and the hidden one is
+ * There is a third step, and it is the one that makes a new agent usable at all.
+ * The project list is folded from an agent's *own* past sessions, so an agent
+ * installed five minutes ago offers nothing: no projects, no way to start, and
+ * no way out of that state from the phone. Browsing asks the desktop what is on
+ * its disk — suggested git checkouts first, then any directory — which is the
+ * only thing that breaks that loop.
+ *
+ * The steps are a **push**, not a swap: each pane arrives from the right as the
+ * one before it leaves to the left, and the card resizes under them. Every step
+ * stays mounted so none has to be rebuilt mid-travel, and the hidden ones are
  * inert. A cut between two cards of different heights reads as the sheet
  * flinching; this reads as one object with somewhere to go.
  */
@@ -29,6 +36,7 @@ import { Sheet, SHEET_ROW_HEIGHT, SHEET_VISIBLE_ROWS, sheetCardStyle } from "./S
 import { haptics } from "./haptics";
 import { useReducedMotion } from "./useReducedMotion";
 import type { Project } from "../projects";
+import type { WorkspaceBrowse } from "../useDaemon";
 
 /**
  * The push, tuned to sit just inside `Sheet`'s own arrival.
@@ -46,6 +54,18 @@ const STEP_SPRING = {
   restSpeedThreshold: 0.01,
 } as const;
 
+/**
+ * Which pane is on screen. Ordered, because moving between them is a push.
+ *
+ * Two, not three. The project list and the folder browser are both reached from
+ * step one and both return to it, so they are siblings rather than a stack —
+ * giving the browser its own index would mean the pop from it travelled *past*
+ * the project list, flashing a pane the user was never on. `listMode` decides
+ * which of the two the second step holds.
+ */
+const STEP_CHOICES = 0;
+const STEP_LIST = 1;
+
 interface NewChatSheetProps {
   visible: boolean;
   /** The project the open conversation is in. Absent until the daemon answers. */
@@ -55,6 +75,10 @@ interface NewChatSheetProps {
   /** Starts a conversation in `cwd`, or wherever the agent last was when absent. */
   onStart: (cwd?: string) => void;
   onClose: () => void;
+  /** What the desktop last reported for the picker. Absent until first asked. */
+  browse?: WorkspaceBrowse;
+  /** Ask the desktop for a listing. No path means "suggest repositories". */
+  onBrowse?: (path?: string) => void;
 }
 
 function NewChatSheetView({
@@ -64,13 +88,19 @@ function NewChatSheetView({
   projects,
   onStart,
   onClose,
+  browse,
+  onBrowse,
 }: NewChatSheetProps) {
-  const [picking, setPicking] = useState(false);
+  const [step, setStep] = useState(STEP_CHOICES);
+  const [listMode, setListMode] = useState<"projects" | "browse">("projects");
   const reduceMotion = useReducedMotion();
 
-  // Nothing to switch between, so there is no second step to offer: one project
-  // (or none known yet) makes the list a dead end.
+  // Nothing to switch between, so there is no list step to offer: one project
+  // (or none known yet) makes it a dead end.
   const canPick = projects.length > 1;
+  // Offered whenever the daemon can answer — including, especially, when there
+  // are no projects at all. That is the cold start this exists for.
+  const canBrowse = onBrowse !== undefined;
 
   // Two values for one movement, because they cannot share a driver: transforms
   // and opacity run on the native thread, `height` cannot. Started together and
@@ -78,26 +108,33 @@ function NewChatSheetView({
   const slide = useRef(new Animated.Value(0)).current;
   const resize = useRef(new Animated.Value(0)).current;
 
-  // Measured, never assumed: step one is two fixed rows but step two is a list
-  // whose height depends on the machine, and a guess would make the card settle
-  // at the wrong size and then correct itself.
+  // Measured, never assumed: the first step is a couple of fixed rows but the
+  // others are lists whose height depends on the machine, and a guess would make
+  // the card settle at the wrong size and then correct itself.
   const [heights, setHeights] = useState<[number, number]>([0, 0]);
   const [width, setWidth] = useState(0);
 
   useEffect(() => {
-    const target = picking ? 1 : 0;
     if (reduceMotion) {
-      slide.setValue(target);
-      resize.setValue(target);
+      slide.setValue(step);
+      resize.setValue(step);
       return;
     }
     const animation = Animated.parallel([
-      Animated.spring(slide, { toValue: target, ...STEP_SPRING, useNativeDriver: true }),
-      Animated.spring(resize, { toValue: target, ...STEP_SPRING, useNativeDriver: false }),
+      Animated.spring(slide, {
+        toValue: step,
+        ...STEP_SPRING,
+        useNativeDriver: true,
+      }),
+      Animated.spring(resize, {
+        toValue: step,
+        ...STEP_SPRING,
+        useNativeDriver: false,
+      }),
     ]);
     animation.start();
     return () => animation.stop();
-  }, [picking, reduceMotion, slide, resize]);
+  }, [step, reduceMotion, slide, resize]);
 
   // Always opens on the first step. A sheet that reopened onto the project list
   // because that is where it was last closed would hide its own primary action.
@@ -109,9 +146,9 @@ function NewChatSheetView({
   // would only delay the next opening.
   useEffect(() => {
     if (!visible) return;
-    setPicking(false);
-    slide.setValue(0);
-    resize.setValue(0);
+    setStep(STEP_CHOICES);
+    slide.setValue(STEP_CHOICES);
+    resize.setValue(STEP_CHOICES);
   }, [visible, slide, resize]);
 
   // Only as tall as it needs to be, up to five rows — the same rule as the
@@ -119,19 +156,35 @@ function NewChatSheetView({
   const listHeight = Math.min(projects.length, SHEET_VISIBLE_ROWS) * SHEET_ROW_HEIGHT;
   const scrolls = projects.length > SHEET_VISIBLE_ROWS;
 
+  // The browser adds an "up" row below a root, which occupies list space and is
+  // counted here or the card comes out a row short.
+  const browseEntries = browse?.entries ?? [];
+  // The refusal notice occupies a row of its own, above a list that is still
+  // showing where the user was.
+  const browseRows =
+    browseEntries.length + (browse?.parent ? 1 : 0) + (browse?.refused ? 1 : 0);
+  const browseHeight = Math.max(1, Math.min(browseRows, SHEET_VISIBLE_ROWS)) * SHEET_ROW_HEIGHT;
+  const browseScrolls = browseRows > SHEET_VISIBLE_ROWS;
+
   // Before a step has been measured, fall back to the other one rather than to
   // zero: the card must never animate through a collapsed state on first open.
   const [firstHeight, secondHeight] = heights;
   const cardHeight = resize.interpolate({
-    inputRange: [0, 1],
+    inputRange: [STEP_CHOICES, STEP_LIST],
     outputRange: [firstHeight || secondHeight || 1, secondHeight || firstHeight || 1],
   });
 
   // Full-width travel, so each pane leaves and arrives at the card's own edge.
   // Falls back to zero until measured, which reads as a cross-fade for the one
   // frame before layout lands.
-  const outgoing = slide.interpolate({ inputRange: [0, 1], outputRange: [0, -width] });
-  const incoming = slide.interpolate({ inputRange: [0, 1], outputRange: [width, 0] });
+  const outgoing = slide.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0, -width],
+  });
+  const incoming = slide.interpolate({
+    inputRange: [0, 1],
+    outputRange: [width, 0],
+  });
   // Faster than the travel: a pane at the halfway point is already mostly gone,
   // which is what stops the two lists from reading as one doubled list.
   const outgoingFade = slide.interpolate({
@@ -145,98 +198,200 @@ function NewChatSheetView({
     extrapolate: "clamp",
   });
 
-  const push = () => {
+  const goTo = (next: number) => {
     haptics.tap();
-    setPicking(true);
+    setStep(next);
   };
-  const pop = () => {
-    haptics.tap();
-    setPicking(false);
+
+  const openProjects = () => {
+    setListMode("projects");
+    goTo(STEP_LIST);
   };
+
+  const openBrowser = () => {
+    // Asked on the way in, every time. A listing goes stale the moment a
+    // directory is made at the desk, and it is cheap — the daemon answered a
+    // full scan of a real home directory in about 250ms.
+    onBrowse?.(browse?.path);
+    setListMode("browse");
+    goTo(STEP_LIST);
+  };
+
+  const browsing = listMode === "browse";
 
   return (
     <Sheet
       visible={visible}
-      title={picking ? "Choose project" : "New chat"}
+      title={
+        step === STEP_CHOICES
+          ? "New chat"
+          : browsing
+            ? // Named while browsing: several levels down, "Browse" alone gives
+              // no clue where you are, and the path is too long for a title.
+              browse?.path
+              ? folderOf(browse.path)
+              : "Browse"
+            : "Choose project"
+      }
       onClose={onClose}
-      onBack={picking ? pop : undefined}
+      onBack={step === STEP_CHOICES ? undefined : () => goTo(STEP_CHOICES)}
       dismissLabel="Close new chat"
     >
       <Animated.View
         style={[styles.card, { height: cardHeight }]}
         onLayout={(event) => setWidth(event.nativeEvent.layout.width)}
       >
-        {/* Step one. Absolute so both panes occupy the same box and the card's
+        {/* Step one. Absolute so every pane occupies the same box and the card's
             animated height is the only thing deciding its size. */}
         <Animated.View
           style={[styles.pane, { opacity: outgoingFade, transform: [{ translateX: outgoing }] }]}
           // Inert once pushed past, or the invisible pane keeps taking the taps
           // meant for the list on top of it.
-          pointerEvents={picking ? "none" : "auto"}
+          pointerEvents={step === STEP_CHOICES ? "auto" : "none"}
           onLayout={(event) => {
-            const measured = event.nativeEvent.layout.height;
-            setHeights((prev) => (prev[0] === measured ? prev : [measured, prev[1]]));
+            const height = event.nativeEvent.layout.height;
+            setHeights((prev) => (prev[0] === height ? prev : [height, prev[1]]));
           }}
         >
-          <Row
-            icon="add-circle-outline"
-            // Named, so the row is not a restatement of the sheet's own title.
-            // Before the daemon has answered there is no name to use, and the
-            // detail line carries the meaning instead.
-            title={currentFolder ? `New chat in ${currentFolder}` : "Start a new chat"}
-            detail={currentFolder ? "Continue in this project" : "Where the agent last worked"}
-            divided={canPick}
-            onPress={() => onStart(currentCwd)}
-          />
+          {/* Absent when the agent has never run: there is no "here" to
+              continue in, and a row offering one would start a chat in the
+              daemon's fallback directory rather than a project. */}
+          {(currentCwd || !canBrowse) && (
+            <Row
+              icon="add-circle-outline"
+              // Named, so the row is not a restatement of the sheet's own title.
+              // Before the daemon has answered there is no name to use, and the
+              // detail line carries the meaning instead.
+              title={currentFolder ? `New chat in ${currentFolder}` : "Start a new chat"}
+              detail={currentFolder ? "Continue in this project" : "Where the agent last worked"}
+              divided={canPick || canBrowse}
+              onPress={() => onStart(currentCwd)}
+            />
+          )}
           {canPick && (
             <Row
               icon="folder-open-outline"
               title="Different project"
               detail={`${projects.length} projects`}
               chevron
-              onPress={push}
+              divided={canBrowse}
+              onPress={openProjects}
+            />
+          )}
+          {canBrowse && (
+            <Row
+              icon="search-outline"
+              title="Browse folders"
+              // Says where it looks. "Browse" alone reads as the phone's own
+              // files, which is the one place these directories are not.
+              detail={
+                projects.length === 0 ? "Find a project on your computer" : "On your computer"
+              }
+              chevron
+              onPress={openBrowser}
             />
           )}
         </Animated.View>
 
-        {/* Step two. Mounted from the start so the push has something real to
-            move; without it the first frame of the travel is an empty pane. */}
-        {canPick && (
+        {/* Step two: whichever list was asked for. Mounted from the start so
+            the push has something real to move; without it the first frame of
+            the travel is an empty pane. */}
+        {(canPick || canBrowse) && (
           <Animated.View
             style={[styles.pane, { opacity: incomingFade, transform: [{ translateX: incoming }] }]}
-            pointerEvents={picking ? "auto" : "none"}
+            pointerEvents={step === STEP_LIST ? "auto" : "none"}
             onLayout={(event) => {
-              const measured = event.nativeEvent.layout.height;
-              setHeights((prev) => (prev[1] === measured ? prev : [prev[0], measured]));
+              const height = event.nativeEvent.layout.height;
+              setHeights((prev) => (prev[1] === height ? prev : [prev[0], height]));
             }}
           >
-            <ScrollView
-              style={{ height: listHeight }}
-              showsVerticalScrollIndicator={scrolls}
-              bounces={scrolls}
-            >
-              {projects.map((project, index) => (
-                <Row
-                  key={project.path}
-                  icon="folder-outline"
-                  title={project.name}
-                  detail={
-                    project.path === currentCwd
-                      ? "Current project"
-                      : project.sessions === undefined
-                        ? project.path
-                        : `${project.sessions} conversation${project.sessions === 1 ? "" : "s"}`
-                  }
-                  divided={index < projects.length - 1}
-                  onPress={() => onStart(project.path)}
-                />
-              ))}
-            </ScrollView>
+            {!browsing && (
+              <ScrollView
+                style={{ height: listHeight }}
+                showsVerticalScrollIndicator={scrolls}
+                bounces={scrolls}
+              >
+                {projects.map((project, index) => (
+                  <Row
+                    key={project.path}
+                    icon="folder-outline"
+                    title={project.name}
+                    detail={
+                      project.path === currentCwd
+                        ? "Current project"
+                        : project.sessions === undefined
+                          ? project.path
+                          : `${project.sessions} conversation${project.sessions === 1 ? "" : "s"}`
+                    }
+                    divided={index < projects.length - 1}
+                    onPress={() => onStart(project.path)}
+                  />
+                ))}
+              </ScrollView>
+            )}
+
+            {browsing && (
+              <ScrollView
+                style={{ height: browseHeight }}
+                showsVerticalScrollIndicator={browseScrolls}
+                bounces={browseScrolls}
+              >
+                {browse?.parent !== undefined && (
+                  <Row
+                    icon="arrow-up-outline"
+                    title="Up"
+                    detail={folderOf(browse.parent)}
+                    divided={browseEntries.length > 0}
+                    onPress={() => onBrowse?.(browse.parent)}
+                  />
+                )}
+                {browseEntries.map((entry, index) => (
+                  <Row
+                    key={entry.path}
+                    // A repository is what the user is nearly always after, and the
+                    // icon is the only thing distinguishing it at a glance.
+                    icon={entry.repo ? "git-branch-outline" : "folder-outline"}
+                    title={entry.name}
+                    detail={entry.repo ? "Git repository" : undefined}
+                    divided={index < browseEntries.length - 1}
+                    // The row starts a chat here; the chevron goes deeper. Split
+                    // because a folder is both a destination and a container, and
+                    // making one gesture mean both would pick the wrong one about
+                    // half the time.
+                    onPress={() => onStart(entry.path)}
+                    onDescend={() => onBrowse?.(entry.path)}
+                    descendLabel={`Open ${entry.name}`}
+                  />
+                ))}
+                {/* A refusal keeps the listing the user was on, so this has to
+                    show over a non-empty list too — otherwise tapping a folder
+                    that cannot be opened looks like nothing happened at all. */}
+                {(browseEntries.length === 0 || browse?.refused) && (
+                  <View style={styles.empty}>
+                    <Text style={styles.emptyText}>
+                      {browse?.loading
+                        ? "Looking…"
+                        : browse?.refused
+                          ? "That folder can't be opened"
+                          : browse?.path
+                            ? "No folders in here"
+                            : "No projects found on your computer"}
+                    </Text>
+                  </View>
+                )}
+              </ScrollView>
+            )}
           </Animated.View>
         )}
       </Animated.View>
     </Sheet>
   );
+}
+
+/** Last path segment: the folder as a person says it. */
+function folderOf(path: string): string {
+  const segments = path.split("/").filter(Boolean);
+  return segments[segments.length - 1] ?? path;
 }
 
 function Row({
@@ -246,6 +401,8 @@ function Row({
   divided,
   chevron,
   onPress,
+  onDescend,
+  descendLabel,
 }: {
   icon: keyof typeof Ionicons.glyphMap;
   title: string;
@@ -253,36 +410,54 @@ function Row({
   divided?: boolean;
   chevron?: boolean;
   onPress: () => void;
+  /**
+   * Go *into* this row rather than choose it.
+   *
+   * Only the browser passes one, because only there is a row both a place to
+   * work and a container of other places. The two live on separate hit targets:
+   * one gesture meaning both would guess wrong about half the time, and the
+   * wrong guess starts an agent in the wrong directory.
+   */
+  onDescend?: () => void;
+  descendLabel?: string;
 }) {
   return (
-    <Pressable
-      accessibilityRole="button"
-      accessibilityLabel={detail ? `${title}, ${detail}` : title}
-      hitSlop={touchSlop(theme.space(1))}
-      onPress={onPress}
-      style={({ pressed }) => [
-        styles.row,
-        // Hairline between rows, never under the last one: a rule at the card's
-        // edge reads as a broken border.
-        divided && styles.rowDivided,
-        pressed && styles.rowPressed,
-      ]}
-    >
-      <Ionicons name={icon} size={20} color={theme.color.glyph} />
-      <View style={styles.rowText}>
-        <Text style={styles.rowTitle} numberOfLines={1}>
-          {title}
-        </Text>
-        {!!detail && (
-          <Text style={styles.rowDetail} numberOfLines={1}>
-            {detail}
+    <View style={[styles.rowShell, divided && styles.rowDivided]}>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={detail ? `${title}, ${detail}` : title}
+        hitSlop={touchSlop(theme.space(1))}
+        onPress={onPress}
+        style={({ pressed }) => [styles.row, pressed && styles.rowPressed]}
+      >
+        <Ionicons name={icon} size={20} color={theme.color.glyph} />
+        <View style={styles.rowText}>
+          <Text style={styles.rowTitle} numberOfLines={1}>
+            {title}
           </Text>
-        )}
-      </View>
-      {/* Only on the row that leads somewhere: it promises a next step, and on
-          a row that starts a chat it would be a lie. */}
-      {chevron && <Ionicons name="chevron-forward" size={16} color={theme.color.textDim} />}
-    </Pressable>
+          {!!detail && (
+            <Text style={styles.rowDetail} numberOfLines={1}>
+              {detail}
+            </Text>
+          )}
+        </View>
+        {/* Only on the row that leads somewhere: it promises a next step, and on
+            a row that starts a chat it would be a lie. */}
+        {chevron && <Ionicons name="chevron-forward" size={16} color={theme.color.textDim} />}
+      </Pressable>
+      {onDescend && (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={descendLabel ?? `Open ${title}`}
+          onPress={onDescend}
+          // Wide enough to hit without aiming, and its own pressed state so it
+          // is visibly a second control rather than part of the row.
+          style={({ pressed }) => [styles.rowDescend, pressed && styles.rowPressed]}
+        >
+          <Ionicons name="chevron-forward" size={16} color={theme.color.textDim} />
+        </Pressable>
+      )}
+    </View>
   );
 }
 
@@ -292,15 +467,36 @@ const styles = StyleSheet.create({
   // its own natural height while the card animates between the two.
   pane: { position: "absolute", left: 0, right: 0, top: 0 },
   row: {
+    flex: 1,
     flexDirection: "row",
     alignItems: "center",
     gap: theme.space(3),
     height: SHEET_ROW_HEIGHT,
     paddingHorizontal: theme.space(4),
   },
+  // Holds the row and its optional descend target side by side, so the divider
+  // spans both rather than stopping at the seam between them.
+  rowShell: { flexDirection: "row", alignItems: "center" },
   rowDivided: {
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: theme.color.border,
+  },
+  rowDescend: {
+    height: SHEET_ROW_HEIGHT,
+    justifyContent: "center",
+    paddingLeft: theme.space(2),
+    paddingRight: theme.space(4),
+  },
+  empty: {
+    height: SHEET_ROW_HEIGHT,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: theme.space(4),
+  },
+  emptyText: {
+    color: theme.color.textDim,
+    fontSize: theme.font.small,
+    textAlign: "center",
   },
   rowPressed: { backgroundColor: theme.glass.fillPressed },
   // Yields to the chevron rather than pushing it off the row.

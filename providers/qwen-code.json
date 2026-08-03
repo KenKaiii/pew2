@@ -1,0 +1,25 @@
+{
+  "$schema": "../schemas/provider.schema.json",
+  "id": "qwen-code",
+  "name": "Qwen Code",
+  "version": "1.0.0",
+  "description": "Alibaba's Qwen coding assistant, in ACP mode.",
+  "distribution": {
+    "type": "npx",
+    "package": "@qwen-code/qwen-code",
+    "version": "latest",
+    "args": [
+      "--acp",
+      "--experimental-skills"
+    ]
+  },
+  "repository": "https://github.com/QwenLM/qwen-code",
+  "authors": [
+    "Alibaba"
+  ],
+  "license": "Apache-2.0",
+  "pew": {
+    "transport": "acp",
+    "color": "#615ced"
+  }
+}

@@ -25,6 +25,16 @@ export interface RelayClientOptions {
   deviceId: string;
   cwd?: string;
   onStatus?: (status: RelayStatus, detail?: string) => void;
+  /**
+   * Also deliver relay-originated broadcasts to locally connected clients.
+   *
+   * Without this the two transports are one-way mirrors: a phone acting over
+   * the relay is invisible to a client on the LAN, even though the daemon
+   * owning one log is the entire reason both can watch the same session. It is
+   * also what lets `pew2 pair` confirm a phone that arrived from a mobile
+   * network rather than the local Wi-Fi.
+   */
+  onBroadcast?: (message: unknown) => void;
   /** Injectable for tests. Defaults to the global WebSocket. */
   createSocket?: (url: string) => WebSocket;
 }
@@ -131,7 +141,10 @@ export class RelayClient {
         // fans out to whichever apps are attached to this pairing. Both paths
         // therefore go back the same way.
         reply: (message) => this.send(message),
-        broadcast: (message) => this.send(message),
+        broadcast: (message) => {
+          this.send(message);
+          this.options.onBroadcast?.(message);
+        },
         cwd: this.options.cwd,
       });
     };

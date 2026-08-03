@@ -106,6 +106,31 @@ test("the pairing url round-trips through the app's parser", () => {
   expect(tokenFromUrl("ws://192.168.1.24:8787/")).toBeNull();
 });
 
+test("the quiet zone can be widened for a code a camera has to find", async () => {
+  // Scanners locate the finder patterns by the margin around them, and the QR
+  // specification requires four modules. The default stays narrow to keep the
+  // block small in incidental output; anywhere a human is asked to point a
+  // phone at the screen passes 4, because a thin margin against scrolled-back
+  // terminal text is the most common reason a printed code will not scan.
+  const url = `ws://192.168.1.24:8787/?token=${"a".repeat(48)}`;
+  const narrow = await qrCode(url);
+  const wide = await qrCode(url, 4);
+
+  expect(narrow).toBeDefined();
+  expect(wide).toBeDefined();
+
+  const widthOf = (block: string) => (block.split("\n")[0]!.match(/\u2580/g) ?? []).length;
+  // Two extra modules of margin on each side, horizontally and vertically.
+  expect(widthOf(wide!) - widthOf(narrow!)).toBe(4);
+  expect(wide!.split("\n").length).toBe(narrow!.split("\n").length + 2);
+
+  // The margin is still margin: the outer rows carry no dark modules at all.
+  const lines = wide!.split("\n");
+  expect(lines[0]).not.toContain("\x1b[30m");
+  expect(lines[1]).not.toContain("\x1b[30m");
+  expect(lines.at(-1)).not.toContain("\x1b[30m");
+});
+
 test("a QR renders with an explicit background so it cannot come out inverted", async () => {
   const block = await qrCode("ws://192.168.1.24:8787/?token=abc");
 

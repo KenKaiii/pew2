@@ -165,6 +165,32 @@ export interface Workspace {
   uncommitted: number;
 }
 
+/** A directory offered by the picker: a suggested repo, or a browsed folder. */
+export interface WorkspaceEntry {
+  path: string;
+  name: string;
+  repo: boolean;
+  updatedAt?: string;
+}
+
+/**
+ * The state of browsing for somewhere to work.
+ *
+ * Held here rather than inside the sheet so an in-flight answer survives the
+ * sheet unmounting, and so a reply for a directory the user has already
+ * navigated away from can be dropped by comparing `requestId`.
+ */
+export interface WorkspaceBrowse {
+  /** The directory being shown. Absent while showing suggested repositories. */
+  path?: string;
+  /** Where "up" leads, absent at the top of what may be browsed. */
+  parent?: string;
+  entries: WorkspaceEntry[];
+  loading: boolean;
+  /** The daemon would not open that path: missing, a file, or out of bounds. */
+  refused: boolean;
+}
+
 interface State {
   status: Status;
   providers: Provider[];
@@ -205,6 +231,14 @@ interface State {
   loadingSession: boolean;
   /** Project and git state for the session on screen. Absent until asked. */
   workspace?: Workspace;
+  /**
+   * Browsing the desktop for a project to start in.
+   *
+   * Absent until the user opens the picker. This is the only way into an agent
+   * with no history: its project list is folded from its own past sessions, so
+   * a freshly installed one has nothing to offer.
+   */
+  browse?: WorkspaceBrowse;
   /**
    * How full the agent's context window is, for the session on screen.
    *
@@ -420,6 +454,12 @@ export function useDaemon(url: string, deviceId = "phone", options: DaemonOption
   // choosing a project shows the loading skeleton rather than the empty state
   // it is about to replace.
   const pendingProjectSessions = useRef(new Set<string>());
+  // The directory listing the picker is currently waiting for. Only the newest
+  // request may write to state: tapping down two levels quickly produces two
+  // listings in flight, and the slower one must not land last and rewind the
+  // view the user is already looking at.
+  const browseRequest = useRef<string | undefined>(undefined);
+  const browseCounter = useRef(0);
   // Highest `seq` seen per session.
   //
   // This is what makes reconnecting gap-free. ACP does not replay messages
@@ -790,6 +830,42 @@ export function useDaemon(url: string, deviceId = "phone", options: DaemonOption
             uncommitted: message.uncommitted ?? 0,
           };
           setState((s) => ({ ...s, workspace }));
+          return;
+        }
+
+        // Browsing the desktop for a project. Answers are matched on
+        // `requestId` so a slow listing for a directory the user has already
+        // navigated away from cannot overwrite the one they are looking at —
+        // which is otherwise easy to trigger by tapping down two levels fast.
+        if (message.t === "workspaces" && typeof message.requestId === "string") {
+          if (message.requestId !== browseRequest.current) return;
+          const refused = message.refused === true;
+          setState((s) => ({
+            ...s,
+            browse: {
+              // A refusal names no directory, so the one already on screen is
+              // kept. Taking the absent path would drop the pane back to the
+              // suggestions view — losing the user's place as the reward for
+              // tapping something that could not be opened.
+              path: refused
+                ? s.browse?.path
+                : typeof message.path === "string"
+                  ? message.path
+                  : undefined,
+              parent: refused
+                ? s.browse?.parent
+                : typeof message.parent === "string"
+                  ? message.parent
+                  : undefined,
+              entries: refused
+                ? (s.browse?.entries ?? [])
+                : Array.isArray(message.entries)
+                  ? (message.entries as WorkspaceEntry[])
+                  : [],
+              loading: false,
+              refused,
+            },
+          }));
           return;
         }
 
@@ -1436,6 +1512,38 @@ export function useDaemon(url: string, deviceId = "phone", options: DaemonOption
         }));
         // The request itself is an effect below, so a project chosen while
         // offline is still asked for the moment the socket comes back.
+      },
+
+      /**
+       * Look on the desktop for somewhere to work.
+       *
+       * Call with no path for the opening view — git checkouts the daemon found
+       * — and with one to browse into a directory. This is the only route into
+       * an agent that has never been used: its project list comes from its own
+       * past sessions, so a new agent offers nothing to pick.
+       */
+      browseWorkspaces: (path?: string) => {
+        // Monotonic, and compared on arrival: two listings can be in flight at
+        // once if the user taps quickly, and only the newest may render.
+        const requestId = `ws_${++browseCounter.current}`;
+        browseRequest.current = requestId;
+
+        const sent = post({ t: "workspaces", requestId, path });
+        setState((s) => ({
+          ...s,
+          browse: {
+            // The previous listing is kept underneath the spinner rather than
+            // cleared: blanking the list on every tap makes the picker flash
+            // empty between levels.
+            path: path ?? s.browse?.path,
+            parent: s.browse?.parent,
+            entries: s.browse?.entries ?? [],
+            loading: sent,
+            // Not a refusal — the request never reached the daemon. The picker
+            // shows the offline case from `status`, which is already on screen.
+            refused: false,
+          },
+        }));
       },
 
       /** Choose which agent the composer targets. Ends any open session. */

@@ -19,7 +19,7 @@ Then, from anywhere:
 ```bash
 pew2 setup             # find agents, verify them, report what is missing
 pew2 service install   # keep the daemon running across reboots
-pew2 pair              # QR + link for the phone
+pew2 pair              # QR + link for the phone, then waits and confirms the scan
 ```
 
 Pairing is one time per phone. The daemon is what must keep running, which is
@@ -32,7 +32,21 @@ Rather than integrating each agent one by one, pew2 speaks the
 works — and there are already ~40, including Claude, Codex, Gemini, Copilot,
 Cursor, Goose, OpenCode and OpenHands.
 
-**Adding an agent is one JSON file.** No code, no rebuild:
+**You do not have to add them by hand.** `registry sync` pulls the public ACP
+registry, so a newly published agent is available without a release of pew2:
+
+```bash
+pew2 detect                          # configure agents already on your PATH
+pew2 registry sync                   # add every agent in the public ACP registry
+pew2 registry sync --dry-run         # ...or just see what it would add
+```
+
+Sync never downloads anything executable — agents distributed as platform
+binaries are added as manifests that light up once you install the agent its own
+way. It also never overwrites a manifest it did not write; `--force` if you want
+it to.
+
+**Adding your own agent is one JSON file.** No code, no rebuild:
 
 ```bash
 npm run providers:validate           # check every manifest

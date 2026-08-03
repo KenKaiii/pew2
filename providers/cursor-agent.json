@@ -1,0 +1,23 @@
+{
+  "$schema": "../schemas/provider.schema.json",
+  "id": "cursor-agent",
+  "name": "Cursor Agent",
+  "version": "1.0.0",
+  "description": "Cursor's coding agent CLI. Install from cursor.com/cli, then it speaks ACP over stdio.",
+  "distribution": {
+    "type": "command",
+    "command": "cursor-agent",
+    "args": [
+      "acp"
+    ]
+  },
+  "repository": "https://cursor.com/docs/cli/acp",
+  "authors": [
+    "Cursor"
+  ],
+  "license": "proprietary",
+  "pew": {
+    "transport": "acp",
+    "color": "#94a3b8"
+  }
+}

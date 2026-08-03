@@ -1,0 +1,24 @@
+{
+  "$schema": "../schemas/provider.schema.json",
+  "id": "cline",
+  "name": "Cline",
+  "version": "1.0.0",
+  "description": "Autonomous coding agent CLI, in ACP mode.",
+  "distribution": {
+    "type": "npx",
+    "package": "cline",
+    "version": "latest",
+    "args": [
+      "--acp"
+    ]
+  },
+  "repository": "https://github.com/cline/cline",
+  "authors": [
+    "Cline"
+  ],
+  "license": "Apache-2.0",
+  "pew": {
+    "transport": "acp",
+    "color": "#818cf8"
+  }
+}

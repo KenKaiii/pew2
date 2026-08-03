@@ -225,6 +225,49 @@ export const ResumeSession = z.object({
   cwd: z.string().optional(),
 });
 
+/**
+ * App -> daemon. Find somewhere to work.
+ *
+ * The project list in the drawer is folded from an agent's own past sessions,
+ * so a freshly installed agent offers nothing and cannot be started. The
+ * directories are on the desktop, and a phone's file picker returns a handle
+ * that machine cannot use — so the daemon looks and the phone renders.
+ *
+ * Omit `path` for the opening view: a scan for git checkouts, which is what
+ * makes this usable on a touchscreen instead of a walk down from `/`.
+ */
+export const WorkspacesRequest = z.object({
+  t: z.literal("workspaces"),
+  requestId: z.string(),
+  /** Browse this directory. Absent means "suggest repositories". */
+  path: z.string().optional(),
+});
+
+export const WorkspaceEntry = z.object({
+  path: z.string(),
+  name: z.string(),
+  repo: z.boolean(),
+  updatedAt: z.string().optional(),
+});
+
+/** Daemon -> app. Answer to `workspaces`. */
+export const Workspaces = z.object({
+  t: z.literal("workspaces"),
+  requestId: z.string(),
+  /** The directory listed, absent for the suggestions view. */
+  path: z.string().optional(),
+  /** Where "up" goes, absent at a browsable root. */
+  parent: z.string().optional(),
+  entries: z.array(WorkspaceEntry),
+  /**
+   * The request named a path that is missing, not a directory, or outside the
+   * roots browsing is allowed to reach. One flag rather than three: the client
+   * shows the same "can't open that" either way, and distinguishing them tells
+   * a caller holding a stolen token what exists on the disk.
+   */
+  refused: z.boolean().default(false),
+});
+
 /** App -> daemon. Start a new session with a provider. */
 export const StartSession = z.object({
   t: z.literal("session.start"),
@@ -399,6 +442,20 @@ export const SessionIdle = z.object({
   folder: z.string().optional(),
 });
 
+/**
+ * Daemon -> every other client, when one of them says `hello`.
+ *
+ * The daemon is the only party that sees arrivals on both transports, so it is
+ * the only party that can report them consistently. `pew2 pair` uses this to
+ * turn a printed QR into a confirmed pairing; clients that do not care are
+ * expected to ignore it.
+ */
+export const DeviceJoined = z.object({
+  t: z.literal("device.joined"),
+  deviceId: z.string(),
+  at: z.number().int(),
+});
+
 export const ErrorMessage = z.object({
   t: z.literal("error"),
   code: z.string(),
@@ -418,6 +475,7 @@ export const ClientMessage = z.discriminatedUnion("t", [
   PermissionReply,
   ImageRequest,
   WorkspaceRequest,
+  WorkspacesRequest,
 ]);
 
 export const ServerMessage = z.discriminatedUnion("t", [
@@ -430,6 +488,8 @@ export const ServerMessage = z.discriminatedUnion("t", [
   Replay,
   ImageData,
   Workspace,
+  Workspaces,
+  DeviceJoined,
   ErrorMessage,
 ]);
 
@@ -455,5 +515,8 @@ export type WorkspaceRequest = z.output<typeof WorkspaceRequest>;
 export type Workspace = z.output<typeof Workspace>;
 export type SessionEvent = z.output<typeof SessionEvent>;
 export type SessionIdle = z.output<typeof SessionIdle>;
+export type DeviceJoined = z.output<typeof DeviceJoined>;
+export type WorkspaceEntry = z.output<typeof WorkspaceEntry>;
+export type Workspaces = z.output<typeof Workspaces>;
 export type ClientMessage = z.output<typeof ClientMessage>;
 export type ServerMessage = z.output<typeof ServerMessage>;

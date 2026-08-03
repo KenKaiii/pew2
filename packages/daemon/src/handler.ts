@@ -16,6 +16,7 @@ import { humanError } from "./errors.js";
 import { loadImage } from "./images.js";
 import { workspaceStatus } from "./git.js";
 import { resolveWorkspace } from "./workspace.js";
+import { discoverRepos, listDirectory } from "./workspaces.js";
 import { wire } from "@pew2/protocol";
 
 export interface HandlerContext {
@@ -38,11 +39,16 @@ interface ClientMessage {
   requestId?: string;
   optionId?: string;
   configId?: string;
+  /** Directory to browse, for `workspaces`. Distinct from `cwd`, which names
+   *  where a session runs rather than what is being looked at. */
+  path?: string;
   value?: string | boolean;
   agentSessionId?: string;
   refresh?: boolean;
   uri?: string;
   attachments?: unknown;
+  role?: string;
+  deviceId?: string;
 }
 
 /**
@@ -83,6 +89,21 @@ export async function handleMessage(raw: string, ctx: HandlerContext): Promise<v
         // that a client has arrived, so it is what triggers the announcement.
         // Announcing is idempotent, so doing it on both paths is harmless.
         await daemon.refreshProviders();
+
+        // Announce the arrival to everyone else. `pew2 pair` listens for this
+        // to turn "scan this" into "paired", and it belongs here rather than in
+        // either transport for the same reason the rest of this switch does: a
+        // phone may arrive over the relay while the CLI watches the LAN socket,
+        // and both paths must produce the identical event.
+        //
+        // Daemons are excluded — only a client joining is news.
+        if (message.role !== "daemon") {
+          broadcast({
+            t: "device.joined",
+            deviceId: message.deviceId ?? "a device",
+            at: Date.now(),
+          });
+        }
         break;
 
       case "provider.capabilities": {
@@ -318,6 +339,58 @@ export async function handleMessage(raw: string, ctx: HandlerContext): Promise<v
           // already navigated away from.
           sessionId: message.sessionId,
           ...(await workspaceStatus(root)),
+        });
+        break;
+      }
+
+      case "workspaces": {
+        // The counterpart to `workspace` above, and the one place a client-named
+        // path *is* honoured. That case refuses them because answering "does
+        // this exist" for an arbitrary string is a filesystem oracle; here the
+        // user is deliberately browsing, so the protection is different in kind:
+        // every path is resolved through symlinks and must land inside
+        // `browsableRoots()`, and anything else comes back as one flat
+        // `refused` rather than a reason that would leak what is there.
+        //
+        // Without this an agent with no history cannot be started at all: its
+        // project list is folded from its own past sessions, so a newly
+        // installed agent offers nothing to pick.
+        if (!message.requestId) throw new Error("requestId required");
+
+        if (!message.path) {
+          // Opening view: the good guesses. Walking down from home on a
+          // touchscreen is the thing this exists to avoid.
+          const suggestions = await discoverRepos();
+          // Recorded so that choosing one is recognised. A browsed directory has
+          // no sessions yet, so it is not a "known project", and without this the
+          // composer would name the agent's previous project while working in
+          // this one.
+          daemon.rememberOfferedWorkspaces(suggestions.map((entry) => entry.path));
+          reply({
+            t: "workspaces",
+            requestId: message.requestId,
+            entries: suggestions,
+            refused: false,
+          });
+          break;
+        }
+
+        const listing = await listDirectory(message.path);
+        if (listing) {
+          // The listed directory itself is offerable too: it is where "start
+          // here" acts once the user has navigated into it.
+          daemon.rememberOfferedWorkspaces([
+            listing.path,
+            ...listing.entries.map((entry) => entry.path),
+          ]);
+        }
+        reply({
+          t: "workspaces",
+          requestId: message.requestId,
+          path: listing?.path,
+          parent: listing?.parent,
+          entries: listing?.entries ?? [],
+          refused: listing === undefined,
         });
         break;
       }

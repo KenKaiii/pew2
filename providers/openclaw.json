@@ -1,0 +1,31 @@
+{
+  "$schema": "../schemas/provider.schema.json",
+  "id": "openclaw",
+  "name": "OpenClaw",
+  "version": "1.0.0",
+  "description": "OpenClaw's ACP bridge. Speaks ACP over stdio and forwards prompts to a local or remote OpenClaw Gateway, so a Gateway must already be running.",
+  "distribution": {
+    "type": "command",
+    "command": "openclaw",
+    "args": ["acp"]
+  },
+  "repository": "https://github.com/openclaw/openclaw",
+  "authors": ["OpenClaw"],
+  "license": "MIT",
+  "pew": {
+    "transport": "acp",
+    "color": "#c2410c",
+    "env": [
+      {
+        "name": "OPENCLAW_GATEWAY_TOKEN",
+        "description": "Token auth for a remote Gateway. Optional: a local Gateway on the same machine resolves its own credentials, so requiring this would wrongly gate the common setup.",
+        "required": false
+      },
+      {
+        "name": "OPENCLAW_GATEWAY_PASSWORD",
+        "description": "Password auth for a remote Gateway. The alternative to OPENCLAW_GATEWAY_TOKEN, not an addition to it.",
+        "required": false
+      }
+    ]
+  }
+}

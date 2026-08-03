@@ -3,15 +3,19 @@
   "id": "gemini-cli",
   "name": "Gemini CLI",
   "version": "1.0.0",
-  "description": "Google's Gemini CLI, the original ACP launch partner. Speaks ACP natively.",
+  "description": "Google's Gemini CLI. Speaks ACP natively, but needs GEMINI_API_KEY: Google withdrew Sign-in-with-Google for Gemini Code Assist for individuals, so OAuth-authenticated installs now fail.",
   "distribution": {
     "type": "npx",
     "package": "@google/gemini-cli",
     "version": "latest",
-    "args": ["--experimental-acp"]
+    "args": [
+      "--acp"
+    ]
   },
   "repository": "https://github.com/google-gemini/gemini-cli",
-  "authors": ["Google"],
+  "authors": [
+    "Google"
+  ],
   "license": "Apache-2.0",
   "pew": {
     "transport": "acp",
@@ -19,8 +23,8 @@
     "env": [
       {
         "name": "GEMINI_API_KEY",
-        "description": "Gemini API key. Omit if the Gemini CLI is already authenticated.",
-        "required": false
+        "description": "Gemini API key from https://aistudio.google.com/apikey. Now required: Google rejects Sign-in-with-Google for Gemini Code Assist for individuals, so an OAuth-only install fails every request with 'This client is no longer supported'.",
+        "required": true
       }
     ]
   }

@@ -1,0 +1,24 @@
+{
+  "$schema": "../schemas/provider.schema.json",
+  "id": "opencode",
+  "name": "OpenCode",
+  "version": "1.0.0",
+  "description": "The open source coding agent. Speaks ACP natively over stdio.",
+  "distribution": {
+    "type": "npx",
+    "package": "opencode-ai",
+    "version": "latest",
+    "args": [
+      "acp"
+    ]
+  },
+  "repository": "https://github.com/anomalyco/opencode",
+  "authors": [
+    "Anomaly"
+  ],
+  "license": "MIT",
+  "pew": {
+    "transport": "acp",
+    "color": "#e4e4e7"
+  }
+}

@@ -58,6 +58,7 @@ import { CircleButton, Pill } from "./src/ui/controls";
 import { haptics } from "./src/ui/haptics";
 import { Sidebar, DRAWER_WIDTH } from "./src/ui/Sidebar";
 import { projectsForProvider } from "./src/projects";
+import { greetingFor, hashSeed } from "./src/greeting";
 import { ConfigPicker, summarise, valueName } from "./src/ui/ConfigPicker";
 import { useReducedMotion } from "./src/ui/useReducedMotion";
 import { ProgressiveBlur } from "./src/ui/ProgressiveBlur";
@@ -385,6 +386,25 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
   const answering = newest?.role === "agent" && newest.text.trim().length > 0;
   const running = currentTool(daemon.activity) !== undefined;
   const working = daemon.busy && !daemon.loadingSession && (running || !answering);
+
+  // Counts arrivals at the empty state, which is the only screen the greeting
+  // appears on.
+  //
+  // `threadKey` is not enough on its own: it stays `"new"` for every new chat,
+  // so seeding on it alone would show one fixed line per agent forever — a
+  // rotation that never rotates on precisely the path that shows it. Bumped on
+  // arrival rather than derived from a clock so the words are still stable
+  // while the state is on screen, which is what stops them changing under a
+  // reader on every keystroke in the composer.
+  const [greetingRound, setGreetingRound] = useState(0);
+  useEffect(() => {
+    if (!inThread) setGreetingRound((round) => round + 1);
+  }, [inThread, threadKey]);
+
+  const greeting = useMemo(
+    () => greetingFor(active?.name, hashSeed(`${greetingRound}:${active?.id ?? ""}`)),
+    [greetingRound, active?.id, active?.name],
+  );
 
   useEffect(() => {
     // Every transcript opens on its newest message, so it starts at the bottom
@@ -957,7 +977,7 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
                 {daemon.status !== "online"
                   ? "Connecting to your machine..."
                   : active
-                    ? `What would you like ${active.name} to do?`
+                    ? greeting
                     : "No agents available on this machine."}
               </Text>
             </Pressable>
@@ -1054,6 +1074,8 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
         projects={projects}
         onStart={startNewChat}
         onClose={closeNewChat}
+        browse={daemon.browse}
+        onBrowse={daemon.browseWorkspaces}
       />
 
       <AttachmentSheet visible={attachOpen} onSelect={pickAttachment} onClose={closeAttach} />
