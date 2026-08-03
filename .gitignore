@@ -10,3 +10,7 @@ dist/
 
 # Local agent scratch: screenshots and other debug artifacts.
 .gg/
+# One-off repro scripts. Debugging a spawn or a handshake wants a throwaway file
+# at the repo root, and one has already been left behind once; the suffix makes
+# that impossible rather than something to remember.
+*.tmp.ts
