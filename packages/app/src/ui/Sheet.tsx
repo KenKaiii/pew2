@@ -10,6 +10,11 @@
  * scrim or the close button; an approval request is *not* — the agent is
  * blocked on an answer, and a stray tap that dismissed it would strand the turn
  * with no way back.
+ *
+ * A sheet with steps changes its own title and swaps close for back as it goes.
+ * Both cross-fade, because the content underneath them is travelling: a header
+ * that cuts while the panes slide is the one part of the movement that gives
+ * away there were two cards all along.
  */
 import { memo, useEffect, useRef, useState, type ReactNode } from "react";
 import { Animated, Pressable, StyleSheet, Text, View } from "react-native";
@@ -30,12 +35,19 @@ interface SheetProps {
   title: string;
   /** Omitted for a blocking sheet: no close button, and the scrim is inert. */
   onClose?: () => void;
+  /**
+   * Turns the header's close button into a back button, for a sheet that has a
+   * second step. Dismissal stays available on the scrim, which is how a pushed
+   * screen behaves everywhere else on the platform — two buttons in a header
+   * this size would crowd the title off centre.
+   */
+  onBack?: () => void;
   /** Accessible name for the scrim and close button. */
   dismissLabel?: string;
   children: ReactNode;
 }
 
-function SheetView({ visible, title, onClose, dismissLabel, children }: SheetProps) {
+function SheetView({ visible, title, onClose, onBack, dismissLabel, children }: SheetProps) {
   const insets = useSafeAreaInsets();
   const reduceMotion = useReducedMotion();
   const progress = useRef(new Animated.Value(0)).current;
@@ -120,18 +132,27 @@ function SheetView({ visible, title, onClose, dismissLabel, children }: SheetPro
         <View style={styles.grabber} />
 
         <View style={styles.header}>
-          {onClose ? (
+          {/* Keyed, and that is what makes the fade happen at all: both branches
+              render a CircleButton at the same position, so without distinct
+              keys React reconciles one instance, the icon never remounts, and
+              the swap hard-cuts. */}
+          {onBack ? (
+            <CircleButton key="back" label="Back" onPress={onBack} size={theme.size.chip}>
+              <CrossfadeIcon name="chevron-back" />
+            </CircleButton>
+          ) : onClose ? (
             <CircleButton
+              key="close"
               label={dismissLabel ?? `Close ${title}`}
               onPress={onClose}
               size={theme.size.chip}
             >
-              <Ionicons name="close" size={18} color={theme.color.text} />
+              <CrossfadeIcon name="close" />
             </CircleButton>
           ) : (
             <View style={styles.headerSpacer} />
           )}
-          <Text style={styles.title}>{title}</Text>
+          <CrossfadeTitle title={title} />
           {/* Balances the close button so the title stays optically centred. */}
           <View style={styles.headerSpacer} />
         </View>
@@ -139,6 +160,81 @@ function SheetView({ visible, title, onClose, dismissLabel, children }: SheetPro
         {children}
       </Animated.View>
     </View>
+  );
+}
+
+/**
+ * The title, re-fading whenever the words change.
+ *
+ * Out then in, rather than two copies dissolving into each other: a title is
+ * centred, so two of different widths overlapping mid-fade read as a smear. The
+ * swap happens at zero opacity, and the pane travelling underneath is what
+ * carries the sense of direction.
+ */
+function CrossfadeTitle({ title }: { title: string }) {
+  const reduceMotion = useReducedMotion();
+  const shown = useRef(title);
+  const fade = useRef(new Animated.Value(1)).current;
+  const [rendered, setRendered] = useState(title);
+
+  useEffect(() => {
+    if (title === shown.current) return;
+    shown.current = title;
+    if (reduceMotion) {
+      setRendered(title);
+      return;
+    }
+    const animation = Animated.timing(fade, {
+      toValue: 0,
+      duration: 110,
+      useNativeDriver: true,
+    });
+    animation.start(({ finished }) => {
+      // A second change interrupts the first: `stop()` reports unfinished, and
+      // the newer effect owns the swap. Without this guard the stale title
+      // would be committed on top of it.
+      if (!finished) return;
+      setRendered(title);
+      Animated.timing(fade, { toValue: 1, duration: 150, useNativeDriver: true }).start();
+    });
+    return () => animation.stop();
+  }, [title, reduceMotion, fade]);
+
+  return (
+    <Animated.Text style={[styles.title, { opacity: fade }]} numberOfLines={1}>
+      {rendered}
+    </Animated.Text>
+  );
+}
+
+/**
+ * The header glyph, fading in when it is swapped for a different one.
+ *
+ * Remounted by the keys on the buttons above, so this only ever plays the
+ * arrival — the half that matters when close becomes back.
+ */
+function CrossfadeIcon({ name }: { name: keyof typeof Ionicons.glyphMap }) {
+  const reduceMotion = useReducedMotion();
+  const fade = useRef(new Animated.Value(reduceMotion ? 1 : 0)).current;
+
+  useEffect(() => {
+    if (reduceMotion) {
+      fade.setValue(1);
+      return;
+    }
+    const animation = Animated.timing(fade, {
+      toValue: 1,
+      duration: 160,
+      useNativeDriver: true,
+    });
+    animation.start();
+    return () => animation.stop();
+  }, [reduceMotion, fade]);
+
+  return (
+    <Animated.View style={{ opacity: fade }}>
+      <Ionicons name={name} size={18} color={theme.color.text} />
+    </Animated.View>
   );
 }
 

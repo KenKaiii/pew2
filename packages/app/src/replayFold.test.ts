@@ -42,6 +42,19 @@ test("a batch of chunks lands as coalesced turns in one state", () => {
   expect(next.busy).toBe(true);
 });
 
+test("replayed messages sent either side of a tool call keep their paragraph break", () => {
+  // Tool calls create no turn, so messages the agent sent while working all
+  // coalesce into one bubble. Concatenated bare, a resumed thread rendered
+  // "Let me check.Ah, I found it." — and replay must reproduce exactly what the
+  // live path showed, or history looks unlike the conversation that made it.
+  const next = foldSessionEvents(state([], [sessionStub]), [
+    agent(0, "Let me check."),
+    agent(1, "Ah, I found it."),
+  ]);
+
+  expect(next.turns[0]?.text).toBe("Let me check.\n\nAh, I found it.");
+});
+
 test("the session mirror gains the turns and a title from the first user message", () => {
   const next = foldSessionEvents(state([], [sessionStub]), [user(0, "Refactor auth"), agent(1, "On it")]);
 
@@ -152,4 +165,25 @@ test("a picture without words still becomes a turn", () => {
 
   expect(next.turns).toHaveLength(1);
   expect(next.turns[0]!.images).toHaveLength(1);
+});
+
+test("replay restores the context percentage, unlike busy", () => {
+  // The last reading is the session's current state, not a description of work
+  // in progress: without this a reconnect blanks the meter until the agent
+  // happens to send another one, mid-conversation, when it matters most.
+  const state = {
+    turns: [],
+    sessions: [],
+    busy: false,
+    usage: undefined as { used: number; size: number } | undefined,
+  };
+
+  const folded = foldSessionEvents(state, [
+    { sessionId: "s1", seq: 1, payload: { update: { sessionUpdate: "usage_update", used: 10, size: 1000 } } },
+    { sessionId: "s1", seq: 2, payload: { update: { sessionUpdate: "usage_update", used: 250, size: 1000 } } },
+  ]);
+
+  expect(folded.usage).toEqual({ used: 250, size: 1000 });
+  // Still history, so it must not look like a turn in progress.
+  expect(folded.busy).toBe(false);
 });

@@ -10,6 +10,8 @@
  * Pure and React-free so the fold is directly testable.
  */
 import { isEmptyChunk, readChunk, type Chunk } from "./chunks";
+import { joinChunks } from "./chunkJoin";
+import { readUsage, type ContextUsage } from "./contextUsage";
 import { dedupeImages } from "./images";
 import type { Session, Turn } from "./useDaemon";
 
@@ -29,7 +31,15 @@ export function mergeChunk(turn: Turn, chunk: Chunk): Turn {
   const images = chunk.images
     ? dedupeImages([...(turn.images ?? []), ...chunk.images])
     : turn.images;
-  return { ...turn, text: turn.text + chunk.text, ...(images ? { images } : {}) };
+  // Not a bare concatenation: some agents stream tokens (join them and nothing
+  // else) while others send whole messages as they work, which ran together as
+  // "Let me check that.Ah, I found it." See `chunkJoin.ts` — the seam decides,
+  // so this is right for every agent rather than for a listed few.
+  return {
+    ...turn,
+    text: joinChunks(turn.text, chunk.text),
+    ...(images ? { images } : {}),
+  };
 }
 
 /** A fresh turn for a chunk that starts a new bubble. */
@@ -53,6 +63,7 @@ interface FoldState {
   sessions: Session[];
   busy: boolean;
   permission?: unknown;
+  usage?: ContextUsage;
 }
 
 export function foldSessionEvents<S extends FoldState>(
@@ -62,6 +73,12 @@ export function foldSessionEvents<S extends FoldState>(
   if (events.length === 0) return prev;
 
   const turns = [...prev.turns];
+  // Context usage is the opposite case to `busy` below: it is not a description
+  // of work in progress but the session's *current* state, and the last reading
+  // in the batch is still true. Skipping it would blank the percentage on every
+  // reconnect until the agent happened to send another one — which, mid-
+  // conversation, is the moment it is most worth knowing.
+  let usage = prev.usage;
   // `busy` and `permission` are deliberately left alone. They describe a turn
   // in progress *now*: a replay is history, so its last chunk is not work
   // being done (a looping "working" indicator on every resumed thread) and a
@@ -73,6 +90,11 @@ export function foldSessionEvents<S extends FoldState>(
 
   for (const message of events) {
     const payload = message?.payload;
+    const replayedUsage = readUsage(payload);
+    if (replayedUsage) {
+      usage = replayedUsage;
+      continue;
+    }
     const chunk = readChunk(payload);
     if (!chunk || isEmptyChunk(chunk)) continue;
 
@@ -116,6 +138,7 @@ export function foldSessionEvents<S extends FoldState>(
   return {
     ...prev,
     turns,
+    usage,
     sessions: prev.sessions.map((session) => byId.get(session.id) ?? session),
   };
 }

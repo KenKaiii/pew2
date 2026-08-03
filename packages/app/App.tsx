@@ -45,6 +45,7 @@ import { Composer, type ComposerHandle } from "./src/ui/Composer";
 import { ChatThread, type ChatThreadRef } from "./src/ui/ChatThread";
 import { ImageResolverProvider } from "./src/ui/ChatImage";
 import { CommandSheet } from "./src/ui/CommandSheet";
+import { NewChatSheet } from "./src/ui/NewChatSheet";
 import { AttachmentSheet, type AttachmentSource } from "./src/ui/AttachmentSheet";
 import { addAttachments, MAX_ATTACHMENTS, type PendingAttachment } from "./src/attachments";
 import { pickFiles, pickPhotos, takePhoto } from "./src/ui/attachmentPicker";
@@ -301,6 +302,7 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
   // under it instead of always at the gutter.
   const [picker, setPicker] = useState<"model" | "mode" | null>(null);
   const [commandsOpen, setCommandsOpen] = useState(false);
+  const [newChatOpen, setNewChatOpen] = useState(false);
   // The reasoning currently being read, if any. Held here rather than per turn
   // so the sheet lives outside the recycling list — a cell scrolled off screen
   // must not take the sheet down with it.
@@ -687,10 +689,28 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
     [],
   );
 
-  const newConversation = useCallback(() => {
-    daemon.leave();
-    setMenuOpen(false);
-  }, [daemon.leave]);
+  /**
+   * Leave the current conversation, with the next one aimed at `cwd`.
+   *
+   * Aiming it *is* choosing a project, so this goes through the same selection
+   * the drawer uses rather than a second, private notion of "where the next
+   * chat goes" — two of those would disagree the moment either was used. It
+   * narrows the drawer as a side effect, which is the honest reading: the app
+   * has one current project, and this just moved it.
+   */
+  const startNewChat = useCallback(
+    (cwd?: string) => {
+      if (cwd && active) daemon.selectProject(active.id, cwd);
+      daemon.leave();
+      setNewChatOpen(false);
+      setMenuOpen(false);
+    },
+    [active?.id, daemon.selectProject, daemon.leave],
+  );
+  const closeNewChat = useCallback(() => setNewChatOpen(false), []);
+  // The drawer only ever offers this beside a named project, so it always has
+  // a path to hand — no undefined branch to fall back on here.
+  const newConversation = startNewChat;
 
   const pickCommand = useCallback((command: SlashCommand) => {
     // Placed in the composer rather than sent: a command may still want an
@@ -871,7 +891,10 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
         <View style={styles.topBarSpacer} />
 
         {inThread && (
-          <CircleButton label="New conversation" onPress={daemon.leave}>
+          // Asks where, rather than starting one immediately: the old behaviour
+          // always landed wherever the agent happened to be, which is the wrong
+          // project as often as the right one and was unfixable from the phone.
+          <CircleButton label="New conversation" onPress={() => setNewChatOpen(true)}>
             <Ionicons name="create-outline" size={18} color={theme.color.text} />
           </CircleButton>
         )}
@@ -980,12 +1003,13 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
               under it would only resize the thread behind a covered surface.
 
               The context row shows what the next prompt acts on — project,
-              uncommitted work, and the commands the agent offers (an empty
-              sheet is worse than no button). Never while typing: the draft is
-              the subject then, and the row would only crowd it. */}
-          {!typing && (daemon.commands.length > 0 || daemon.workspace) && (
+              context fill, uncommitted work, and the commands the agent offers
+              (an empty sheet is worse than no button). Never while typing: the
+              draft is the subject then, and the row would only crowd it. */}
+          {!typing && (daemon.commands.length > 0 || daemon.workspace || daemon.usage) && (
             <ContextBar
               workspace={daemon.workspace}
+              usage={daemon.usage}
               showCommands={daemon.commands.length > 0}
               onCommands={openCommands}
             />
@@ -1021,6 +1045,15 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
         commands={daemon.commands}
         onSelect={pickCommand}
         onClose={closeCommands}
+      />
+
+      <NewChatSheet
+        visible={newChatOpen}
+        currentFolder={daemon.workspace?.folder}
+        currentCwd={daemon.workspace?.cwd}
+        projects={projects}
+        onStart={startNewChat}
+        onClose={closeNewChat}
       />
 
       <AttachmentSheet visible={attachOpen} onSelect={pickAttachment} onClose={closeAttach} />

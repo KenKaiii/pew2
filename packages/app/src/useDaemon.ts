@@ -34,6 +34,7 @@ import {
   type SlashCommand,
 } from "./slashCommands";
 import type { WireProject } from "./projects";
+import { readUsage, type ContextUsage } from "./contextUsage";
 import {
   foldSessionEvents,
   isOptimistic,
@@ -205,6 +206,26 @@ interface State {
   /** Project and git state for the session on screen. Absent until asked. */
   workspace?: Workspace;
   /**
+   * How full the agent's context window is, for the session on screen.
+   *
+   * Absent until the agent volunteers one, and it stays absent for agents that
+   * never do (GG Coder sends none today) — which is why the row omits the
+   * reading entirely rather than showing a confident 0%.
+   */
+  usage?: ContextUsage;
+  /**
+   * Bumped whenever the answer is stale for a reason the request itself cannot
+   * see.
+   *
+   * The workspace request is driven by session, provider and chosen project, so
+   * it re-asks when one of those changes. Leaving a conversation changes none of
+   * them: from the empty screen, with a project already picked, "new chat"
+   * clears the workspace and every dependency stays equal — so nothing re-asked
+   * and the project row simply vanished until a prompt created a session. This
+   * is the explicit "ask again" the effect otherwise has no way to hear.
+   */
+  workspaceNonce: number;
+  /**
    * Every project each agent has worked in, keyed by provider id.
    *
    * Folded by the daemon from the agent's whole history, not from `sessions`:
@@ -344,6 +365,7 @@ export function useDaemon(url: string, deviceId = "phone", options: DaemonOption
     loadingSession: false,
     projects: {},
     projectPath: {},
+    workspaceNonce: 0,
   });
 
   // Not in State: this is a cache keyed by provider, not part of the session.
@@ -944,6 +966,16 @@ export function useDaemon(url: string, deviceId = "phone", options: DaemonOption
               const commands = readAvailableCommands(payload);
               if (commands) return { ...base, commands };
 
+              // How full the agent's context window is. Held like `commands` —
+              // it describes the session, not this turn — and filtered to the
+              // session on screen, since the daemon broadcasts every session's
+              // events and another project's meter is not this one's.
+              const usage = readUsage(payload);
+              if (usage) {
+                if (message.sessionId !== sessionRef.current) return base;
+                return { ...base, usage };
+              }
+
               if (payload?.kind === "permission_request") {
                 const params = payload.params ?? {};
                 return {
@@ -1311,6 +1343,10 @@ export function useDaemon(url: string, deviceId = "phone", options: DaemonOption
             sessionId: undefined,
             activeProviderId: session.providerId,
             workspace: undefined,
+            // Belongs to the conversation being left: a context reading is about one
+            // agent's window, and carrying it across would put the previous chat's
+            // percentage beside this one's project.
+            usage: undefined,
             turns: [],
             configOptions: [],
             // Cleared so the previous conversation's menu is not offered for
@@ -1341,8 +1377,16 @@ export function useDaemon(url: string, deviceId = "phone", options: DaemonOption
           ...s,
           sessionId: live ? sessionId : undefined,
           activeProviderId: session.providerId,
-          // Another conversation can be in another project entirely.
+          // Another conversation can be in another project entirely. The nonce
+          // covers the case this branch also serves: opening a *fixture* leaves
+          // `sessionId` and the provider exactly as they were, so without it the
+          // row stays blank rather than coming back.
           workspace: undefined,
+          // Belongs to the conversation being left: a context reading is about one
+          // agent's window, and carrying it across would put the previous chat's
+          // percentage beside this one's project.
+          usage: undefined,
+          workspaceNonce: s.workspaceNonce + 1,
           turns: session.turns,
           configOptions: session.configOptions,
           // This conversation's own state, not a reset: it may still be
@@ -1404,6 +1448,10 @@ export function useDaemon(url: string, deviceId = "phone", options: DaemonOption
           activeProviderId: providerId,
           sessionId: undefined,
           workspace: undefined,
+          // Belongs to the conversation being left: a context reading is about one
+          // agent's window, and carrying it across would put the previous chat's
+          // percentage beside this one's project.
+          usage: undefined,
           turns: [],
           // Selectors belong to the old agent's session; keeping them would
           // show another agent's model name in the top bar. Its slash commands
@@ -1442,9 +1490,16 @@ export function useDaemon(url: string, deviceId = "phone", options: DaemonOption
         setState((s) => ({
           ...s,
           sessionId: undefined,
-          // Belongs to the conversation being closed. The effect below asks
-          // again for wherever the next one will open.
+          // Belongs to the conversation being closed, so it is dropped — and the
+          // nonce is what makes the effect below actually ask again. Leaving
+          // changes none of its other dependencies when the project is already
+          // the chosen one, which is precisely the "new chat" case.
           workspace: undefined,
+          // Belongs to the conversation being left: a context reading is about one
+          // agent's window, and carrying it across would put the previous chat's
+          // percentage beside this one's project.
+          usage: undefined,
+          workspaceNonce: s.workspaceNonce + 1,
           turns: [],
           configOptions: [],
           commands: [],
@@ -1463,7 +1518,8 @@ export function useDaemon(url: string, deviceId = "phone", options: DaemonOption
   // Driven by the session and agent on screen rather than by a one-off request:
   // opening a past conversation, switching agents or reconnecting all change
   // the answer, and each of those is exactly a change to these values. Live
-  // edits are covered by the `session.idle` refresh in the socket handler.
+  // edits are covered by the `session.idle` refresh in the socket handler, and
+  // the cases that clear the row without changing any of these carry the nonce.
   const workspaceProviderId = state.activeProviderId ?? fallbackProviderId;
   useEffect(() => {
     if (state.status !== "online") return;
@@ -1482,6 +1538,9 @@ export function useDaemon(url: string, deviceId = "phone", options: DaemonOption
     state.sessionId,
     workspaceProviderId,
     workspaceProviderId ? state.projectPath[workspaceProviderId] : undefined,
+    // Leaving a conversation changes none of the above when the project is
+    // already the chosen one, and the row would stay empty until a prompt.
+    state.workspaceNonce,
   ]);
 
   // Fall back to the last selectors this agent advertised, so the model picker

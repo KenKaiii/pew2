@@ -70,6 +70,8 @@ function Drawer({ initialPath }: { initialPath?: string }) {
       activeSessionId="s1"
       onSelectProvider={() => {}}
       onOpenSession={() => {}}
+      // Only rendered with a project chosen, so the right-hand mount is the one
+      // that exercises the "+ New chat" chip.
       onNewConversation={() => {}}
       projects={PROJECTS}
       selectedProjectPath={path}

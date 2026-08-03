@@ -26,13 +26,14 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { theme } from "../theme";
 import { Orb } from "./Orb";
-import { CircleButton, touchSlop } from "./controls";
+import { touchSlop } from "./controls";
 import { Glass } from "./Glass";
 import { haptics } from "./haptics";
 import { HistorySkeleton } from "./Skeleton";
 import { orderProvidersByRecency } from "../providerRecency";
 import { formatHistoryMetadata } from "../historyMetadata";
 import { recentSessionsForProvider } from "../sessionHistory";
+import { useReducedMotion } from "./useReducedMotion";
 import { ProjectSelect } from "./ProjectSelect";
 import { ProjectMenu } from "./ProjectMenu";
 import { sessionsInProject, type Project } from "../projects";
@@ -48,7 +49,14 @@ interface SidebarProps {
   activeSessionId?: string;
   onSelectProvider: (id: string) => void;
   onOpenSession: (id: string) => void;
-  onNewConversation: () => void;
+  /**
+   * Starts a conversation in `cwd`.
+   *
+   * Always called with one: the only button that reaches this is beside a named
+   * project, which is what replaced a header button that could not say where
+   * its chat would go.
+   */
+  onNewConversation: (cwd: string) => void;
   /** Projects the selected agent has worked in, newest first. */
   projects: Project[];
   /** The chosen one, or undefined for all of them. */
@@ -319,13 +327,11 @@ function SidebarView({
                 }`}
               />
             </View>
-            <CircleButton
-              label="New conversation"
-              onPress={onNewConversation}
-              size={theme.size.control}
-            >
-              <Ionicons name="create-outline" size={18} color={theme.color.text} />
-            </CircleButton>
+            {/* No button here. A "new chat" in the drawer header sits above the
+                app chips and the project selector both, so it could only mean
+                "somewhere" — it started one wherever the agent last was, which
+                is misleading precisely when it matters. The action now lives
+                beside the project it applies to. */}
           </View>
 
           <ScrollView
@@ -391,7 +397,20 @@ function SidebarView({
               newest conversations, and calling that history promises an archive
               it does not have — the project selector above is what reaches the
               rest. */}
-          <Text style={styles.sectionLabel}>Latest chats</Text>
+          <View style={styles.sectionHeader}>
+            <Text style={styles.sectionLabel}>Latest chats</Text>
+
+            {/* Only with a project chosen, and that is the whole point: a "new
+                chat" button with no project named cannot say where the chat
+                would go, which is exactly the ambiguity this replaces. Here it
+                is unambiguous — the project is on screen directly above it. */}
+            {selectedProject && (
+              <NewChatChip
+                project={selectedProject}
+                onPress={() => onNewConversation(selectedProject.path)}
+              />
+            )}
+          </View>
 
           {/* A provider can hold hundreds of conversations. Rendering them
               all in a ScrollView was the stall when switching to a well-used
@@ -486,6 +505,68 @@ function SidebarView({
   );
 }
 
+/**
+ * "+ New chat", beside the heading, once a project is chosen.
+ *
+ * It appears and disappears with the project selection, so it arrives rather
+ * than pops: scale and fade from the right, anchored where it sits. An element
+ * that materialises next to a heading the user was already reading is the kind
+ * of change that gets noticed as a glitch and not as an offer.
+ *
+ * Entrance only. It unmounts with the selection, and animating that out would
+ * mean holding a button that no longer applies to what the list is showing.
+ */
+function NewChatChip({ project, onPress }: { project: Project; onPress: () => void }) {
+  const reduceMotion = useReducedMotion();
+  const enter = useRef(new Animated.Value(reduceMotion ? 1 : 0)).current;
+
+  useEffect(() => {
+    if (reduceMotion) {
+      enter.setValue(1);
+      return;
+    }
+    const animation = Animated.spring(enter, {
+      toValue: 1,
+      damping: 24,
+      stiffness: 300,
+      mass: 0.8,
+      useNativeDriver: true,
+    });
+    animation.start();
+    return () => animation.stop();
+  }, [reduceMotion, enter]);
+
+  return (
+    <Animated.View
+      style={{
+        opacity: enter,
+        transform: [
+          { scale: enter.interpolate({ inputRange: [0, 1], outputRange: [0.88, 1] }) },
+          // Slides in from the right edge it is pinned to, so the growth reads
+          // as coming from outside the panel rather than out of the heading.
+          { translateX: enter.interpolate({ inputRange: [0, 1], outputRange: [12, 0] }) },
+        ],
+      }}
+    >
+      <Glass radius={theme.radius.pill} interactive>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={`New chat in ${project.name}`}
+          hitSlop={touchSlop(theme.space(1))}
+          onPress={() => {
+            haptics.tap();
+            onPress();
+          }}
+          style={({ pressed }) => [styles.newChip, pressed && styles.pressed]}
+        >
+          <Ionicons name="add" size={16} color={theme.color.text} />
+          <Text style={styles.newChipText}>New chat</Text>
+        </Pressable>
+      </Glass>
+    </Animated.View>
+  );
+}
+
 const styles = StyleSheet.create({
   machine: {
     flexDirection: "row",
@@ -527,7 +608,6 @@ const styles = StyleSheet.create({
   header: {
     flexDirection: "row",
     alignItems: "center",
-    justifyContent: "space-between",
     // Same gutter and the same row height as the conversation's top bar, so
     // the title and the hamburger beside it share one baseline.
     paddingHorizontal: theme.gutter,
@@ -571,12 +651,40 @@ const styles = StyleSheet.create({
   chipDisabled: { opacity: 0.4 },
   pressed: { opacity: 0.6 },
 
+  // A heading, not a caption: the drawer has two sections and they are peers,
+  // so this matches "Connected Apps" exactly rather than sitting below it in
+  // the hierarchy. Its own padding moved to the row that now holds it.
   sectionLabel: {
-    color: theme.color.textDim,
-    fontSize: theme.font.small,
+    color: theme.color.text,
+    fontFamily: theme.display.bold,
+    fontSize: theme.font.title,
+    letterSpacing: 0.4,
+  },
+  // The heading and its action share a baseline: the button is what you do to
+  // the section it names, so it belongs on that line rather than above the list.
+  sectionHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: theme.space(2),
     paddingHorizontal: theme.gutter,
     paddingTop: theme.space(5),
     paddingBottom: theme.space(2),
+    // Always the chip's height, whether or not the chip is there. Otherwise
+    // choosing a project grows this row and shoves the whole list down a
+    // centimetre — the button's own spring lands on top of a jump.
+    minHeight: theme.size.control + theme.space(7),
+  },
+  newChip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.space(1),
+    height: theme.size.control,
+    paddingHorizontal: theme.space(3),
+  },
+  newChipText: {
+    color: theme.color.text,
+    fontSize: theme.font.small,
   },
 
   sessions: { flex: 1 },
