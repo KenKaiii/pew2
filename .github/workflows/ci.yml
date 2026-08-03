@@ -27,3 +27,38 @@ jobs:
       # Exercises the ACP pipeline end to end via providers/echo.json, which
       # needs no API key and no network.
       - run: npm test
+
+  # ios/ and android/ are gitignored (CNG), so no native code is checked in and a
+  # native break is invisible to typecheck. This job regenerates Android from
+  # app.json and compiles it: the only check that proves the plugin set still
+  # merges (two plugins claiming one permission string is a silent overwrite),
+  # that every native module autolinks, and that the manifest builds.
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      # 17 because that is what the build was verified against locally; pinned
+      # rather than inherited so a runner image bump cannot change the JDK under
+      # the build without anyone choosing it.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - run: bun install --frozen-lockfile
+
+      - run: npx expo prebuild --platform android --no-install
+        working-directory: packages/app
+
+      # assembleDebug, not release: there are no signing keys in CI, and the
+      # compile is what catches breakage. Several minutes cold — mostly the NDK
+      # builds reanimated and the app pull in; setup-gradle above caches them.
+      - run: ./gradlew assembleDebug --console=plain
+        working-directory: packages/app/android
