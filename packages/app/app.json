@@ -8,7 +8,10 @@
     "userInterfaceStyle": "dark",
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "dev.pew2.app"
+      "bundleIdentifier": "dev.pew2.app",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
     },
     "android": {
       "package": "dev.pew2.app",
@@ -20,7 +23,15 @@
       },
       "predictiveBackGestureEnabled": false,
       "permissions": [
-        "android.permission.CAMERA"
+        "android.permission.CAMERA",
+        "android.permission.POST_NOTIFICATIONS",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.READ_MEDIA_VISUAL_USER_SELECTED",
+        "android.permission.READ_MEDIA_IMAGES",
+        "android.permission.READ_MEDIA_VIDEO",
+        "android.permission.READ_MEDIA_AUDIO"
       ]
     },
     "web": {
@@ -31,16 +42,31 @@
       [
         "expo-camera",
         {
-          "cameraPermission": "Used only to scan the pairing code shown on your computer.",
+          "//": "One string for two uses: scanning the pairing code, and taking a photo to send an agent. expo-image-picker writes the same Info.plist key, so its own cameraPermission is deliberately left unset rather than fighting this one.",
+          "cameraPermission": "Used to scan the pairing code shown on your computer, and to take photos you send to your agent.",
           "recordAudioAndroid": false
         }
       ],
       "expo-font",
+      "expo-notifications",
+      [
+        "expo-image-picker",
+        {
+          "//": "No photosPermission here on purpose: expo-media-library below writes the same NSPhotoLibraryUsageDescription key and runs later, so a string here would be overwritten and the attach prompt would explain saving instead of attaching. That one string covers both uses."
+        }
+      ],
+      [
+        "expo-speech-recognition",
+        {
+          "microphonePermission": "Used only to dictate a message, while the mic button is on.",
+          "speechRecognitionPermission": "Used only to turn what you dictate into the text of a message."
+        }
+      ],
       [
         "expo-media-library",
         {
           "savePhotosPermission": "Used only to save images your agent sends you.",
-          "photosPermission": "Used only to save images your agent sends you.",
+          "photosPermission": "Used only to attach photos you pick, and to save images your agent sends you.",
           "isAccessMediaLocationEnabled": false
         }
       ]

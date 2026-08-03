@@ -15,7 +15,13 @@
  * `resource_link`, or tool-call content. Text-only extraction is why those
  * arrived as nothing at all.
  */
-import { dedupeImages, imagesFromContent, imagesFromToolCall, type ChatImage } from "./images";
+import {
+  dedupeImages,
+  imagesFromAttachments,
+  imagesFromContent,
+  imagesFromToolCall,
+  type ChatImage,
+} from "./images";
 
 export type ChunkRole = "user" | "agent" | "thought" | "system";
 
@@ -85,7 +91,15 @@ export function readChunk(payload: any): Chunk | undefined {
     return images.length > 0 ? { role: "agent", text: "", images } : undefined;
   }
   if (payload?.kind === "user_message") {
-    return { role: "user", text: payload.text ?? "" };
+    // Files the user attached. The daemon wrote them to *its* disk and echoes
+    // the paths, so a picture here resolves the same way an agent's does: over
+    // the socket. That is what makes an attachment visible on a second device,
+    // and on this one after a reconnect — the optimistic turn's own copy is
+    // local to the device and does not survive replay.
+    const images = dedupeImages(imagesFromAttachments(payload.attachments));
+    return images.length > 0
+      ? { role: "user", text: payload.text ?? "", images }
+      : { role: "user", text: payload.text ?? "" };
   }
   if (payload?.kind === "exit") {
     // Closing a session kills the child, so a clean or signalled exit is the

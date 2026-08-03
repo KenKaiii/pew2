@@ -38,6 +38,12 @@ export const theme = {
     placeholder: "#828282",
 
     accent: "#d97757",
+    /**
+     * The accent at control-fill strength, for a button that is *on* rather
+     * than merely tappable — the mic while it is listening. Opaque rather than
+     * a transparency, so it reads the same over glass as over a flat surface.
+     */
+    accentSoft: "#3a2620",
     success: "#3fb950",
     danger: "#f85149",
     thought: "#8b5cf6",

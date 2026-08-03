@@ -126,3 +126,37 @@ test("images travel with message text rather than replacing it", () => {
     images: [{ src: "out/chart.png", mimeType: undefined, alt: undefined }],
   });
 });
+
+test("a user message carries the files that were attached to it", () => {
+  // The daemon echoes the paths it wrote on *its* disk, so a second device —
+  // and this one after a reconnect — can render what was sent. No `origin`:
+  // these are fetched over the socket like any other agent image.
+  const chunk = readChunk({
+    kind: "user_message",
+    text: "look at this",
+    attachments: [
+      { name: "shot.png", mimeType: "image/png", uri: "/tmp/pew2-attachments/s1/0-shot.png" },
+      { name: "notes.txt", mimeType: "text/plain", uri: "/tmp/pew2-attachments/s1/1-notes.txt" },
+    ],
+  });
+
+  expect(chunk).toEqual({
+    role: "user",
+    text: "look at this",
+    // Only the picture: a text file is not something to paint into the thread.
+    images: [
+      {
+        src: "/tmp/pew2-attachments/s1/0-shot.png",
+        mimeType: "image/png",
+        alt: "shot.png",
+      },
+    ],
+  });
+});
+
+test("a user message with no attachments has no images key", () => {
+  expect(readChunk({ kind: "user_message", text: "plain", attachments: [] })).toEqual({
+    role: "user",
+    text: "plain",
+  });
+});

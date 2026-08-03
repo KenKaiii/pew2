@@ -18,6 +18,7 @@ import { join } from "node:path";
 import { Daemon } from "./index.js";
 import { SessionLog } from "./session/log.js";
 import { readConfigPrefs, writeConfigPref } from "./config-prefs.js";
+import { readSessionPrefs, writeSessionPrefs } from "./session-prefs.js";
 import { withStoredPrefs } from "./index.js";
 import type { AcpSessionHandle } from "./acp/connect.js";
 
@@ -86,6 +87,132 @@ test("a remembered selector is restored, and only where it applies", async () =>
     await (daemon as any).applyConfigPrefs(session, "test");
 
     expect(applied).toEqual([["__acp_model", "opus"]]);
+  } finally {
+    if (home === undefined) delete process.env.PEW2_HOME;
+    else process.env.PEW2_HOME = home;
+  }
+});
+
+test("the provider announcement names the sessions this process still holds", () => {
+  // Session ids are assigned per daemon process and die with it, while the
+  // app's session list survives restarts and reconnects. Without this the app
+  // prompts an id from a previous process and gets "Unknown session" — so the
+  // announcement (which `hello` triggers) is what tells it to reopen instead.
+  const { daemon, sent } = daemonWithCollector();
+  plantSession(daemon, "alive-1");
+  plantSession(daemon, "alive-2");
+
+  (daemon as any).announceProviders();
+
+  const announce: any = sent.findLast((m: any) => m.t === "providers");
+  expect(announce.activeSessions).toEqual(["alive-1", "alive-2"]);
+
+  // A closed session drops out, which is the whole signal: the app must not go
+  // on prompting an id the daemon no longer has.
+  (daemon as any).sessions.delete("alive-1");
+  (daemon as any).announceProviders();
+  expect((sent.findLast((m: any) => m.t === "providers") as any).activeSessions).toEqual([
+    "alive-2",
+  ]);
+});
+
+test("reopening a conversation restores the model it was last held at", async () => {
+  // `session/load` replays the transcript but hands back the agent's *default*
+  // selectors, so without a per-conversation record, leaving a session and
+  // coming back silently reverted the model that was picked in it.
+  const { daemon } = daemonWithCollector();
+  const session = plantSession(daemon, "resumed");
+  const applied: [string, string | boolean][] = [];
+
+  session.handle = {
+    sessionId: "agent-1",
+    configOptions: [
+      {
+        id: "__acp_model",
+        name: "Model",
+        type: "select",
+        currentValue: "opus-5",
+        options: [{ value: "opus-5", name: "Opus" }, { value: "sonnet", name: "Sonnet" }],
+      },
+    ],
+    setConfigOption: async (configId: string, value: string | boolean) => {
+      applied.push([configId, value]);
+      return [];
+    },
+  } as unknown as AcpSessionHandle;
+
+  const home = process.env.PEW2_HOME;
+  process.env.PEW2_HOME = await mkdtemp(join(tmpdir(), "pew2-prefs-session-"));
+  try {
+    // The provider-wide preference is deliberately something else: a resumed
+    // conversation must not be rewritten to match whatever the phone last
+    // picked in the empty state.
+    await writeConfigPref("test", "__acp_model", "haiku");
+    await writeSessionPrefs("test", "agent-1", { __acp_model: "sonnet" });
+
+    const restored = await (daemon as any).applySessionPrefs(session, "test", "agent-1");
+
+    expect(applied).toEqual([["__acp_model", "sonnet"]]);
+    expect(restored).toEqual({ __acp_model: "sonnet" });
+  } finally {
+    if (home === undefined) delete process.env.PEW2_HOME;
+    else process.env.PEW2_HOME = home;
+  }
+});
+
+test("a conversation never configured here keeps the agent's own settings", async () => {
+  // Work started at the desk belongs to the desk: with nothing recorded against
+  // it, the agent's answer is the honest one and the provider default is not.
+  const { daemon } = daemonWithCollector();
+  const session = plantSession(daemon, "untouched");
+  const applied: string[] = [];
+
+  session.handle = {
+    sessionId: "agent-2",
+    configOptions: [
+      { id: "__acp_model", name: "Model", type: "select", currentValue: "opus-5" },
+    ],
+    setConfigOption: async (configId: string) => {
+      applied.push(configId);
+      return [];
+    },
+  } as unknown as AcpSessionHandle;
+
+  const home = process.env.PEW2_HOME;
+  process.env.PEW2_HOME = await mkdtemp(join(tmpdir(), "pew2-prefs-untouched-"));
+  try {
+    await writeConfigPref("test", "__acp_model", "haiku");
+
+    expect(await (daemon as any).applySessionPrefs(session, "test", "agent-2")).toEqual({});
+    expect(applied).toEqual([]);
+  } finally {
+    if (home === undefined) delete process.env.PEW2_HOME;
+    else process.env.PEW2_HOME = home;
+  }
+});
+
+test("a selector set on a session is remembered against that conversation", async () => {
+  const { daemon } = daemonWithCollector();
+  const session = plantSession(daemon, "live") as any;
+  session.ready = Promise.resolve();
+  session.agentSessionId = "agent-3";
+  session.handle = {
+    sessionId: "agent-3",
+    configOptions: [],
+    setConfigOption: async () => [],
+  } as unknown as AcpSessionHandle;
+
+  const home = process.env.PEW2_HOME;
+  process.env.PEW2_HOME = await mkdtemp(join(tmpdir(), "pew2-prefs-set-"));
+  try {
+    await daemon.setConfigOption("live", "__acp_model", "sonnet");
+    // Written in the background, deliberately: the reply must not wait on disk.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    // Both records: the provider one seeds the *next* new conversation, the
+    // session one survives leaving this conversation and coming back.
+    expect(await readConfigPrefs("test")).toEqual({ __acp_model: "sonnet" });
+    expect(await readSessionPrefs("test", "agent-3")).toEqual({ __acp_model: "sonnet" });
   } finally {
     if (home === undefined) delete process.env.PEW2_HOME;
     else process.env.PEW2_HOME = home;
@@ -199,4 +326,109 @@ test("a preference the agent no longer offers is ignored", () => {
   ];
 
   expect(withStoredPrefs(options, { __acp_model: "gone" })[0]?.currentValue).toBe("sonnet");
+});
+
+test("a selector the agent changes by itself reaches the app", async () => {
+  // The option set is model-dependent: Claude Code advertises a thinking-level
+  // selector only while a model that supports one is current, and announces its
+  // arrival with a `config_option_update` notification rather than in a reply.
+  // Dropped, the pills went on describing whatever was current when the session
+  // opened — "I switched model and the thinking option never appeared".
+  const { daemon, sent } = daemonWithCollector();
+  // Named, so a write to `session-prefs.json` would have a key to land under.
+  const session: any = plantSession(daemon, "live-config");
+  session.agentSessionId = "agent-live";
+  const effort = [{ id: "effort", name: "Effort", type: "select", currentValue: "high" }];
+
+  // Redirected like every other prefs test: the assertion below is about what
+  // was written, so it must not read — or risk writing — the real `~/.pew2`.
+  const home = process.env.PEW2_HOME;
+  process.env.PEW2_HOME = await mkdtemp(join(tmpdir(), "pew2-live-config-"));
+  try {
+    // Not yet announced: a client drops events for a session it has never been
+    // told about, so this would be shouted into the void.
+    (daemon as any).publishConfigOptions(session, effort);
+    expect(sent.filter((m: any) => m.t === "session.config")).toEqual([]);
+
+    session.live = true;
+    (daemon as any).publishConfigOptions(session, effort);
+
+    const config: any = sent.findLast((m: any) => m.t === "session.config");
+    expect(config.sessionId).toBe("live-config");
+    expect(config.configOptions).toEqual(effort);
+
+    // Nothing is recorded against the conversation, unlike an explicit change.
+    // `session-prefs.json` replays a *user's* choices over the defaults a
+    // resumed session comes back with, so writing the agent's own state here
+    // would give a conversation that was never configured a full record — later
+    // replayed over whatever it was since changed to at the desk.
+    expect(await readSessionPrefs("test", "agent-live")).toEqual({});
+  } finally {
+    if (home === undefined) delete process.env.PEW2_HOME;
+    else process.env.PEW2_HOME = home;
+  }
+});
+
+test("a prompt's attachments are written to disk and echoed as paths", async () => {
+  // The echo is what every *other* client sees — and what this one sees after a
+  // reconnect, since the optimistic turn's copy is local to the sending phone.
+  const { daemon, sent } = daemonWithCollector();
+  const session = plantSession(daemon, "s1");
+  daemon.markLive("s1");
+
+  const prompted: unknown[] = [];
+  session.handle = {
+    prompt: (text: string, attachments: unknown) => {
+      prompted.push({ text, attachments });
+      return Promise.resolve();
+    },
+  } as unknown as AcpSessionHandle;
+  (daemon as any).sessions.get("s1").ready = Promise.resolve();
+
+  await daemon.prompt("s1", "look", [
+    { name: "shot.png", mimeType: "image/png", data: Buffer.from("PNG").toString("base64") },
+  ]);
+
+  const echo = sent.map((m: any) => m.payload).find((p: any) => p?.kind === "user_message");
+  expect(echo.attachments).toHaveLength(1);
+  expect(echo.attachments[0]).toMatchObject({ name: "shot.png", mimeType: "image/png" });
+  // A real path on this machine, which `image.fetch` can then serve.
+  expect(echo.attachments[0].uri).toContain("pew2-attachments");
+  expect(await Bun.file(echo.attachments[0].uri).text()).toBe("PNG");
+
+  // The agent is handed the stored form, not the raw wire payload.
+  expect((prompted[0] as any).attachments[0].path).toBe(echo.attachments[0].uri);
+});
+
+test("an ordinary text prompt carries no attachments key at all", async () => {
+  // Nearly every turn. An empty array on each one would bloat the log and every
+  // replayed frame for a feature that was not used.
+  const { daemon, sent } = daemonWithCollector();
+  const session = plantSession(daemon, "s1");
+  daemon.markLive("s1");
+  session.handle = { prompt: () => Promise.resolve() } as unknown as AcpSessionHandle;
+  (daemon as any).sessions.get("s1").ready = Promise.resolve();
+
+  await daemon.prompt("s1", "just words");
+
+  const echo = sent.map((m: any) => m.payload).find((p: any) => p?.kind === "user_message");
+  expect(echo).toEqual({ kind: "user_message", text: "just words" });
+});
+
+test("a prompt over the attachment limits is refused before anything is echoed", async () => {
+  // A turn on every screen referring to a file the agent never received is
+  // worse than a failed send.
+  const { daemon, sent } = daemonWithCollector();
+  const session = plantSession(daemon, "s1");
+  daemon.markLive("s1");
+  session.handle = { prompt: () => Promise.resolve() } as unknown as AcpSessionHandle;
+  (daemon as any).sessions.get("s1").ready = Promise.resolve();
+
+  await expect(
+    daemon.prompt("s1", "look", [
+      { name: "huge.bin", mimeType: "application/octet-stream", data: "A".repeat(12 * 1024 * 1024) },
+    ]),
+  ).rejects.toThrow(/limit/);
+
+  expect(sent.map((m: any) => m.payload).some((p: any) => p?.kind === "user_message")).toBe(false);
 });

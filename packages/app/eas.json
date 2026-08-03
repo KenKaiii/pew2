@@ -1,26 +1,23 @@
 {
   "cli": {
     "version": ">= 5.0.0",
-    "appVersionSource": "local"
+    "appVersionSource": "local",
+    "promptToConfigurePushNotifications": false
   },
   "build": {
-    "//": "pew2 is not distributed through any store. These profiles build something you install on your own phone.",
     "apk": {
-      "//": "Android, and the reason this project needs no developer account: a signed APK is installed once and does not expire.",
       "distribution": "internal",
       "android": {
         "buildType": "apk"
       }
     },
     "device": {
-      "//": "iOS, signed for devices registered to your own Apple ID. A free account signs for 7 days; a paid one for a year. See README.",
       "distribution": "internal",
       "ios": {
         "simulator": false
       }
     },
     "simulator": {
-      "//": "iOS Simulator build. No signing, no account, no expiry - the quickest way to try a fork.",
       "distribution": "internal",
       "ios": {
         "simulator": true

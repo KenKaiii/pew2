@@ -19,9 +19,11 @@ import {
 import { loadClaudeDisplayHistory } from "./acp/claude-history.js";
 import { loadGgCoderDisplayHistory } from "./acp/ggcoder-history.js";
 import { SessionLog } from "./session/log.js";
-import { resolveWorkspace } from "./workspace.js";
+import { discardAttachments, storeAttachments } from "./attachments.js";
+import { folderName, resolveWorkspace } from "./workspace.js";
 import { readProbeCache, writeProbeCache } from "./probe-cache.js";
-import { readConfigPrefs, writeConfigPref } from "./config-prefs.js";
+import { readConfigPrefs, writeConfigPref, type ConfigPrefs } from "./config-prefs.js";
+import { readSessionPrefs, writeSessionPrefs } from "./session-prefs.js";
 import { readCommandDirs } from "./commands/from-disk.js";
 import { wire } from "@pew2/protocol";
 
@@ -30,6 +32,15 @@ interface ActiveSession {
   log: SessionLog;
   /** Which agent this belongs to, so a config change knows what to remember. */
   providerId: string;
+  /**
+   * The agent's own id for this conversation, learned once it is open.
+   *
+   * Session ids here are the daemon's, assigned before the agent answers, so
+   * this is the only thing that identifies the *same conversation* across a
+   * restart — it keys the per-session selectors and lets the app collapse the
+   * agent's disk-history stub onto the live session instead of listing both.
+   */
+  agentSessionId?: string;
   /**
    * The directory the agent was started in.
    *
@@ -222,6 +233,35 @@ export class Daemon {
     });
   }
 
+  /**
+   * Tell clients the agent changed the session's selectors by itself.
+   *
+   * Sent as the same `session.config` a client's own change is answered with,
+   * so the app keeps one path for "these are the current selectors". Deliberately
+   * outside the seq'd log: this is current state, not a transcript entry, and a
+   * reconnecting client is told the live set when its session starts.
+   *
+   * It matters most for thinking. The option set is model-dependent, so the
+   * thinking-level selector only exists while a model that supports one is
+   * current — the agent announces its arrival and departure this way, and
+   * nowhere else.
+   *
+   * Nothing is written to `session-prefs.json` here, unlike `setConfigOption`.
+   * That file replays a *user's* choices over the defaults a resumed session
+   * comes back with, and this list is the agent's own state — recording it
+   * would turn a conversation with no record into one with a full record, which
+   * is then replayed over whatever it was later changed to at the desk.
+   */
+  private publishConfigOptions(session: ActiveSession, configOptions: ConfigOption[]) {
+    if (!session.live) return;
+    this.send({
+      t: "session.config",
+      sessionId: session.log.sessionId,
+      providerId: session.providerId,
+      configOptions,
+    });
+  }
+
   /** Wait only for a warm process, never for the history probe around it. */
   private async awaitSpare(providerId: string): Promise<void> {
     await this.spareReady.get(providerId)?.ready;
@@ -266,6 +306,8 @@ export class Daemon {
       onUpdate: (payload: unknown) => this.record(session, payload),
       onPermissionRequest: ({ requestId, params }: { requestId: string; params: unknown }) =>
         this.record(session, { kind: "permission_request", requestId, params }),
+      onConfigOptions: (configOptions: ConfigOption[]) =>
+        this.publishConfigOptions(session, configOptions),
       onExit: (code: number | null) => this.record(session, { kind: "exit", code }),
     };
 
@@ -327,11 +369,23 @@ export class Daemon {
       });
     }
     loadingDuplicateReplay = false;
+    // The agent's own id for the conversation, which is what the per-session
+    // selectors below are keyed by and what the app dedupes history against.
+    session.agentSessionId = session.handle.sessionId;
 
-    // New conversations only. A resumed one already carries the settings it was
-    // held at, and overwriting those would silently rewrite a conversation
-    // started at the desk to match whatever was last picked on the phone.
-    if (!loadSessionId) await this.applyConfigPrefs(session, provider.manifest.id);
+    // A reopened conversation gets the selectors *it* was last held at; a new
+    // one gets the provider's. Never the other way round: applying the phone's
+    // last pick to a thread started at the desk would rewrite it silently.
+    const restored = loadSessionId
+      ? await this.applySessionPrefs(session, provider.manifest.id, loadSessionId)
+      : await this.applyConfigPrefs(session, provider.manifest.id);
+    // Remember what this conversation is now running, so reopening it restores
+    // the same thing even though `session/load` reports the agent's defaults.
+    if (session.agentSessionId) {
+      void writeSessionPrefs(provider.manifest.id, session.agentSessionId, restored).catch(
+        () => {},
+      );
+    }
     await this.announceDiskCommands(session, provider, cwd);
 
     // The spare is spent; quietly boot the next one so the session after this
@@ -347,27 +401,71 @@ export class Daemon {
    * Awaited, so `session.started` already carries the restored values and the
    * pills never show the default for a frame first.
    *
-   * New sessions only — see the call site.
+   * New sessions only — see the call site. Returns the selectors this session
+   * ended up holding, which is what gets recorded against the conversation.
    */
-  private async applyConfigPrefs(session: ActiveSession, providerId: string) {
+  private async applyConfigPrefs(
+    session: ActiveSession,
+    providerId: string,
+  ): Promise<ConfigPrefs> {
+    return this.applyPrefs(session, providerId, await readConfigPrefs(providerId));
+  }
+
+  /**
+   * Re-apply the selectors this *conversation* was last held at.
+   *
+   * `session/load` replays the transcript but not the session's settings — the
+   * agent hands back its defaults — so without this, leaving a conversation and
+   * coming back reverted the model every time.
+   */
+  private async applySessionPrefs(
+    session: ActiveSession,
+    providerId: string,
+    agentSessionId: string,
+  ): Promise<ConfigPrefs> {
+    const prefs = await readSessionPrefs(providerId, agentSessionId);
+    // Nothing recorded means this conversation was never configured from here:
+    // whatever the agent reports is the honest answer, and the provider's
+    // default is emphatically not.
+    if (Object.keys(prefs).length === 0) return {};
+    return this.applyPrefs(session, providerId, prefs);
+  }
+
+  /** Set every stored selector the session actually offers, and report them. */
+  private async applyPrefs(
+    session: ActiveSession,
+    providerId: string,
+    prefs: ConfigPrefs,
+  ): Promise<ConfigPrefs> {
     const handle = session.handle;
-    if (!handle) return;
-    const prefs = await readConfigPrefs(providerId);
+    if (!handle) return {};
+    const applied: ConfigPrefs = {};
 
     for (const [configId, value] of Object.entries(prefs)) {
       const option = handle.configOptions.find((o) => o.id === configId);
-      // Only what this session actually offers, and only when it differs: an
-      // agent that dropped an option between versions must not break the
-      // session, and re-sending the current value is a round trip for nothing.
-      if (!option || option.currentValue === value) continue;
+      // Only what this session actually offers: an agent that dropped an option
+      // between versions must not break the session, and a value it no longer
+      // lists must not be recorded as this conversation's choice.
+      if (!option) continue;
+      const offered =
+        !option.options || option.options.some((choice) => choice.value === value);
+      if (!offered) continue;
+      // Already right: re-sending it is a round trip for nothing, but it is
+      // still what the session holds.
+      if (option.currentValue === value) {
+        applied[configId] = value;
+        continue;
+      }
       try {
         await handle.setConfigOption(configId, value);
+        applied[configId] = value;
       } catch (error) {
         // A stale preference is not worth failing a session over. The agent
         // keeps its default and the user can pick again.
         console.error(`[${providerId}] could not restore '${configId}':`, error);
       }
     }
+    return applied;
   }
 
   constructor(
@@ -407,6 +505,10 @@ export class Daemon {
           available: isAvailable(p),
           unavailableReason: unavailableReason(p),
         })),
+      // Which sessions this process actually holds. A client's list outlives
+      // the daemon, so this is how it learns that an id it still shows died
+      // with the previous process and must be resumed, not prompted.
+      activeSessions: [...this.sessions.keys()],
     };
     this.send(announce);
   }
@@ -525,6 +627,18 @@ export class Daemon {
     }
 
     return log.sessionId;
+  }
+
+  /**
+   * The agent's own id for a session, once it has opened one.
+   *
+   * Clients list the agent's stored conversations alongside their own, so a
+   * session started here has to name itself in the agent's terms — otherwise
+   * the next history probe lists the very conversation on screen a second time
+   * as a stub, and reopening *that* copy loses the session's settings.
+   */
+  agentSessionId(sessionId: string): string | undefined {
+    return this.sessions.get(sessionId)?.agentSessionId;
   }
 
   /** Selectors (model, thinking level, mode) advertised by a session's agent. */
@@ -725,15 +839,49 @@ export class Daemon {
     // Only after the agent accepted it: remembering a rejected choice would
     // reapply a broken setting to every session that follows.
     void writeConfigPref(session.providerId, configId, value).catch(() => {});
+    // ...and against this conversation, so reopening it restores the choice
+    // rather than the agent's default. Both: the provider record seeds the next
+    // new session, this one survives leaving and coming back.
+    // Only when the agent named the conversation: without an id there is
+    // nothing to key the record by, and a placeholder would hand its selectors
+    // to the next session that also lacks one.
+    const agentSessionId = session.agentSessionId;
+    if (agentSessionId) {
+      void writeSessionPrefs(session.providerId, agentSessionId, { [configId]: value }).catch(
+        () => {},
+      );
+    }
     return updated;
   }
 
-  async prompt(sessionId: string, text: string) {
+  async prompt(sessionId: string, text: string, attachments: wire.PromptAttachment[] = []) {
     const session = this.require(sessionId);
+    // Written before the echo: an attachment that cannot be stored (over the
+    // limits, disk full) must fail the whole prompt rather than leave a turn on
+    // every screen referring to a file the agent never got.
+    const stored = await storeAttachments(sessionId, attachments);
     // Echo immediately, then queue against a still-loading agent if necessary.
-    this.send(session.log.append({ kind: "user_message", text }));
+    // The paths ride along so every client — including one replaying later —
+    // can show what was sent; only this machine can read them, which is exactly
+    // what `image.fetch` already exists to handle.
+    this.send(
+      session.log.append({
+        kind: "user_message",
+        text,
+        // Omitted entirely when there are none, so the shape of an ordinary
+        // text turn — which is nearly all of them — is unchanged in the log and
+        // in every replayed frame.
+        ...(stored.length > 0 && {
+          attachments: stored.map((file) => ({
+            name: file.name,
+            mimeType: file.mimeType,
+            uri: file.path,
+          })),
+        }),
+      }),
+    );
     await session.ready;
-    await session.handle!.prompt(text);
+    await session.handle!.prompt(text, stored);
   }
 
   async cancel(sessionId: string) {
@@ -755,6 +903,20 @@ export class Daemon {
     return this.sessions.get(sessionId)?.cwd;
   }
 
+  /**
+   * Who ran this session and in which project, for the "agent finished"
+   * notification.
+   *
+   * Only this machine has the path, and the phone must be able to name the
+   * work even for a session it is not currently showing — which is exactly the
+   * case a notification exists for.
+   */
+  sessionOrigin(sessionId: string): { providerId?: string; folder?: string } {
+    const session = this.sessions.get(sessionId);
+    if (!session) return {};
+    return { providerId: session.providerId, folder: folderName(session.cwd) };
+  }
+
   /** Replay everything a reconnecting client has not seen yet. */
   replay(sessionId: string, cursor: number): wire.SessionEvent[] {
     return this.sessions.get(sessionId)?.log.since(cursor) ?? [];
@@ -764,6 +926,9 @@ export class Daemon {
     for (const session of this.sessions.values()) {
       if (session.replayTimer) clearTimeout(session.replayTimer);
       session.handle?.close();
+      // The files were only ever a delivery mechanism for the agent that is
+      // now gone. Best effort, and in the tempdir either way.
+      void discardAttachments(session.log.sessionId);
     }
     this.sessions.clear();
     for (const spare of this.spares.values()) {

@@ -30,7 +30,10 @@ import {
 import { FlashList, type FlashListRef, type ListRenderItemInfo } from "@shopify/flash-list";
 import { theme } from "../theme";
 import { Turn } from "./Turn";
+import { ActivityLine } from "./ActivityLine";
+import { TurnReceipt } from "./TurnReceipt";
 import { useReducedMotion } from "./useReducedMotion";
+import { currentTool, type Activity, type TurnReceipt as Receipt } from "../activity";
 import type { Turn as TurnData } from "../useDaemon";
 
 export type ChatThreadRef = FlashListRef<TurnData>;
@@ -43,10 +46,19 @@ type Props = {
   threadBottom: number;
   /** The agent is mid-turn: show the streaming indicator below the transcript. */
   working: boolean;
+  /**
+   * Tool calls in the current turn. Names the work while `working`, and is
+   * what the receipt below is measured from.
+   */
+  activity: Activity;
+  /** The turn that just ended, shown until the next prompt starts one. */
+  receipt?: Receipt;
   /** Insets so the scroll indicator stays inside the unobscured reading area. */
   indicatorTop: number;
   indicatorBottom: number;
   onAtBottomChange: (atBottom: boolean) => void;
+  /** Opens a thinking turn's full text. Must be stable: cells memo on it. */
+  onOpenThought: (text: string) => void;
 };
 
 function ChatThreadView(
@@ -55,9 +67,12 @@ function ChatThreadView(
     threadTop,
     threadBottom,
     working,
+    activity,
+    receipt,
     indicatorTop,
     indicatorBottom,
     onAtBottomChange,
+    onOpenThought,
   }: Props,
   ref: React.Ref<ChatThreadRef>,
 ) {
@@ -72,11 +87,11 @@ function ChatThreadView(
       // padding on the scroll content is not part of the list's layout math.
       return (
         <View style={index === 0 ? styles.firstRow : styles.row}>
-          <Turn turn={item} />
+          <Turn turn={item} onOpenThought={onOpenThought} />
         </View>
       );
     },
-    [],
+    [onOpenThought],
   );
 
   // Mirrored into a ref so the inset effect below can read "is the reader at the
@@ -108,6 +123,18 @@ function ChatThreadView(
   const headerStyle = useMemo(() => ({ height: threadTop }), [threadTop]);
   const footerStyle = useMemo(() => ({ paddingBottom: threadBottom }), [threadBottom]);
 
+  // Three states of one row, in priority order: the tool the agent is running,
+  // the fallback dots when it is working but has named no tool, and the receipt
+  // for the turn that just ended. An element rather than a component type, so a
+  // changing tool re-renders the same footer instead of remounting it — which
+  // would restart the sheen mid-sweep and lose the crossfade between tools.
+  const footer = useMemo(() => {
+    if (working) return currentTool(activity) ? <ActivityLine activity={activity} /> : <Working />;
+    // Never absent: the footer's own style carries the bottom reading inset, and
+    // FlashList only lays that out around a footer that exists.
+    return receipt ? <TurnReceipt receipt={receipt} /> : <SpacerOnly />;
+  }, [activity, receipt, working]);
+
   // The composer grows when it takes focus, and the dock it lives in is an
   // overlay pinned to the bottom edge — so it expands *upwards*, over the
   // transcript. Growing the footer reserves the room but does not consume it:
@@ -134,9 +161,9 @@ function ChatThreadView(
       ListHeaderComponent={SpacerOnly}
       ListHeaderComponentStyle={headerStyle}
       // A footer is always mounted, so the bottom inset survives the agent going
-      // idle and the streaming dots never change the transcript's resting
-      // position — they only replace a spacer of their own height.
-      ListFooterComponent={working ? WorkingFooter : SpacerOnly}
+      // idle and the indicator never changes the transcript's resting position —
+      // every state of it is one body line tall, in the same place.
+      ListFooterComponent={footer}
       ListFooterComponentStyle={footerStyle}
       // Android supports only "none" and "on-drag"; passing iOS's "interactive"
       // there degrades to never dismissing at all, so dragging the transcript
@@ -178,8 +205,6 @@ const keyExtractor = (turn: TurnData) => turn.key ?? turn.id;
 
 /** Carries only a `ListHeaderComponentStyle`/`ListFooterComponentStyle` inset. */
 const SpacerOnly = () => null;
-
-const WorkingFooter = () => <Working />;
 
 /** Three dots that fade in sequence. Calm, and it costs no layout. */
 function Working() {

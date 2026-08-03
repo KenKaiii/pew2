@@ -75,6 +75,73 @@ function selectedProviderTint(color: string = theme.color.orb) {
   };
 }
 
+/**
+ * The dot beside a conversation title: working, or finished while you were
+ * away.
+ *
+ * Two states rather than one because they ask for opposite things. A pulsing
+ * dot says "still going, nothing to do"; a solid one says "this came back, go
+ * read it". Both are on the row you would tap anyway, so noticing and acting
+ * are the same gesture.
+ */
+function SessionStatus({
+  busy,
+  unread,
+  reduceMotion,
+}: {
+  busy: boolean;
+  unread: boolean;
+  reduceMotion: boolean;
+}) {
+  const pulse = useRef(new Animated.Value(1)).current;
+
+  useEffect(() => {
+    pulse.stopAnimation();
+    if (!busy || reduceMotion) {
+      pulse.setValue(1);
+      return;
+    }
+    // Never fully out: a dot that disappears reads as a rendering glitch in a
+    // list, where the neighbouring rows have no dot at all.
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulse, {
+          toValue: 0.3,
+          duration: 700,
+          easing: Easing.inOut(Easing.quad),
+          useNativeDriver: true,
+        }),
+        Animated.timing(pulse, {
+          toValue: 1,
+          duration: 700,
+          easing: Easing.inOut(Easing.quad),
+          useNativeDriver: true,
+        }),
+      ]),
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [busy, pulse, reduceMotion]);
+
+  // Working outranks unread: a session that answered and was prompted again
+  // from the desktop is, right now, working.
+  if (!busy && !unread) return null;
+  return (
+    <Animated.View
+      // Spoken, because colour alone carries this for everyone else. The role
+      // is what makes a bare View announce its label at all, and it matches the
+      // connection dot above.
+      accessibilityRole="text"
+      accessibilityLabel={busy ? "Working" : "New reply"}
+      style={[
+        styles.statusDot,
+        busy ? styles.statusWorking : styles.statusUnread,
+        busy && { opacity: pulse },
+      ]}
+    />
+  );
+}
+
 interface SessionRowProps {
   session: Session;
   index: number;
@@ -133,9 +200,19 @@ function SessionRow({ session, index, active, reduceMotion, onOpen }: SessionRow
           pressed && styles.pressed,
         ]}
       >
-        <Text style={styles.sessionTitle} numberOfLines={1}>
-          {session.title}
-        </Text>
+        <View style={styles.sessionLine}>
+          <Text style={styles.sessionTitle} numberOfLines={1}>
+            {session.title}
+          </Text>
+          {/* The agent keeps running when you leave a conversation, so the
+              drawer is where you find out what is still going and what came
+              back while you were elsewhere. */}
+          <SessionStatus
+            busy={session.busy === true}
+            unread={session.unread === true}
+            reduceMotion={reduceMotion}
+          />
+        </View>
         {metadata ? (
           <Text style={styles.sessionMeta} numberOfLines={1}>
             {metadata}
@@ -169,6 +246,8 @@ function SidebarView({
   const orderedProviders = orderProvidersByRecency(providers, sessions);
 
   const visible = recentSessionsForProvider(sessions, activeProviderId);
+  // Spoken only. The dot beside the title carries this at a glance; a screen
+  // reader gets the sentence, including which computer it is about.
   const connectionLabel =
     connectionStatus === "online"
       ? "Healthy connection"
@@ -193,7 +272,19 @@ function SidebarView({
     >
       <View style={[styles.panelInner, { paddingTop: insets.top + theme.headerInset }]}>
           <View style={styles.header}>
-            <Text style={styles.headerTitle}>Connected Apps</Text>
+            {/* The dot rides with the title rather than sitting in the footer:
+                connection state is the first thing to check when the drawer is
+                opened, and it belongs to the list of apps it describes. */}
+            <View style={styles.headerTitleRow}>
+              <Text style={styles.headerTitle}>Connected Apps</Text>
+              <View
+                style={[styles.connectionDot, { backgroundColor: connectionColor }]}
+                accessibilityRole="text"
+                accessibilityLabel={`${connectionLabel} to ${machineLabel}. ${
+                  machineRemote ? "Reachable from anywhere." : "Same network only."
+                }`}
+              />
+            </View>
             <CircleButton
               label="New conversation"
               onPress={onNewConversation}
@@ -291,29 +382,10 @@ function SidebarView({
             )}
           />
 
-          {/* Connection health is the useful glanceable fact. Keep the host out
-              of sight but in the spoken label for troubleshooting. */}
+          {/* Connection state is the dot beside the title now, so this row is
+              just the one action it always carried. The host name stays out of
+              sight and in the spoken label. */}
           <View style={styles.machine}>
-            <Ionicons
-              name={
-                connectionStatus === "online"
-                  ? "checkmark-circle-outline"
-                  : connectionStatus === "connecting"
-                    ? "sync-outline"
-                    : "alert-circle-outline"
-              }
-              size={15}
-              color={connectionColor}
-            />
-            <Text
-              style={[styles.machineText, { color: connectionColor }]}
-              numberOfLines={1}
-              accessibilityLabel={`${connectionLabel} to ${machineLabel}. ${
-                machineRemote ? "Reachable from anywhere." : "Same network only."
-              }`}
-            >
-              {connectionLabel}
-            </Text>
             <Pressable
               accessibilityRole="button"
               accessibilityLabel={`Forget pairing with ${machineLabel}`}
@@ -350,14 +422,15 @@ const styles = StyleSheet.create({
   machine: {
     flexDirection: "row",
     alignItems: "center",
-    gap: theme.space(2),
+    // Right-aligned: Forget keeps the edge it has always sat on, now that the
+    // status text that used to fill this row is gone.
+    justifyContent: "flex-end",
     marginHorizontal: theme.gutter,
     marginTop: theme.space(2),
     paddingTop: theme.space(3),
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: theme.color.border,
   },
-  machineText: { color: theme.color.textFaint, fontSize: 12, flex: 1 },
   machineAction: { color: theme.color.danger, fontSize: 12, fontWeight: "600" },
 
   // The drawer is the lower layer: it stays put while the conversation slides
@@ -393,6 +466,13 @@ const styles = StyleSheet.create({
     height: theme.size.control,
     marginBottom: theme.space(3),
   },
+  headerTitleRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.space(2),
+  },
+  // Colour is the whole message, so it needs no glyph and no label beside it.
+  connectionDot: { width: 8, height: 8, borderRadius: 4 },
   headerTitle: {
     color: theme.color.text,
     fontFamily: theme.display.bold,
@@ -446,10 +526,17 @@ const styles = StyleSheet.create({
     gap: 2,
   },
   sessionActive: { backgroundColor: theme.glass.control.fill },
+  sessionLine: { flexDirection: "row", alignItems: "center", gap: theme.space(2) },
+  statusDot: { width: 7, height: 7, borderRadius: 4 },
+  // The agent's own accent: this is the agent doing something.
+  statusWorking: { backgroundColor: theme.color.accent },
+  statusUnread: { backgroundColor: theme.color.success },
   sessionTitle: {
     color: theme.color.text,
     fontSize: theme.font.body,
     lineHeight: theme.line.body,
+    // Yields to the status dot rather than pushing it off the row.
+    flexShrink: 1,
   },
   sessionMeta: { color: theme.color.textDim, fontSize: theme.font.tiny },
   empty: {

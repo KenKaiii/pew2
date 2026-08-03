@@ -10,7 +10,9 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  Alert,
   Animated,
+  AppState,
   Easing,
   Keyboard,
   PanResponder,
@@ -29,21 +31,34 @@ import Reanimated, {
 import { StatusBar } from "expo-status-bar";
 import { Ionicons } from "@expo/vector-icons";
 import { theme } from "./src/theme";
-import { isDenyApprovalOption, selectApprovalOptions } from "./src/approvalOptions";
-import { useDaemon, type Provider } from "./src/useDaemon";
+import { useDaemon, type Provider, type TurnFinished } from "./src/useDaemon";
+import { currentTool } from "./src/activity";
+import { finishedNotice } from "./src/notificationPolicy";
+import {
+  ensureNotificationPermission,
+  notify,
+  onNotificationChoice,
+  type NotificationChoice,
+} from "./src/ui/notifier";
 import { Orb } from "./src/ui/Orb";
 import { Composer, type ComposerHandle } from "./src/ui/Composer";
 import { ChatThread, type ChatThreadRef } from "./src/ui/ChatThread";
 import { ImageResolverProvider } from "./src/ui/ChatImage";
 import { CommandSheet } from "./src/ui/CommandSheet";
+import { AttachmentSheet, type AttachmentSource } from "./src/ui/AttachmentSheet";
+import { addAttachments, MAX_ATTACHMENTS, type PendingAttachment } from "./src/attachments";
+import { pickFiles, pickPhotos, takePhoto } from "./src/ui/attachmentPicker";
+import { useDictation } from "./src/ui/useDictation";
+import { ContextBar } from "./src/ui/ContextBar";
+import { ApprovalSheet } from "./src/ui/ApprovalSheet";
+import { ThoughtSheet } from "./src/ui/ThoughtSheet";
 import { applyCommand, type SlashCommand } from "./src/slashCommands";
-import { CircleButton, Pill, touchSlop } from "./src/ui/controls";
+import { CircleButton, Pill } from "./src/ui/controls";
 import { haptics } from "./src/ui/haptics";
 import { Sidebar, DRAWER_WIDTH } from "./src/ui/Sidebar";
 import { ConfigPicker, summarise, valueName } from "./src/ui/ConfigPicker";
 import { useReducedMotion } from "./src/ui/useReducedMotion";
 import { ProgressiveBlur } from "./src/ui/ProgressiveBlur";
-import { Glass } from "./src/ui/Glass";
 import { withLayoutX, type PillX } from "./src/ui/pillAnchor";
 import { PairingScreen } from "./src/ui/PairingScreen";
 import { LaunchScreen } from "./src/ui/LaunchScreen";
@@ -238,15 +253,57 @@ function useKeyboardLift(bottomInset: number) {
 }
 
 function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void }) {
+  // Whether the app is the thing on screen. A ref, not state: it is read when a
+  // turn finishes, and re-rendering the whole screen because the app was
+  // backgrounded would be work nobody can see.
+  const foreground = useRef(AppState.currentState === "active");
+  useEffect(() => {
+    const subscription = AppState.addEventListener("change", (next) => {
+      foreground.current = next === "active";
+    });
+    return () => subscription.remove();
+  }, []);
+
+  // What the user did with a banner, held until it can be acted on. Both a tap
+  // and an inline reply can launch the app cold, and the session list arrives
+  // over the socket seconds later.
+  const [choice, setChoice] = useState<NotificationChoice | undefined>(undefined);
+  useEffect(() => onNotificationChoice(setChoice), []);
+
+  /**
+   * Announce a turn that ended somewhere the user cannot see it.
+   *
+   * The agent runs on the desktop and keeps running when this app is
+   * backgrounded or looking at another project, so without this a finished
+   * five-minute turn is only discovered by going back to check.
+   */
+  const announceTurn = useCallback((turn: TurnFinished) => {
+    const notice = finishedNotice({ ...turn, foreground: foreground.current });
+    if (notice) void notify(notice);
+  }, []);
+
   // The relay identifies devices by this, and it must match the id baked into
   // the stored pairing URL or the two look like different clients.
-  const daemon = useDaemon(pairing.url, pairing.deviceId);
+  const daemon = useDaemon(pairing.url, pairing.deviceId, {
+    onTurnFinished: announceTurn,
+  });
   const [draft, setDraft] = useState("");
+  // Files staged for the next message. Cleared with the draft on send, because
+  // the two are one message.
+  const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
+  // Mirror, for the async gap while a photo is being read and downscaled.
+  const attachmentsRef = useRef(attachments);
+  attachmentsRef.current = attachments;
+  const [attachOpen, setAttachOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   // Which pill's menu is open, and where that pill sits, so the menu opens
   // under it instead of always at the gutter.
   const [picker, setPicker] = useState<"model" | "mode" | null>(null);
   const [commandsOpen, setCommandsOpen] = useState(false);
+  // The reasoning currently being read, if any. Held here rather than per turn
+  // so the sheet lives outside the recycling list — a cell scrolled off screen
+  // must not take the sheet down with it.
+  const [thought, setThought] = useState<string | null>(null);
   const composer = useRef<ComposerHandle>(null);
   /** The keyboard is up, so the composer owns the screen. */
   const [typing, setTyping] = useState(false);
@@ -273,8 +330,14 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
   const reduceMotion = useReducedMotion();
   const drawer = useRef(new Animated.Value(0)).current;
 
+  // The agent on screen. Before an explicit choice this is the one used last on
+  // this device, resolved by the hook, so re-opening the app lands where the
+  // user left off instead of on whichever manifest sorts first.
+  // A named id that no longer exists — an agent uninstalled since it was
+  // remembered — must not leave the composer pointing at nothing, so the first
+  // available agent still backs it up.
   const active: Provider | undefined =
-    daemon.providers.find((p) => p.id === daemon.activeProviderId) ??
+    daemon.providers.find((p) => p.id === daemon.effectiveProviderId) ??
     daemon.providers.find((p) => p.available);
 
   const inThread = daemon.turns.length > 0;
@@ -288,14 +351,22 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
   const restingDockHeight =
     theme.size.composerCollapsed + theme.space(2) + (insets.bottom + theme.space(2));
   const threadBottom = (dockHeight || restingDockHeight) + theme.space(2);
-  // Only until the answer itself starts arriving. The dots occupy exactly one
-  // body line at the same offset as the agent's first line, so text replacing
-  // them lands where they were and the transcript never shifts — whereas dots
+  // Only until the answer itself starts arriving. The indicator occupies exactly
+  // one body line at the same offset as the agent's first line, so text replacing
+  // it lands where it was and the transcript never shifts — whereas an indicator
   // held below a growing reply would push it for the whole turn.
+  // Thinking deliberately does not count: it collapses to one static row, so
+  // treating it as an arriving answer would drop the indicator for the whole
+  // reasoning phase — minutes, on a remote agent, with nothing moving.
+  //
+  // A running tool overrides that, because a turn alternates: prose, then more
+  // tools. `currentTool` is silent while the agent speaks and speaks again on
+  // the next tool call, so this reads the same rule the line itself uses rather
+  // than a second opinion about who is talking.
   const newest = daemon.turns[daemon.turns.length - 1];
-  const answering =
-    (newest?.role === "agent" || newest?.role === "thought") && newest.text.trim().length > 0;
-  const working = daemon.busy && !daemon.loadingSession && !answering;
+  const answering = newest?.role === "agent" && newest.text.trim().length > 0;
+  const running = currentTool(daemon.activity) !== undefined;
+  const working = daemon.busy && !daemon.loadingSession && (running || !answering);
 
   useEffect(() => {
     // Every transcript opens on its newest message, so it starts at the bottom
@@ -485,20 +556,120 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
     [daemon.openSession],
   );
 
+  // Deferred until the conversation the banner named is in the list: a banner
+  // can launch the app cold, before the daemon has said what sessions exist,
+  // and addressing an unknown id is a no-op that would silently lose it.
+  useEffect(() => {
+    if (!choice) return;
+    if (!daemon.sessions.some((session) => session.id === choice.sessionId)) return;
+    setChoice(undefined);
+    if (choice.text) {
+      // Replied from the banner: answer that agent where it is and leave the
+      // user wherever they were. Being pulled into another project because you
+      // dashed off one line is the thing the reply box exists to avoid.
+      if (daemon.prompt(choice.text, choice.sessionId)) {
+        haptics.sent();
+        return;
+      }
+      // The conversation has to be reloaded first (the daemon was restarted).
+      // Open it with the reply waiting in the composer rather than dropping
+      // what was typed: one tap to send beats losing it silently.
+      setDraft(choice.text);
+    }
+    openSession(choice.sessionId);
+  }, [choice, daemon.sessions, daemon.prompt, openSession]);
+
+  /**
+   * Dictation writes straight into the draft.
+   *
+   * `draft` is read through a getter rather than passed as a value: it changes
+   * on every result, and a dependency on it would tear down the recogniser's
+   * listeners mid-sentence.
+   */
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
+  const dictation = useDictation({
+    draft: useCallback(() => draftRef.current, []),
+    onDraftChange: setDraft,
+    onMessage: useCallback((message: string) => {
+      Alert.alert("Dictation", message);
+    }, []),
+  });
+
   const send = useCallback(() => {
     const text = draft.trim();
-    if (!text) return;
+    // A photo on its own is a message; "look at this" is implied by attaching it.
+    if (!text && attachments.length === 0) return;
+
+    // Whatever the recogniser still holds is not going into a message that has
+    // already gone, and a live mic outliving the send is what leaves the OS
+    // recording indicator on.
+    dictation.cancel();
+
+    // Asked at the moment it earns itself: the user is about to wait on an
+    // agent, which is the only thing this app notifies about. Not awaited — the
+    // prompt must go out whatever the system decides.
+    void ensureNotificationPermission();
 
     if (daemon.sessionId) {
-      daemon.prompt(text);
+      daemon.prompt(text, undefined, attachments);
     } else {
       // No session yet: start one with the chosen available agent and let the
       // daemon deliver this prompt as soon as it is ready.
       if (!active?.available) return;
-      daemon.start(active.id, text);
+      daemon.start(active.id, text, attachments);
     }
     setDraft("");
-  }, [draft, daemon.sessionId, daemon.prompt, daemon.start, active]);
+    setAttachments([]);
+  }, [draft, attachments, dictation.cancel, daemon.sessionId, daemon.prompt, daemon.start, active]);
+
+  // A mic left listening across a session switch would put the next sentence
+  // into a conversation the user has already left.
+  useEffect(() => {
+    dictation.cancel();
+  }, [daemon.sessionId, dictation.cancel]);
+
+  const openAttach = useCallback(() => {
+    Keyboard.dismiss();
+    setAttachOpen(true);
+  }, []);
+  const closeAttach = useCallback(() => setAttachOpen(false), []);
+
+  const removeAttachment = useCallback((id: string) => {
+    setAttachments((current) => current.filter((file) => file.id !== id));
+  }, []);
+
+  const pickAttachment = useCallback(
+    (source: AttachmentSource) => {
+      setAttachOpen(false);
+      // Reading and downscaling a photo takes a moment, so the list is read
+      // through its ref mirror afterwards rather than from this closure: two
+      // overlapping picks would otherwise have the second overwrite the first.
+      void (async () => {
+        const room = MAX_ATTACHMENTS - attachmentsRef.current.length;
+        const outcome =
+          source === "camera"
+            ? await takePhoto()
+            : source === "files"
+              ? await pickFiles(room)
+              : await pickPhotos(room);
+
+        // Backing out of the picker is an ordinary thing to do and says nothing.
+        if (outcome.status === "cancelled") return;
+        if (outcome.status !== "picked") {
+          Alert.alert("Attach", outcome.message);
+          return;
+        }
+
+        // Merged out here, not in an updater: React may invoke an updater
+        // twice, and an alert is not something to show twice.
+        const merged = addAttachments(attachmentsRef.current, outcome.attachments);
+        setAttachments(merged.attachments);
+        if (merged.rejected) Alert.alert("Attach", merged.rejected);
+      })();
+    },
+    [],
+  );
 
   const newConversation = useCallback(() => {
     daemon.leave();
@@ -516,7 +687,27 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
     requestAnimationFrame(() => composer.current?.focus());
   }, []);
 
+  // Stable identities: `ContextBar` is memoized so it does not re-render on
+  // every keystroke of the draft, which a fresh handler each render would undo.
+  const openCommands = useCallback(() => setCommandsOpen(true), []);
   const closeCommands = useCallback(() => setCommandsOpen(false), []);
+
+  // Stable across renders: the transcript's cells memo on this callback, and a
+  // fresh identity per render would re-render every turn on every chunk.
+  const openThought = useCallback((text: string) => {
+    Keyboard.dismiss();
+    setThought(text);
+  }, []);
+  const closeThought = useCallback(() => setThought(null), []);
+
+  const answerPermission = useCallback(
+    (requestId: string, optionId: string, deny: boolean) => {
+      if (deny) haptics.warned();
+      else haptics.sent();
+      daemon.answer(requestId, optionId);
+    },
+    [daemon.answer],
+  );
 
   const closePicker = useCallback(() => setPicker(null), []);
 
@@ -691,9 +882,12 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
             threadTop={threadTop}
             threadBottom={threadBottom}
             working={working}
+            activity={daemon.activity}
+            receipt={daemon.receipt}
             indicatorTop={insets.top + navHeight}
             indicatorBottom={dockHeight}
             onAtBottomChange={setAtBottom}
+            onOpenThought={openThought}
           />
         ) : !daemon.loadingSession ? (
           // Cancels half the pane's lift, so the greeting settles in the middle
@@ -760,88 +954,41 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
             ]}
             onLayout={(event) => setDockHeight(event.nativeEvent.layout.height)}
           >
+          {/* The dock keeps the composer even while an approval is pending:
+              the request is its own blocking sheet now, so swapping this out
+              under it would only resize the thread behind a covered surface.
 
-          {daemon.permission ? (
-            <Glass radius={theme.radius.composer} tier="raised">
-              <View style={styles.approvalDock} accessibilityLiveRegion="assertive">
-                <View style={styles.approvalHeader}>
-                  <Text style={styles.approvalLabel}>APPROVAL NEEDED</Text>
-                  <Text
-                    numberOfLines={2}
-                    ellipsizeMode="tail"
-                    style={styles.approvalTitle}
-                  >
-                    {daemon.permission.title}
-                  </Text>
-                </View>
-                <View style={styles.approvalActions}>
-                  {selectApprovalOptions(daemon.permission.options).map((option) => {
-                    const deny = isDenyApprovalOption(option);
-                    // Capture the request id before another connected client can
-                    // answer and clear the pending permission.
-                    const requestId = daemon.permission!.requestId;
-                    return (
-                      <Pressable
-                        key={option.optionId}
-                        accessibilityRole="button"
-                        accessibilityLabel={option.name}
-                        onPress={() => {
-                          if (deny) haptics.warned();
-                          else haptics.sent();
-                          daemon.answer(requestId, option.optionId);
-                        }}
-                        style={({ pressed }) => [
-                          styles.approvalButton,
-                          deny ? styles.approvalDeny : styles.approvalAllow,
-                          pressed && styles.approvalPressed,
-                        ]}
-                      >
-                        <Text
-                          style={[
-                            styles.approvalButtonText,
-                            deny && styles.approvalDenyText,
-                          ]}
-                        >
-                          {option.name}
-                        </Text>
-                      </Pressable>
-                    );
-                  })}
-                </View>
-              </View>
-            </Glass>
-          ) : (
-            <>
-              {/* Only when the agent offers some — an empty sheet is worse than
-                  no button — and never while typing: the draft is the subject
-                  then, and the row would only crowd it. */}
-              {daemon.commands.length > 0 && !typing && (
-                <Pressable
-                  style={({ pressed }) => [
-                    styles.commandsButton,
-                    pressed && styles.commandsButtonPressed,
-                  ]}
-                  hitSlop={touchSlop(theme.space(1))}
-                  accessibilityRole="button"
-                  accessibilityLabel="Show commands"
-                  onPress={() => setCommandsOpen(true)}
-                >
-                  <Ionicons name="flash-outline" size={14} color={theme.color.textDim} />
-                  <Text style={styles.commandsLabel}>Commands</Text>
-                </Pressable>
-              )}
-              <Composer
-                ref={composer}
-                value={draft}
-                onChangeText={setDraft}
-                onSend={send}
-                busy={daemon.busy}
-                onStop={daemon.cancel}
-                editable={daemon.status === "online"}
-                placeholder={active ? "Ask me. Task me..." : "Waiting for an agent..."}
-              />
-            </>
+              The context row shows what the next prompt acts on — project,
+              uncommitted work, and the commands the agent offers (an empty
+              sheet is worse than no button). Never while typing: the draft is
+              the subject then, and the row would only crowd it. */}
+          {!typing && (daemon.commands.length > 0 || daemon.workspace) && (
+            <ContextBar
+              workspace={daemon.workspace}
+              showCommands={daemon.commands.length > 0}
+              onCommands={openCommands}
+            />
           )}
+          <Composer
+            ref={composer}
+            value={draft}
+            onChangeText={setDraft}
+            onSend={send}
+            busy={daemon.busy}
+            onStop={daemon.cancel}
+            editable={daemon.status === "online"}
+            placeholder={
+              dictation.listening
+                ? "Listening..."
+                : active
+                  ? "Ask me. Task me..."
+                  : "Waiting for an agent..."
+            }
+            attachments={attachments}
+            onAttach={openAttach}
+            onRemoveAttachment={removeAttachment}
+            dictation={dictation}
+          />
           </View>
         </View>
       </Reanimated.View>
@@ -854,6 +1001,10 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
         onSelect={pickCommand}
         onClose={closeCommands}
       />
+
+      <AttachmentSheet visible={attachOpen} onSelect={pickAttachment} onClose={closeAttach} />
+
+      <ThoughtSheet visible={thought !== null} text={thought ?? ""} onClose={closeThought} />
 
       {/* One picker, pointed at whichever pill opened it. The mode selector is
           excluded from the model menu so each pill owns exactly one list. */}
@@ -870,6 +1021,11 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
         }
         onSelect={daemon.setConfig}
       />
+
+      {/* Last of every overlay on purpose. All the sheets share one zIndex, so
+          paint order is sibling order — and an approval the agent is blocked on
+          must sit above anything the user happened to have open. */}
+      <ApprovalSheet permission={daemon.permission} onAnswer={answerPermission} />
 
       {/* While the drawer is open the pane itself is the way back: tapping
           anywhere on it closes, which matches the push metaphor better than a
@@ -1001,25 +1157,6 @@ const styles = StyleSheet.create({
 
   // Rides above the composer it belongs to, at the gutter it shares with the
   // thread, so it lands over the conversation rather than over the input.
-  // Its own row above the composer, left-aligned with the thread's text rail so
-  // it reads as belonging to the conversation rather than to the input.
-  commandsButton: {
-    alignSelf: "flex-start",
-    flexDirection: "row",
-    alignItems: "center",
-    gap: theme.space(1),
-    height: theme.size.control,
-    paddingHorizontal: theme.space(3),
-    marginBottom: theme.space(2),
-    borderRadius: theme.radius.pill,
-    backgroundColor: theme.color.surface,
-  },
-  commandsButtonPressed: { backgroundColor: theme.color.surfacePressed },
-  commandsLabel: {
-    color: theme.color.textDim,
-    fontSize: theme.font.small,
-    fontWeight: "600",
-  },
 
   jumpToEnd: {
     position: "absolute",
@@ -1038,57 +1175,4 @@ const styles = StyleSheet.create({
     width: theme.space(5),
     zIndex: 4,
   },
-
-  approvalDock: {
-    padding: theme.space(2.5),
-    gap: theme.space(2),
-  },
-  approvalHeader: {
-    maxHeight: 58,
-    overflow: "hidden",
-    gap: theme.space(1),
-    paddingHorizontal: theme.space(1),
-  },
-  approvalLabel: {
-    color: theme.color.accent,
-    fontSize: theme.font.tiny,
-    fontWeight: "700",
-    letterSpacing: 1,
-  },
-  approvalTitle: {
-    color: theme.color.text,
-    fontSize: theme.font.small,
-    maxHeight: 40,
-    overflow: "hidden",
-    lineHeight: 20,
-    fontWeight: "500",
-  },
-  approvalActions: { flexDirection: "row", gap: theme.space(2) },
-  approvalButton: {
-    flex: 1,
-    minWidth: 0,
-    minHeight: theme.size.touch,
-    borderRadius: theme.radius.md,
-    alignItems: "center",
-    justifyContent: "center",
-    paddingHorizontal: theme.space(2),
-  },
-  approvalAllow: {
-    backgroundColor: theme.approval.allowFill,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: "rgba(255,255,255,0.42)",
-  },
-  approvalDeny: {
-    backgroundColor: theme.approval.rejectFill,
-    borderWidth: 1,
-    borderColor: theme.approval.rejectRim,
-  },
-  approvalPressed: { opacity: 0.72 },
-  approvalButtonText: {
-    color: theme.approval.allowText,
-    fontSize: theme.font.small,
-    fontWeight: "700",
-    textAlign: "center",
-  },
-  approvalDenyText: { color: theme.approval.rejectText },
 });

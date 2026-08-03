@@ -33,3 +33,17 @@ export function resolveWorkspace(
   if (daemonCwd !== parse(daemonCwd).root && existsSync(daemonCwd)) return daemonCwd;
   return home;
 }
+
+/**
+ * The project name people actually say: the last segment of a path.
+ *
+ * `/Users/kenkai/gg-projects/pew2` is unreadable in a notification banner;
+ * `pew2` is the whole point of the message. Undefined for a root or an empty
+ * path, so a caller can leave the name out rather than print a slash.
+ */
+export function folderName(cwd: string | undefined): string | undefined {
+  if (!cwd) return undefined;
+  // Trailing slashes would otherwise yield an empty last segment.
+  const segments = cwd.split(/[/\\]/).filter((segment) => segment.length > 0);
+  return segments[segments.length - 1];
+}

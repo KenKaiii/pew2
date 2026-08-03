@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import {
   dedupeImages,
   imageSourceKind,
+  imagesFromAttachments,
   imagesFromContent,
   imagesFromToolCall,
   isDisplayableImage,
@@ -90,6 +91,37 @@ test("only real image sources are displayable", () => {
   // daemon refuses the same format, so both halves must agree.
   expect(isDisplayableImage("data:image/svg+xml;base64,AA")).toBe(false);
   expect(isDisplayableImage("diagram.svg")).toBe(false);
+});
+
+test("an echoed attachment is a desktop path, never a device one", () => {
+  // The daemon wrote these to its own tempdir, so they resolve like any other
+  // agent image. No `origin`: that flag is only for the sending phone's
+  // optimistic turn, whose copy is local to that handset.
+  expect(
+    imagesFromAttachments([
+      { name: "shot.png", mimeType: "image/png", uri: "/tmp/pew2-attachments/s/0-shot.png" },
+    ]),
+  ).toEqual([
+    { src: "/tmp/pew2-attachments/s/0-shot.png", mimeType: "image/png", alt: "shot.png" },
+  ]);
+});
+
+test("attachments that are not paintable pictures are left to the file chip", () => {
+  expect(
+    imagesFromAttachments([
+      { name: "log.txt", mimeType: "text/plain", uri: "/tmp/a/0-log.txt" },
+      // An image type with no renderer, refused here exactly as it is elsewhere.
+      { name: "d.svg", mimeType: "image/svg+xml", uri: "/tmp/a/1-d.svg" },
+      // A missing uri is nothing to fetch.
+      { name: "x.png", mimeType: "image/png" },
+    ]),
+  ).toEqual([]);
+});
+
+test("a turn with no attachments key is not an error", () => {
+  // Nearly every user message: the daemon omits the field entirely.
+  expect(imagesFromAttachments(undefined)).toEqual([]);
+  expect(imagesFromAttachments("nonsense")).toEqual([]);
 });
 
 test("a tool restating its own result does not show the picture twice", () => {

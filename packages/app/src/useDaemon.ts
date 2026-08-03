@@ -8,11 +8,26 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { USE_FIXTURES, isFixtureSession, sampleSessions } from "./fixtures";
-import { mergeAgentSessions, replaceAgentSessionStub } from "./agentHistory";
+import { mergeAgentSessions, needsResume, replaceAgentSessionStub } from "./agentHistory";
+import {
+  beginActivity,
+  foldActivity,
+  summariseActivity,
+  IDLE_ACTIVITY,
+  type Activity,
+  type TurnReceipt,
+} from "./activity";
 import { advance, alreadySeen, type Cursors } from "./cursors";
 import { findDuplicateError } from "./errorDedup";
 import { isEmptyChunk, readChunk } from "./chunks";
 import type { ChatImage } from "./images";
+import {
+  attachmentImages,
+  toWireAttachments,
+  type PendingAttachment,
+} from "./attachments";
+import { defaultProviderId } from "./lastProvider";
+import { loadLastProvider, saveLastProvider } from "./preferences";
 import {
   offeredCommands,
   readAvailableCommands,
@@ -110,9 +125,43 @@ export interface Session {
   agentSessionId?: string;
   /** Working directory the agent recorded, needed to reopen it there. */
   cwd?: string;
+  /**
+   * Project name for the drawer, as the daemon stamped it on a finished turn.
+   * Only the desktop can resolve it, and a session this app started has no
+   * `cwd` of its own to derive it from.
+   */
+  folder?: string;
+  /**
+   * The agent is mid-turn in this conversation, whether or not it is on
+   * screen.
+   *
+   * Per session rather than the single `busy` flag because the daemon keeps
+   * every session running while the phone looks at one of them: leaving a
+   * conversation does not stop its agent, so the drawer has to be able to say
+   * which ones are still working.
+   */
+  busy?: boolean;
+  /**
+   * A turn finished here while the user was somewhere else. Cleared when the
+   * conversation is opened, so the drawer marks what is worth going back to.
+   */
+  unread?: boolean;
 }
 
 
+
+/**
+ * The project the open session is working in, as the daemon sees it.
+ *
+ * Only the desktop can answer this, and it goes stale the moment the agent
+ * edits a file, so it is re-asked rather than remembered across sessions.
+ */
+export interface Workspace {
+  cwd: string;
+  folder: string;
+  repo: boolean;
+  uncommitted: number;
+}
 
 interface State {
   status: Status;
@@ -133,12 +182,27 @@ interface State {
   permission?: PermissionRequest;
   busy: boolean;
   /**
+   * Tool calls in the open session's current turn, folded live.
+   *
+   * Only the open session: this drives one line under the transcript, and a
+   * background agent's tools are not what the reader is watching. It resets
+   * with every prompt, so it is never a log — it is the present tense.
+   */
+  activity: Activity;
+  /**
+   * What the last turn did, shown once it is over and cleared when the next
+   * one starts. Absent for a turn this client did not time itself.
+   */
+  receipt?: TurnReceipt;
+  /**
    * At least one agent has been asked what it holds and has not answered yet.
    * The drawer shows skeleton rows instead of a false "No conversations yet".
    */
   loadingSessions: boolean;
   /** A stored transcript is loading and is not ready to reveal yet. */
   loadingSession: boolean;
+  /** Project and git state for the session on screen. Absent until asked. */
+  workspace?: Workspace;
 }
 
 /**
@@ -162,7 +226,7 @@ function rememberConfigs(
  * A user turn rendered before the daemon has echoed it back. Its id is replaced
  * with the server's once the echo arrives, so it never renders twice.
  */
-function localTurn(seq: number, text: string): Turn {
+function localTurn(seq: number, text: string, images?: ChatImage[]): Turn {
   // `key` outlives the id swap in the echo path, so the cell rendering this
   // prompt survives reconciliation instead of remounting.
   return {
@@ -170,6 +234,10 @@ function localTurn(seq: number, text: string): Turn {
     key: `local:${seq}`,
     role: "user",
     text: text.trim(),
+    // Rendered from the phone's own copy, so an attached photo appears the
+    // instant it is sent rather than after a round trip to fetch back the file
+    // this device just uploaded.
+    ...(images?.length ? { images } : {}),
   };
 }
 
@@ -196,11 +264,43 @@ function firstUserText(turns: Turn[]): string | undefined {
 
 
 /**
+ * A turn that just ended, reported to the app so it can announce it.
+ *
+ * The hook reports rather than decides: whether this is worth a banner depends
+ * on whether the app is on screen, which only the component tree knows. See
+ * `notificationPolicy.ts`.
+ */
+export interface TurnFinished {
+  sessionId: string;
+  /** Project folder as the daemon stamped it, e.g. "pew2". */
+  folder?: string;
+  /** Display name of the agent that ran it. */
+  agentName?: string;
+  /** What the agent said this turn, for the notification body. */
+  lastText?: string;
+  /** The conversation on screen when this landed, if any. */
+  activeSessionId?: string;
+}
+
+/**
+ * How much of an agent's turn is kept for a notification body.
+ *
+ * Only the first usable line is ever rendered, so this only has to be long
+ * enough to contain it past any leading blank lines or a fenced block.
+ */
+const NOTICE_BUFFER = 2000;
+
+interface DaemonOptions {
+  /** Called once per finished turn, for any session — not just the open one. */
+  onTurnFinished?: (turn: TurnFinished) => void;
+}
+
+/**
  * @param deviceId Identifies this phone to the relay, which uses it to tell
  * devices apart. Falls back to a constant so a direct LAN connection, where the
  * daemon does not care, still works.
  */
-export function useDaemon(url: string, deviceId = "phone") {
+export function useDaemon(url: string, deviceId = "phone", options: DaemonOptions = {}) {
   const [state, setState] = useState<State>({
     status: "connecting",
     providers: [],
@@ -212,6 +312,7 @@ export function useDaemon(url: string, deviceId = "phone") {
     configOptions: [],
     commands: [],
     busy: false,
+    activity: IDLE_ACTIVITY,
     loadingSessions: false,
     loadingSession: false,
   });
@@ -244,9 +345,12 @@ export function useDaemon(url: string, deviceId = "phone") {
   // Mirrors activeProviderId for the same reason sessionRef exists: message
   // handlers must not read state inside an updater.
   const providerRef = useRef<string | undefined>(undefined);
-  // Text entered before a session existed. Sent as soon as the daemon confirms
-  // one, so the composer works straight from the empty state.
-  const queued = useRef<string | undefined>(undefined);
+  // The message entered before a session existed — text and any files with it.
+  // Sent as soon as the daemon confirms one, so the composer works straight
+  // from the empty state.
+  const queued = useRef<
+    { text: string; attachments: readonly PendingAttachment[] } | undefined
+  >(undefined);
   // Counter behind the ids of optimistic user turns. Starting an agent can take
   // seconds, and the daemon's echo arrives only after that, so the prompt is
   // rendered locally first and reconciled when the echo lands.
@@ -268,6 +372,17 @@ export function useDaemon(url: string, deviceId = "phone") {
   // Images already asked for. A ref, not the state map: the request has to be
   // deduped at the moment of asking, which happens outside any updater.
   const requestedImages = useRef(new Set<string>());
+  // Daemon session ids the daemon says it currently holds.
+  //
+  // Session ids belong to a daemon *process*, but this list survives restarts
+  // and reconnects, so a conversation on screen can name an id that no longer
+  // exists — prompting it answered "Unknown session". The daemon reports its
+  // open sessions with every provider announcement, and `hello` triggers one,
+  // so a stale entry is reopened by `agentSessionId` instead.
+  //
+  // Undefined means the daemon never said (an older build): assume every id is
+  // live rather than resuming conversations that were fine.
+  const liveSessions = useRef<Set<string> | undefined>(undefined);
   // Mirrors state.sessions so openSession can look one up without doing that
   // work inside a state updater.
   const sessionsRef = useRef<Session[]>(state.sessions);
@@ -277,6 +392,56 @@ export function useDaemon(url: string, deviceId = "phone") {
     sessionsRef.current = state.sessions;
   }, [state.sessions]);
 
+  // Agents by id, so a finished turn can be announced by name without reading
+  // state inside the socket handler.
+  const providersRef = useRef<Provider[]>(state.providers);
+  useEffect(() => {
+    providersRef.current = state.providers;
+  }, [state.providers]);
+
+  // Held in a ref so a changing handler never re-opens the socket.
+  const onTurnFinished = useRef(options.onTurnFinished);
+  useEffect(() => {
+    onTurnFinished.current = options.onTurnFinished;
+  }, [options.onTurnFinished]);
+
+  // What each session's agent has said during its current turn, keyed by
+  // session, so a notification can quote a conversation that is not on screen.
+  //
+  // A ref, not state: this is a buffer for one message, it must not re-render
+  // anything, and it is written from the socket handler where an updater's
+  // "may run twice" rule would corrupt an accumulation.
+  const turnText = useRef(new Map<string, string>());
+
+  // The agent this device used last, read once from storage.
+  //
+  // Closing the app is not a decision to go back to whichever agent sorts
+  // first, so a launch re-targets the last one used. Undefined means "not read
+  // yet": the keychain read starts at mount and finishes long before the
+  // daemon's provider list arrives over the socket, so no chip is shown for the
+  // wrong agent first.
+  const [rememberedProviderId, setRememberedProviderId] = useState<string | undefined>(
+    undefined,
+  );
+  useEffect(() => {
+    let cancelled = false;
+    loadLastProvider().then((id) => {
+      if (!cancelled && id) setRememberedProviderId(id);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Where the composer points before the user picks anything this launch.
+  const fallbackProviderId = defaultProviderId(state.providers, rememberedProviderId);
+
+  // Remember every agent the user lands on — chosen from the drawer, opened
+  // from history, or started by the daemon — so the next launch resumes there.
+  useEffect(() => {
+    if (state.activeProviderId) void saveLastProvider(state.activeProviderId);
+  }, [state.activeProviderId]);
+
   // The agent the composer targets, including the implicit first-available one
   // the user never explicitly chose. `providerRef` only knows about deliberate
   // selections, so on a fresh launch it is empty while the UI already names an
@@ -284,9 +449,8 @@ export function useDaemon(url: string, deviceId = "phone") {
   // effect below for the same reason as `sessionsRef`.
   const targetProviderRef = useRef<string | undefined>(undefined);
   useEffect(() => {
-    targetProviderRef.current =
-      state.activeProviderId ?? state.providers.find((p) => p.available)?.id;
-  }, [state.activeProviderId, state.providers]);
+    targetProviderRef.current = state.activeProviderId ?? fallbackProviderId;
+  }, [state.activeProviderId, fallbackProviderId]);
 
   useEffect(() => {
     alive.current = true;
@@ -300,7 +464,19 @@ export function useDaemon(url: string, deviceId = "phone") {
 
       ws.onopen = () => {
         attempts.current = 0;
-        setState((s) => ({ ...s, status: "online" }));
+        setState((s) => ({
+          ...s,
+          status: "online",
+          // Turns end while the phone is asleep and the socket is dead, and
+          // `session.idle` is not replayed — only `session.event` is persisted.
+          // So anything believed to be working across a drop is a guess, and
+          // the pulsing dot would never stop. Clear it: a session still running
+          // announces itself the moment it finishes, which is the signal that
+          // matters.
+          sessions: s.sessions.map((session) =>
+            session.busy ? { ...session, busy: false } : session,
+          ),
+        }));
         ws.send(
           JSON.stringify({
             t: "hello",
@@ -346,6 +522,11 @@ export function useDaemon(url: string, deviceId = "phone") {
               // Replay is history, not an active agent turn. Claude may still be
               // attaching in the background, but prompts safely queue server-side.
               busy: false,
+              // Replayed tool calls finished long ago — the same reason a replay
+              // batch never raises a permission. Timing them from this device's
+              // clock would report a minutes-old turn as taking an instant.
+              activity: IDLE_ACTIVITY,
+              receipt: undefined,
             };
           });
           return;
@@ -374,9 +555,29 @@ export function useDaemon(url: string, deviceId = "phone") {
               JSON.stringify({
                 t: "session.prompt",
                 sessionId: message.sessionId,
-                text: pending,
+                text: pending.text,
+                attachments: toWireAttachments(pending.attachments),
               }),
             );
+          }
+        }
+
+        // Keep what the agent is saying, per session, so a turn that ends off
+        // screen can still be quoted in a notification. Above the scope filter
+        // below on purpose: the sessions worth announcing are exactly the ones
+        // not on screen, and under the filter their text would never be
+        // collected.
+        //
+        // Written here rather than in a state updater, which React may run
+        // twice — appending twice would duplicate the text.
+        if (message.t === "session.event") {
+          const chunk = readChunk(message.payload);
+          if (chunk?.role === "agent" && chunk.text) {
+            const seen = turnText.current.get(message.sessionId) ?? "";
+            // Only the opening line is ever shown, so a long turn must not
+            // accumulate megabytes per session for a 140-character banner.
+            if (seen.length < NOTICE_BUFFER)
+              turnText.current.set(message.sessionId, seen + chunk.text);
           }
         }
 
@@ -384,11 +585,51 @@ export function useDaemon(url: string, deviceId = "phone") {
         // session can still be streaming after the user backs out and starts
         // another. Drop anything that is not the session on screen, otherwise
         // its output would appear in the wrong conversation.
-        const scoped =
-          message.t === "session.event" ||
-          message.t === "session.idle" ||
-          message.t === "session.config";
+        //
+        // `session.idle` is deliberately absent: it is the only signal that a
+        // conversation left running has finished, which is precisely the one
+        // nobody is looking at. It is applied per session instead.
+        const scoped = message.t === "session.event" || message.t === "session.config";
         if (scoped && message.sessionId !== sessionRef.current) return;
+
+        if (message.t === "session.idle") {
+          const finished: string = message.sessionId;
+          const lastText = turnText.current.get(finished);
+          // One turn's worth: the next prompt in this session starts empty.
+          turnText.current.delete(finished);
+          const providerId =
+            (message.providerId as string | undefined) ??
+            sessionsRef.current.find((entry) => entry.id === finished)?.providerId;
+          onTurnFinished.current?.({
+            sessionId: finished,
+            folder: message.folder,
+            agentName: providersRef.current.find((p) => p.id === providerId)?.name,
+            lastText,
+            activeSessionId: sessionRef.current,
+          });
+
+          // A turn just ended, so the agent may have written files: the
+          // uncommitted count beside the composer is stale the instant it
+          // finishes. Only the open session's project is on screen, so a
+          // background session finishing must not re-ask for it. Opening a
+          // session or switching agent is covered by the effect below, and
+          // asking in both places would count the same repo twice.
+          if (finished === sessionRef.current) {
+            ws.send(
+              JSON.stringify({
+                t: "workspace.status",
+                sessionId: sessionRef.current,
+                providerId: providerRef.current,
+              }),
+            );
+          }
+        }
+
+        // A session the daemon just opened is live by definition, so record it
+        // before the announcement that would otherwise still call it stale.
+        if (message.t === "session.started" && message.sessionId) {
+          liveSessions.current = new Set(liveSessions.current ?? []).add(message.sessionId);
+        }
 
         // Cache selectors against the provider so they survive the session and
         // are available before the next one starts. `provider.capabilities` is
@@ -420,6 +661,30 @@ export function useDaemon(url: string, deviceId = "phone") {
         // from the agent, so an app that updates its model line-up is reflected
         // without changing anything here.
         if (message.t === "providers") {
+          if (Array.isArray(message.activeSessions)) {
+            liveSessions.current = new Set<string>(message.activeSessions);
+            // The conversation on screen may have died with a previous daemon
+            // process. Reopen it from the agent's own copy rather than leaving
+            // a thread that answers "Unknown session" on the next prompt.
+            const current = sessionRef.current;
+            const stale =
+              current && !liveSessions.current.has(current)
+                ? sessionsRef.current.find((entry) => entry.id === current)
+                : undefined;
+            if (stale?.agentSessionId && stale.providerId) {
+              sessionRef.current = undefined;
+              providerRef.current = stale.providerId;
+              ws.send(
+                JSON.stringify({
+                  t: "session.resume",
+                  providerId: stale.providerId,
+                  agentSessionId: stale.agentSessionId,
+                  cwd: stale.cwd,
+                }),
+              );
+              setState((s) => ({ ...s, busy: true, loadingSession: true }));
+            }
+          }
           for (const provider of message.providers ?? []) {
             if (!provider.available || probed.current.has(provider.id)) continue;
             probed.current.add(provider.id);
@@ -431,6 +696,28 @@ export function useDaemon(url: string, deviceId = "phone") {
         }
         if (message.t === "provider.capabilities") {
           pendingCapabilities.current.delete(message.providerId);
+        }
+
+        // Project and git state, answered per request. An answer for a
+        // conversation the user has already left describes the wrong project,
+        // so it is dropped rather than shown for a second.
+        if (message.t === "workspace" && typeof message.cwd === "string") {
+          // Two ways an answer can describe the wrong project: it names a
+          // conversation that is no longer on screen, or it is the
+          // no-session answer (the agent's last project) arriving after a
+          // session has since opened somewhere else.
+          const mine = message.sessionId
+            ? message.sessionId === sessionRef.current
+            : !sessionRef.current;
+          if (!mine) return;
+          const workspace: Workspace = {
+            cwd: message.cwd,
+            folder: message.folder ?? message.cwd,
+            repo: message.repo === true,
+            uncommitted: message.uncommitted ?? 0,
+          };
+          setState((s) => ({ ...s, workspace }));
+          return;
         }
 
         // Answered per request rather than as a session event, so it is handled
@@ -445,6 +732,10 @@ export function useDaemon(url: string, deviceId = "phone") {
           }));
           return;
         }
+
+        // Read once, out here: an updater may run twice, and two different
+        // clock readings would time the same turn differently on each pass.
+        const now = Date.now();
 
         setState((prev) => {
           switch (message.t) {
@@ -505,6 +796,9 @@ export function useDaemon(url: string, deviceId = "phone") {
                   turns,
                   configOptions: message.configOptions ?? [],
                   agentSessionId,
+                  // A session started to deliver a first prompt is already
+                  // working; the drawer must say so from the moment it exists.
+                  busy: prev.busy,
                 }),
                 // Keep the skeleton until the batched transcript follows this frame.
                 loadingSession: message.resumed === true,
@@ -512,9 +806,36 @@ export function useDaemon(url: string, deviceId = "phone") {
               };
             }
 
-            case "session.idle":
-              // The turn finished. Without this the spinner would never stop.
-              return { ...prev, busy: false };
+            case "session.idle": {
+              // Arrives for every session, including ones this client is not
+              // showing, so the flags are set per session and only the open
+              // one touches the global spinner. Without that, a background
+              // agent finishing would stop the spinner on the turn you are
+              // actually watching.
+              const mine = message.sessionId === prev.sessionId;
+              return {
+                ...prev,
+                busy: mine ? false : prev.busy,
+                // The live line exits here, and what it was doing becomes the
+                // receipt. Only for the session on screen: a background turn's
+                // tools were never rendered and have nothing to summarise.
+                activity: mine ? IDLE_ACTIVITY : prev.activity,
+                receipt: mine ? summariseActivity(prev.activity, now) : prev.receipt,
+                sessions: prev.sessions.map((session) =>
+                  session.id === message.sessionId
+                    ? {
+                        ...session,
+                        busy: false,
+                        // Worth going back to, and marked as such until it is
+                        // opened. Never for the conversation on screen: its
+                        // reply is already there to read.
+                        unread: !mine,
+                        folder: session.folder ?? message.folder,
+                      }
+                    : session,
+                ),
+              };
+            }
 
             case "session.config": {
               const configOptions = message.configOptions ?? [];
@@ -533,15 +854,23 @@ export function useDaemon(url: string, deviceId = "phone") {
             case "session.event": {
               const payload = message.payload;
 
+              // Folded before anything else, and carried through every exit
+              // below: a tool call is not a chunk, so most of this case returns
+              // early and would otherwise drop the very updates it is watching.
+              const activity = foldActivity(prev.activity, payload, now);
+              // Same object when the event changed no tool, so a streamed word
+              // of prose does not re-render the footer.
+              const base = activity === prev.activity ? prev : { ...prev, activity };
+
               // Sent once per session rather than per turn, and specific to the
               // project the agent opened, so it is held until replaced.
               const commands = readAvailableCommands(payload);
-              if (commands) return { ...prev, commands };
+              if (commands) return { ...base, commands };
 
               if (payload?.kind === "permission_request") {
                 const params = payload.params ?? {};
                 return {
-                  ...prev,
+                  ...base,
                   busy: false,
                   permission: {
                     requestId: payload.requestId,
@@ -555,7 +884,7 @@ export function useDaemon(url: string, deviceId = "phone") {
               }
 
               const chunk = readChunk(payload);
-              if (!chunk || isEmptyChunk(chunk)) return prev;
+              if (!chunk || isEmptyChunk(chunk)) return base;
 
               const turns = [...prev.turns];
               const last = turns[turns.length - 1];
@@ -597,10 +926,18 @@ export function useDaemon(url: string, deviceId = "phone") {
                   : session,
               );
 
-              return { ...prev, turns, sessions, busy: chunk.role !== "system" };
+              return { ...base, turns, sessions, busy: chunk.role !== "system" };
             }
 
             case "error": {
+              // A desktop older than this app does not know an optional request
+              // (the workspace bar's, first of all). That is not a failure of
+              // anything the user did: rendering it would drop a system turn
+              // into the transcript and clear `busy` mid-stream, killing the
+              // spinner on a turn that is still running. The bar simply stays
+              // empty until that daemon is updated.
+              if (message.code === "unknown_message") return prev;
+
               // Agents usually stream a failure as message text and then reject
               // the turn, so the same sentence arrives twice. Promote the copy
               // already on screen instead of appending a second one: the user
@@ -704,38 +1041,84 @@ export function useDaemon(url: string, deviceId = "phone") {
 
   const actions = useMemo(
     () => ({
-      /** `initialText` is sent automatically once the session is ready. */
-      start: (providerId: string, initialText?: string) => {
-        queued.current = initialText;
+      /**
+       * `initialText` and its attachments are sent automatically once the
+       * session is ready.
+       */
+      start: (
+        providerId: string,
+        initialText?: string,
+        attachments: readonly PendingAttachment[] = [],
+      ) => {
+        const started = Date.now();
+        queued.current = initialText ? { text: initialText, attachments } : undefined;
         post({ t: "session.start", providerId });
         if (!initialText) return;
         // Spawning the agent and its ACP handshake take seconds; without a local
         // turn the screen would sit empty and look like the send did nothing.
-        const turn = localTurn(localSeq.current++, initialText);
+        const turn = localTurn(localSeq.current++, initialText, attachmentImages(attachments));
         setState((s) => ({
           ...s,
           busy: true,
           loadingSession: false,
           turns: [...s.turns, turn],
+          // The clock starts when the prompt leaves the phone, not when the
+          // agent first speaks: booting the agent is part of the wait.
+          activity: beginActivity(started),
+          receipt: undefined,
         }));
+        // The session itself does not exist yet, so there is nothing to mark
+        // busy: `session.started` creates its drawer entry, already working.
       },
 
-      prompt: (text: string) => {
-        const sessionId = sessionRef.current;
-        if (!sessionId) return;
-        post({ t: "session.prompt", sessionId, text });
-        const turn = localTurn(localSeq.current++, text);
+      /**
+       * Send a prompt.
+       *
+       * `to` names a conversation other than the one on screen, which is how a
+       * reply typed into a notification reaches the agent it answers without
+       * yanking the user into that thread. The optimistic turn is then only
+       * recorded against that session, never the visible transcript — putting
+       * it there would show a message from another project in this one.
+       *
+       * `attachments` are inlined into the message; the daemon writes them to
+       * its own disk and hands the agent a path it can actually open.
+       *
+       * @returns false when the conversation must be reloaded first — a daemon
+       * restart drops its session ids, and prompting one it no longer holds
+       * answers "Unknown session". The caller still has the text and can open
+       * the conversation instead of losing it.
+       */
+      prompt: (text: string, to?: string, attachments: readonly PendingAttachment[] = []): boolean => {
+        const sessionId = to ?? sessionRef.current;
+        if (!sessionId) return false;
+        if (to && to !== sessionRef.current) {
+          const target = sessionsRef.current.find((entry) => entry.id === to);
+          if (!target || needsResume(target, liveSessions.current)) return false;
+        }
+        post({ t: "session.prompt", sessionId, text, attachments: toWireAttachments(attachments) });
+        const started = Date.now();
+        const turn = localTurn(localSeq.current++, text, attachmentImages(attachments));
+        const visible = sessionId === sessionRef.current;
         setState((s) => {
-          const turns = [...s.turns, turn];
+          const turns = visible ? [...s.turns, turn] : s.turns;
           return {
             ...s,
-            busy: true,
+            busy: visible ? true : s.busy,
+            // A prompt sent to another conversation is not what this transcript
+            // is showing, so the line under it keeps describing this one.
+            activity: visible ? beginActivity(started) : s.activity,
+            receipt: visible ? undefined : s.receipt,
             turns,
             sessions: s.sessions.map((session) =>
               session.id === sessionId
                 ? {
                     ...session,
-                    turns,
+                    turns: [...session.turns, turn],
+                    // Marked working here, not on the first streamed chunk:
+                    // an agent can think for a long time before it says
+                    // anything, and the drawer should show that as work.
+                    busy: true,
+                    unread: false,
                     title:
                       session.title === "New conversation"
                         ? turn.text.slice(0, 60)
@@ -745,13 +1128,16 @@ export function useDaemon(url: string, deviceId = "phone") {
             ),
           };
         });
+        return true;
       },
 
       cancel: () => {
         const sessionId = sessionRef.current;
         if (sessionId) {
           post({ t: "session.cancel", sessionId });
-          setState((s) => ({ ...s, busy: false }));
+          // No receipt for a turn the user stopped: it did not finish, and
+          // reporting what it managed first would read as a result.
+          setState((s) => ({ ...s, busy: false, activity: IDLE_ACTIVITY, receipt: undefined }));
           return;
         }
 
@@ -769,6 +1155,8 @@ export function useDaemon(url: string, deviceId = "phone") {
         setState((s) => ({
           ...s,
           busy: false,
+          activity: IDLE_ACTIVITY,
+          receipt: undefined,
           // The prompt is still on screen but the agent never saw it: say so,
           // rather than leaving it looking like a message that was ignored.
           turns: note ? [...s.turns, note] : s.turns,
@@ -815,7 +1203,10 @@ export function useDaemon(url: string, deviceId = "phone") {
         // A conversation from the agent's own history has no turns here yet:
         // they live on the agent's disk and stream back as ordinary events once
         // it loads. Show the agent and wait rather than rendering it empty.
-        if (session.agentSessionId) {
+        //
+        // A session this app started is shown from memory instead — unless the
+        // daemon no longer holds it. See `needsResume`.
+        if (needsResume(session, liveSessions.current)) {
           sessionRef.current = undefined;
           providerRef.current = session.providerId;
           queued.current = undefined;
@@ -829,6 +1220,7 @@ export function useDaemon(url: string, deviceId = "phone") {
             ...s,
             sessionId: undefined,
             activeProviderId: session.providerId,
+            workspace: undefined,
             turns: [],
             configOptions: [],
             // Cleared so the previous conversation's menu is not offered for
@@ -836,6 +1228,12 @@ export function useDaemon(url: string, deviceId = "phone") {
             commands: [],
             busy: true,
             loadingSession: true,
+            // Both describe the conversation being left.
+            activity: IDLE_ACTIVITY,
+            receipt: undefined,
+            sessions: s.sessions.map((entry) =>
+              entry.id === sessionId ? { ...entry, unread: false } : entry,
+            ),
           }));
           return;
         }
@@ -853,10 +1251,24 @@ export function useDaemon(url: string, deviceId = "phone") {
           ...s,
           sessionId: live ? sessionId : undefined,
           activeProviderId: session.providerId,
+          // Another conversation can be in another project entirely.
+          workspace: undefined,
           turns: session.turns,
           configOptions: session.configOptions,
-          busy: false,
+          // This conversation's own state, not a reset: it may still be
+          // mid-turn on the desktop, and clearing the spinner here would show
+          // a running agent as finished.
+          busy: session.busy === true,
           loadingSession: false,
+          // A conversation still running elsewhere has tools this client never
+          // saw, and a finished one's receipt belongs to the thread it was
+          // measured in. Either way this opens without one.
+          activity: IDLE_ACTIVITY,
+          receipt: undefined,
+          // Reading it is what makes it read.
+          sessions: s.sessions.map((entry) =>
+            entry.id === sessionId ? { ...entry, unread: false } : entry,
+          ),
         }));
       },
 
@@ -869,6 +1281,7 @@ export function useDaemon(url: string, deviceId = "phone") {
           ...s,
           activeProviderId: providerId,
           sessionId: undefined,
+          workspace: undefined,
           turns: [],
           // Selectors belong to the old agent's session; keeping them would
           // show another agent's model name in the top bar. Its slash commands
@@ -877,6 +1290,8 @@ export function useDaemon(url: string, deviceId = "phone") {
           commands: [],
           busy: false,
           loadingSession: false,
+          activity: IDLE_ACTIVITY,
+          receipt: undefined,
         }));
       },
 
@@ -905,25 +1320,45 @@ export function useDaemon(url: string, deviceId = "phone") {
         setState((s) => ({
           ...s,
           sessionId: undefined,
+          // Belongs to the conversation being closed. The effect below asks
+          // again for wherever the next one will open.
+          workspace: undefined,
           turns: [],
           configOptions: [],
           commands: [],
           busy: false,
           loadingSession: false,
+          activity: IDLE_ACTIVITY,
+          receipt: undefined,
         }));
       },
     }),
     [post, sendImageRequest],
   );
 
+  // Which project the bar above the composer names.
+  //
+  // Driven by the session and agent on screen rather than by a one-off request:
+  // opening a past conversation, switching agents or reconnecting all change
+  // the answer, and each of those is exactly a change to these values. Live
+  // edits are covered by the `session.idle` refresh in the socket handler.
+  const workspaceProviderId = state.activeProviderId ?? fallbackProviderId;
+  useEffect(() => {
+    if (state.status !== "online") return;
+    post({
+      t: "workspace.status",
+      sessionId: state.sessionId,
+      providerId: workspaceProviderId,
+    });
+  }, [post, state.status, state.sessionId, workspaceProviderId]);
+
   // Fall back to the last selectors this agent advertised, so the model picker
   // is available on an empty screen instead of only mid-conversation.
   //
-  // The provider defaults the same way the UI does: before an explicit choice,
-  // the composer already targets the first available agent, so the selector has
-  // to describe that same agent rather than nothing.
-  const effectiveProviderId =
-    state.activeProviderId ?? state.providers.find((p) => p.available)?.id;
+  // The provider defaults the same way the UI does: before an explicit choice
+  // this launch, the composer already targets the remembered agent, so the
+  // selector has to describe that same agent rather than nothing.
+  const effectiveProviderId = state.activeProviderId ?? fallbackProviderId;
   const configOptions =
     state.configOptions.length > 0
       ? state.configOptions
@@ -938,5 +1373,15 @@ export function useDaemon(url: string, deviceId = "phone") {
     ? pendingCapabilities.current.has(effectiveProviderId)
     : false;
 
-  return { ...state, ...actions, configOptions, commands, loadingSessions, images };
+  return {
+    ...state,
+    ...actions,
+    // Exported so the UI names the same agent the composer targets: the drawer
+    // and top bar must not show Claude Code while a prompt would go elsewhere.
+    effectiveProviderId,
+    configOptions,
+    commands,
+    loadingSessions,
+    images,
+  };
 }

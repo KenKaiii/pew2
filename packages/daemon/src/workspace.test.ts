@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { resolveWorkspace } from "./workspace.js";
+import { folderName, resolveWorkspace } from "./workspace.js";
 
 const env = {} as NodeJS.ProcessEnv;
 
@@ -28,4 +28,15 @@ test("a missing daemon cwd falls back to the home directory", () => {
 
 test("an ordinary daemon cwd is kept", () => {
   expect(resolveWorkspace(undefined, env, process.cwd(), "/home/u")).toBe(process.cwd());
+});
+
+test("names a project by its last path segment, for the finished-turn banner", () => {
+  expect(folderName("/Users/kenkai/gg-projects/pew2")).toBe("pew2");
+  // A trailing slash must not produce an empty name.
+  expect(folderName("/Users/kenkai/gg-projects/pew2/")).toBe("pew2");
+});
+
+test("no path means no project name, rather than a slash", () => {
+  expect(folderName(undefined)).toBeUndefined();
+  expect(folderName("/")).toBeUndefined();
 });

@@ -11,12 +11,14 @@
  * scrolling through old history.
  */
 import { memo } from "react";
-import { StyleSheet, View } from "react-native";
+import { Pressable, StyleSheet, Text, View } from "react-native";
+import { Ionicons } from "@expo/vector-icons";
 import { theme } from "../theme";
 import { MarkdownText } from "./MarkdownText";
 import { ChatImages } from "./ChatImage";
 import { CommandToken } from "./CommandToken";
 import { splitCommand } from "../slashCommands";
+import { touchSlop } from "./controls";
 import {
   adaptiveUserBubbleStyle,
   blockUserBubbleStyle,
@@ -24,7 +26,13 @@ import {
 } from "./messageLayoutStyles";
 import type { Turn as TurnModel } from "../useDaemon";
 
-function TurnView({ turn }: { turn: TurnModel }) {
+interface TurnProps {
+  turn: TurnModel;
+  /** Opens this turn's reasoning in the thought sheet. */
+  onOpenThought?: (text: string) => void;
+}
+
+function TurnView({ turn, onOpenThought }: TurnProps) {
   const images = turn.images ?? [];
   // A turn with pictures and no words is normal: an image generation tool's
   // result arrives as content alone. Only a turn with neither renders nothing.
@@ -77,9 +85,25 @@ function TurnView({ turn }: { turn: TurnModel }) {
   }
 
   if (turn.role === "thought") {
+    // Collapsed by default. Reasoning is several times the length of the answer
+    // it precedes, so inline it turns every reply into a scroll hunt for the
+    // actual response — one row that opens the full text on demand keeps the
+    // transcript readable without throwing the thinking away.
     return (
       <View style={styles.thoughtRow}>
-        {hasText && <MarkdownText text={text} tone="thought" />}
+        {hasText && (
+          <Pressable
+            onPress={() => onOpenThought?.(text)}
+            disabled={!onOpenThought}
+            accessibilityRole="button"
+            accessibilityLabel="Show thought process"
+            hitSlop={touchSlop(theme.space(1.5))}
+            style={({ pressed }) => [styles.thoughtToggle, pressed && styles.thoughtPressed]}
+          >
+            <Text style={styles.thoughtLabel}>Thought process</Text>
+            <Ionicons name="chevron-forward" size={13} color={theme.color.textDim} />
+          </Pressable>
+        )}
         <ChatImages images={images} />
       </View>
     );
@@ -104,6 +128,7 @@ function TurnView({ turn }: { turn: TurnModel }) {
 export const Turn = memo(
   TurnView,
   (before, after) =>
+    before.onOpenThought === after.onOpenThought &&
     before.turn.text === after.turn.text &&
     before.turn.role === after.turn.role &&
     // Identity is enough: images are only ever appended as a new array, and
@@ -124,6 +149,20 @@ const styles = StyleSheet.create({
   // several lines, which would not wrap cleanly beside the token.
   commandPrompt: { gap: theme.space(1) },
   agentRow: { width: "100%" },
-  thoughtRow: { width: "100%", paddingHorizontal: theme.space(1) },
+  thoughtRow: { width: "100%", paddingHorizontal: theme.space(1), alignItems: "flex-start" },
+  // A quiet marker on the agent's own rail, not a control competing with the
+  // reply: no fill, no border, just a label and the affordance to open it.
+  thoughtToggle: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.space(1),
+    paddingVertical: theme.space(0.5),
+  },
+  thoughtPressed: { opacity: 0.6 },
+  thoughtLabel: {
+    color: theme.color.textDim,
+    fontSize: theme.font.small,
+    fontWeight: "600",
+  },
   systemRow: { width: "100%" },
 });

@@ -35,6 +35,12 @@ import { Glass } from "./Glass";
 import { useReducedMotion } from "./useReducedMotion";
 import { CommandToken } from "./CommandToken";
 import { splitCommand } from "../slashCommands";
+import { AttachmentChips } from "./AttachmentChips";
+import type { PendingAttachment } from "../attachments";
+import type { Dictation } from "./useDictation";
+
+/** Stable identity, so the default never re-renders a memoized child. */
+const EMPTY_ATTACHMENTS: readonly PendingAttachment[] = [];
 
 const COLLAPSED = theme.size.composerCollapsed;
 const INSET = theme.size.composerInset;
@@ -96,6 +102,13 @@ interface ComposerProps {
   onStop?: () => void;
   placeholder?: string;
   editable?: boolean;
+  /** Files staged for this message. Empty is the common case. */
+  attachments?: readonly PendingAttachment[];
+  /** Opens the source sheet. Absent leaves the `+` inert, as it was. */
+  onAttach?: () => void;
+  onRemoveAttachment?: (id: string) => void;
+  /** Dictation state from `useDictation`. Absent hides the mic. */
+  dictation?: Dictation;
 }
 
 function ComposerView({
@@ -106,8 +119,15 @@ function ComposerView({
   onStop,
   placeholder = "Ask me. Task me...",
   editable = true,
+  attachments = EMPTY_ATTACHMENTS,
+  onAttach,
+  onRemoveAttachment,
+  dictation,
 }: ComposerProps, ref: React.Ref<ComposerHandle>) {
   const hasText = value.trim().length > 0;
+  // A photo with no words is a real message — "look at this" is implied by the
+  // act of attaching it — so attachments arm send on their own.
+  const canSend = hasText || attachments.length > 0;
   const input = useRef<TextInput>(null);
   useImperativeHandle(ref, () => ({ focus: () => input.current?.focus() }), []);
 
@@ -122,7 +142,7 @@ function ComposerView({
   // Focus alone: the keyboard's visibility is a separate event stream with no
   // fixed ordering against it, and mixing the two left the placeholder resting
   // in its expanded position after an unfocus.
-  const expanded = focused || hasText || busy;
+  const expanded = focused || hasText || busy || attachments.length > 0;
 
   // Grow with the text, then scroll internally rather than eat the thread.
   // `contentHeight` is only meaningful once expanded: a multiline TextInput
@@ -137,7 +157,9 @@ function ComposerView({
   );
 
   const sendIn = useRef(new Animated.Value(0)).current;
-  const sendTarget = hasText || busy ? 1 : 0;
+  // While listening, the mic *is* the control the user needs back, so send does
+  // not slide over it even once words have landed in the draft.
+  const sendTarget = (canSend || busy) && !dictation?.listening ? 1 : 0;
   // The text rides its own native transform rather than the surrounding layout,
   // so its duration is fixed no matter what else is animating in the same commit.
   const textDrop = useRef(new Animated.Value(expanded ? 0 : TEXT_DROP)).current;
@@ -177,154 +199,199 @@ function ComposerView({
   }, [sendTarget, reduceMotion, sendIn]);
 
   return (
-    <Glass radius={theme.radius.composer} tier="raised">
-      <View style={{ height: expanded ? expandedHeight : COLLAPSED }}>
-        <Animated.View
-          style={[
-            styles.inputWrap,
-            {
-              left: expanded ? INSET + theme.space(1) : INLINE_SIDE,
-              right: expanded ? INSET + theme.space(1) : INLINE_SIDE,
-              bottom: expanded ? COLLAPSED - theme.space(2) : 0,
-              // Fixed: the drop below is what moves the text between states.
-              top: theme.space(3) - HALF_LEADING,
-              transform: [{ translateY: textDrop }],
-            },
-          ]}
-        >
-          <TextInput
-            ref={input}
-            style={styles.input}
-            // The command is not text here — it is the badge in the action row
-            // below — so the field holds only the instructions after it, and
-            // every edit is put back together before it leaves this component.
-            value={split ? split.rest.replace(/^ /, "") : value}
-            onChangeText={(text) =>
-              onChangeText(split ? `${split.command} ${text}` : text)
-            }
-            onFocus={() => setFocus(true)}
-            onBlur={() => setFocus(false)}
-            onContentSizeChange={(event) =>
-              setContentHeight(event.nativeEvent.contentSize.height)
-            }
-            placeholder={placeholder}
-            placeholderTextColor={theme.color.placeholder}
-            multiline
-            editable={editable}
-            accessibilityLabel="Message"
-            submitBehavior="newline"
-            // A scrollable TextInput reports its *visible* height as content
-            // size, so while scrolling is on it always measures one line and the
-            // box can never grow. Scrolling therefore stays off until the box
-            // has actually reached its ceiling.
-            scrollEnabled={contentHeight >= MAX_TEXT_HEIGHT}
-          />
-        </Animated.View>
+    <View style={styles.stack}>
+      {/* Above the pill rather than inside it: the pill's contents are
+          absolutely positioned against a height computed from the draft, and
+          threading a variable-height row through that math is what would make
+          the text jump. */}
+      {attachments.length > 0 && (
+        <AttachmentChips attachments={attachments} onRemove={onRemoveAttachment} />
+      )}
 
-        {/* Always the bottom 58pt: the entire pill when collapsed, the action
-            row once expanded. Anchoring it means the buttons never shift. */}
-        <View style={styles.actions}>
-          {/* Grouped, because the row is `space-between`: a third loose child
-              would scatter the three across the width instead of keeping the
-              badge next to the button it belongs beside. */}
-          <View style={styles.leading}>
-            <View
-              style={[styles.actionButton, styles.notImplemented]}
-              accessibilityRole="button"
-              accessibilityLabel="Add attachment, not available yet"
-              accessibilityState={{ disabled: true }}
-            >
-              <Ionicons name="add" size={22} color={theme.color.glyph} />
-            </View>
+      <Glass radius={theme.radius.composer} tier="raised">
+        <View style={{ height: expanded ? expandedHeight : COLLAPSED }}>
+          <Animated.View
+            style={[
+              styles.inputWrap,
+              {
+                left: expanded ? INSET + theme.space(1) : INLINE_SIDE,
+                right: expanded ? INSET + theme.space(1) : INLINE_SIDE,
+                bottom: expanded ? COLLAPSED - theme.space(2) : 0,
+                // Fixed: the drop below is what moves the text between states.
+                top: theme.space(3) - HALF_LEADING,
+                transform: [{ translateY: textDrop }],
+              },
+            ]}
+          >
+            <TextInput
+              ref={input}
+              style={styles.input}
+              // The command is not text here — it is the badge in the action row
+              // below — so the field holds only the instructions after it, and
+              // every edit is put back together before it leaves this component.
+              value={split ? split.rest.replace(/^ /, "") : value}
+              onChangeText={(text) =>
+                onChangeText(split ? `${split.command} ${text}` : text)
+              }
+              onFocus={() => setFocus(true)}
+              onBlur={() => setFocus(false)}
+              onContentSizeChange={(event) =>
+                setContentHeight(event.nativeEvent.contentSize.height)
+              }
+              placeholder={placeholder}
+              placeholderTextColor={theme.color.placeholder}
+              multiline
+              editable={editable}
+              accessibilityLabel="Message"
+              submitBehavior="newline"
+              // A scrollable TextInput reports its *visible* height as content
+              // size, so while scrolling is on it always measures one line and the
+              // box can never grow. Scrolling therefore stays off until the box
+              // has actually reached its ceiling.
+              scrollEnabled={contentHeight >= MAX_TEXT_HEIGHT}
+            />
+          </Animated.View>
 
-            {/* Beside the attachment button and the same height as it, so the
-                command reads as another control on that row rather than as text
-                that escaped the field. Removing it is a tap on the badge itself:
-                a separate 'x' inside the input sat exactly where the caret goes. */}
-            {split && (
+          {/* Always the bottom 58pt: the entire pill when collapsed, the action
+              row once expanded. Anchoring it means the buttons never shift. */}
+          <View style={styles.actions}>
+            {/* Grouped, because the row is `space-between`: a third loose child
+                would scatter the three across the width instead of keeping the
+                badge next to the button it belongs beside. */}
+            <View style={styles.leading}>
               <Pressable
-                style={({ pressed }) => [styles.badge, pressed && styles.badgePressed]}
-                hitSlop={touchSlop(theme.space(1))}
-                accessibilityRole="button"
-                accessibilityLabel={`Remove ${split.command}`}
-                onPress={() => {
-                  // Keeps whatever was typed since: a mis-picked command should
-                  // not also discard the instructions written under it.
-                  onChangeText(split.rest.replace(/^ /, ""));
-                  input.current?.focus();
-                }}
-              >
-                <CommandToken text={split.command} size={theme.font.small} lineHeight={18} />
-                <Ionicons name="close" size={13} color={theme.color.accent} />
-              </Pressable>
-            )}
-          </View>
-
-          <View style={styles.trailing}>
-            <Animated.View
-              pointerEvents={sendTarget === 1 ? "none" : "auto"}
-              style={[
-                styles.trailingLayer,
-                {
-                  opacity: sendIn.interpolate({
-                    inputRange: [0, 1],
-                    outputRange: [1, 0],
-                  }),
-                },
-              ]}
-            >
-              <View
-                style={[styles.actionButton, styles.notImplemented]}
-                accessibilityRole="button"
-                accessibilityLabel="Voice input, not available yet"
-                accessibilityState={{ disabled: true }}
-              >
-                <Ionicons name="mic-outline" size={20} color={theme.color.glyph} />
-              </View>
-            </Animated.View>
-
-            <Animated.View
-              pointerEvents={sendTarget === 1 ? "auto" : "none"}
-              style={[styles.trailingLayer, { opacity: sendIn }]}
-            >
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel={busy ? "Stop generating" : "Send message"}
-                accessibilityState={{ disabled: !busy && !hasText }}
-                hitSlop={touchSlop(BUTTON)}
-                // Sending commits work to another machine, so it lands heavier
-                // than a navigation tap; stopping is a correction, not a commit.
-                onPress={() => {
-                  if (busy) {
-                    haptics.warned();
-                    onStop?.();
-                    return;
-                  }
-                  haptics.sent();
-                  onSend();
-                }}
-                disabled={!busy && !hasText}
                 style={({ pressed }) => [
                   styles.actionButton,
-                  styles.sendButton,
-                  pressed && styles.sendPressed,
+                  !onAttach && styles.notImplemented,
+                  pressed && styles.actionPressed,
+                ]}
+                hitSlop={touchSlop(theme.space(1))}
+                accessibilityRole="button"
+                accessibilityLabel={onAttach ? "Add attachment" : "Add attachment, not available yet"}
+                accessibilityState={{ disabled: !onAttach }}
+                disabled={!onAttach}
+                onPress={() => {
+                  haptics.tap();
+                  onAttach?.();
+                }}
+              >
+                <Ionicons name="add" size={22} color={theme.color.glyph} />
+              </Pressable>
+
+              {/* Beside the attachment button and the same height as it, so the
+                  command reads as another control on that row rather than as text
+                  that escaped the field. Removing it is a tap on the badge itself:
+                  a separate 'x' inside the input sat exactly where the caret goes. */}
+              {split && (
+                <Pressable
+                  style={({ pressed }) => [styles.badge, pressed && styles.badgePressed]}
+                  hitSlop={touchSlop(theme.space(1))}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Remove ${split.command}`}
+                  onPress={() => {
+                    // Keeps whatever was typed since: a mis-picked command should
+                    // not also discard the instructions written under it.
+                    onChangeText(split.rest.replace(/^ /, ""));
+                    input.current?.focus();
+                  }}
+                >
+                  <CommandToken text={split.command} size={theme.font.small} lineHeight={18} />
+                  <Ionicons name="close" size={13} color={theme.color.accent} />
+                </Pressable>
+              )}
+            </View>
+
+            <View style={styles.trailing}>
+              <Animated.View
+                pointerEvents={sendTarget === 1 ? "none" : "auto"}
+                style={[
+                  styles.trailingLayer,
+                  {
+                    opacity: sendIn.interpolate({
+                      inputRange: [0, 1],
+                      outputRange: [1, 0],
+                    }),
+                  },
                 ]}
               >
-                <Ionicons
-                  name={busy ? "square" : "arrow-up"}
-                  size={busy ? 13 : 20}
-                  color="#0f0f0f"
-                />
-              </Pressable>
-            </Animated.View>
+                <Pressable
+                  style={({ pressed }) => [
+                    styles.actionButton,
+                    !dictation?.available && styles.notImplemented,
+                    dictation?.listening && styles.listening,
+                    pressed && styles.actionPressed,
+                  ]}
+                  hitSlop={touchSlop(theme.space(1))}
+                  accessibilityRole="button"
+                  accessibilityLabel={
+                    !dictation?.available
+                      ? "Voice input, not available on this device"
+                      : dictation.listening
+                        ? "Stop dictating"
+                        : "Dictate a message"
+                  }
+                  accessibilityState={{
+                    disabled: !dictation?.available,
+                    selected: dictation?.listening ?? false,
+                  }}
+                  disabled={!dictation?.available}
+                  onPress={() => dictation?.toggle()}
+                >
+                  {/* Filled while listening: the difference has to be legible at a
+                      glance on a control the size of a fingertip, so it is colour
+                      *and* weight rather than colour alone. */}
+                  <Ionicons
+                    name={dictation?.listening ? "mic" : "mic-outline"}
+                    size={20}
+                    color={dictation?.listening ? theme.color.accent : theme.color.glyph}
+                  />
+                </Pressable>
+              </Animated.View>
+
+              <Animated.View
+                pointerEvents={sendTarget === 1 ? "auto" : "none"}
+                style={[styles.trailingLayer, { opacity: sendIn }]}
+              >
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={busy ? "Stop generating" : "Send message"}
+                  accessibilityState={{ disabled: !busy && !canSend }}
+                  hitSlop={touchSlop(BUTTON)}
+                  // Sending commits work to another machine, so it lands heavier
+                  // than a navigation tap; stopping is a correction, not a commit.
+                  onPress={() => {
+                    if (busy) {
+                      haptics.warned();
+                      onStop?.();
+                      return;
+                    }
+                    haptics.sent();
+                    onSend();
+                  }}
+                  disabled={!busy && !canSend}
+                  style={({ pressed }) => [
+                    styles.actionButton,
+                    styles.sendButton,
+                    pressed && styles.sendPressed,
+                  ]}
+                >
+                  <Ionicons
+                    name={busy ? "square" : "arrow-up"}
+                    size={busy ? 13 : 20}
+                    color="#0f0f0f"
+                  />
+                </Pressable>
+              </Animated.View>
+            </View>
           </View>
         </View>
-      </View>
-    </Glass>
+      </Glass>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
+  stack: { gap: theme.space(2) },
   inputWrap: { position: "absolute", top: 0 },
   leading: { flexDirection: "row", alignItems: "center", flexShrink: 1 },
   // Same height and radius as the attachment button beside it, so the row reads
@@ -381,6 +448,8 @@ const styles = StyleSheet.create({
     right: 0,
     bottom: 0,
   },
+  actionPressed: { opacity: 0.6 },
+  listening: { backgroundColor: theme.color.accentSoft },
   sendButton: { backgroundColor: theme.color.text },
   sendPressed: { backgroundColor: theme.color.textDim },
   notImplemented: { opacity: 0.4 },

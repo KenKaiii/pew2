@@ -39,3 +39,6 @@ yarn-error.*
 # generated native folders
 /ios
 /android
+
+# Whose Expo account this working copy builds under. Per-machine, never shared.
+eas-project.json

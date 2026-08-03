@@ -168,13 +168,15 @@ test("relayed messages reach the daemon handler", async () => {
   calls.length = 0;
 
   // An unknown type must produce an error reply rather than a crash: the app
-  // and daemon can be different versions once this is remote.
+  // and daemon can be different versions once this is remote. It carries its
+  // own code so a newer app can tell "this daemon is older than me" apart from
+  // a real failure and keep it out of the transcript.
   socket.receive({ t: "nonsense" });
   await new Promise((r) => setTimeout(r, 20));
 
   const errors = socket.sent.map((s) => JSON.parse(s)).filter((m) => m.t === "error");
   expect(errors).toHaveLength(1);
-  expect(errors[0].code).toBe("command_failed");
+  expect(errors[0].code).toBe("unknown_message");
   relay.stop();
 });
 

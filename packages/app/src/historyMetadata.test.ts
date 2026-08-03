@@ -45,3 +45,22 @@ test("agent metadata renders a message count before the session is opened", () =
 
   expect(formatHistoryMetadata(stub)).toBe("7 messages · pew2");
 });
+
+test("a session started from the phone is named by the folder the daemon stamped", () => {
+  // It has no `cwd` of its own — only the desktop knows where the agent runs,
+  // and it says so when the turn finishes.
+  const session: Session = {
+    id: "live-session",
+    providerId: "claude-code",
+    title: "Add notifications",
+    startedAt: 1,
+    turns: [
+      { id: "live-session:0", role: "user", text: "Add them" },
+      { id: "live-session:1", role: "agent", text: "Done" },
+    ],
+    configOptions: [],
+    folder: "pew2",
+  };
+
+  expect(formatHistoryMetadata(session)).toBe("2 messages · pew2");
+});

@@ -59,6 +59,17 @@ export const ProviderAnnounce = z.object({
       unavailableReason: z.string().optional(),
     }),
   ),
+  /**
+   * Daemon session ids that are open *right now*.
+   *
+   * Session ids are assigned per daemon process and die with it, but a client
+   * keeps its list across restarts and reconnects — so without this it will
+   * happily prompt an id the daemon has never heard of ("Unknown session").
+   * Sent on every announcement, and `hello` triggers one, so a reconnecting
+   * app learns which of its conversations still exist and resumes the rest by
+   * `agentSessionId`.
+   */
+  activeSessions: z.array(z.string()).default([]),
 });
 
 /**
@@ -172,11 +183,40 @@ export const StartSession = z.object({
   cwd: z.string().optional(),
 });
 
+/**
+ * A file the phone is sending *to* the agent, inlined.
+ *
+ * The reverse direction of `ImageData`: that machine cannot see the phone's
+ * camera roll any more than the phone can see its disk, so the bytes travel in
+ * the prompt and the daemon writes them somewhere the agent can open.
+ */
+export const PromptAttachment = z.object({
+  /** Display name only. The daemon sanitises it before it becomes a path. */
+  name: z.string().min(1),
+  mimeType: z.string(),
+  /** Base64, no `data:` prefix. */
+  data: z.string(),
+});
+
+/**
+ * Ceilings for one prompt's attachments.
+ *
+ * Base64 inflates by a third, so 12MB of files is ~16MB on the wire — inside
+ * the relay Durable Object's 32 MiB received-message limit, which is otherwise
+ * hit as a socket that simply dies. Checked on the phone, where the reason can
+ * be shown, *and* in the daemon, which cannot trust a client.
+ */
+export const MAX_ATTACHMENTS = 5;
+export const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024;
+export const MAX_ATTACHMENTS_TOTAL_BYTES = 12 * 1024 * 1024;
+
 /** App -> daemon. Send a prompt into an existing session. */
 export const Prompt = z.object({
   t: z.literal("session.prompt"),
   sessionId: z.string(),
   text: z.string(),
+  /** Defaulted, so a client older than attachments still validates. */
+  attachments: z.array(PromptAttachment).default([]),
 });
 
 /** App -> daemon. Interrupt the current turn. */
@@ -228,6 +268,39 @@ export const ImageData = z.object({
 });
 
 /**
+ * App -> daemon. Which project is this session in, and how dirty is it?
+ *
+ * The phone has no filesystem to look at, so the working directory and the
+ * count of uncommitted files are the only context it can offer before a prompt
+ * goes out. Asked on demand rather than streamed: it changes with the agent's
+ * own edits, so the app re-asks whenever a turn ends.
+ */
+export const WorkspaceRequest = z.object({
+  t: z.literal("workspace.status"),
+  /** The open session, whose cwd is the project being described. */
+  sessionId: z.string().optional(),
+  /**
+   * Fallback before a session exists: the agent's own last project, which is
+   * where the daemon would open one. No path is accepted from the client — the
+   * daemon resolves the directory itself.
+   */
+  providerId: z.string().optional(),
+});
+
+/** Daemon -> app. The answer to `workspace.status`. */
+export const Workspace = z.object({
+  t: z.literal("workspace"),
+  sessionId: z.string().optional(),
+  cwd: z.string(),
+  /** Last path segment: the project's name as people say it. */
+  folder: z.string(),
+  /** False when the directory is not inside a git working tree. */
+  repo: z.boolean(),
+  /** Changed, staged and untracked entries, as `git status` counts them. */
+  uncommitted: z.number().int().nonnegative(),
+});
+
+/**
  * Daemon -> relay -> app. An ordered, append-only event for a session.
  * `payload` mirrors the ACP `session/update` notification so the app renders
  * agent output without pew2 inventing a second content model.
@@ -249,6 +322,24 @@ export const Replay = z.object({
   complete: z.boolean().optional(),
 });
 
+/**
+ * Daemon -> app. A turn finished; the agent is waiting on you again.
+ *
+ * Broadcast to every client, not just the one that prompted, because the phone
+ * is very often not the device watching this session — and it is the only
+ * signal a client has that a conversation it left running is done. The project
+ * travels with it so a notification can name the work ("pew2") without the app
+ * holding a path for every session it has ever seen.
+ */
+export const SessionIdle = z.object({
+  t: z.literal("session.idle"),
+  sessionId: z.string(),
+  /** The agent that ran the turn, so a client can name it. */
+  providerId: z.string().optional(),
+  /** Last segment of the session's cwd: the project as people say it. */
+  folder: z.string().optional(),
+});
+
 export const ErrorMessage = z.object({
   t: z.literal("error"),
   code: z.string(),
@@ -266,6 +357,7 @@ export const ClientMessage = z.discriminatedUnion("t", [
   Cancel,
   PermissionReply,
   ImageRequest,
+  WorkspaceRequest,
 ]);
 
 export const ServerMessage = z.discriminatedUnion("t", [
@@ -273,8 +365,10 @@ export const ServerMessage = z.discriminatedUnion("t", [
   ProviderAnnounce,
   ProviderCapabilities,
   SessionEvent,
+  SessionIdle,
   Replay,
   ImageData,
+  Workspace,
   ErrorMessage,
 ]);
 
@@ -287,11 +381,15 @@ export type ResumeSession = z.output<typeof ResumeSession>;
 export type ProviderCapabilitiesRequest = z.output<typeof ProviderCapabilitiesRequest>;
 export type ProviderCapabilities = z.output<typeof ProviderCapabilities>;
 export type StartSession = z.output<typeof StartSession>;
+export type PromptAttachment = z.output<typeof PromptAttachment>;
 export type Prompt = z.output<typeof Prompt>;
 export type Cancel = z.output<typeof Cancel>;
 export type PermissionReply = z.output<typeof PermissionReply>;
 export type ImageRequest = z.output<typeof ImageRequest>;
 export type ImageData = z.output<typeof ImageData>;
+export type WorkspaceRequest = z.output<typeof WorkspaceRequest>;
+export type Workspace = z.output<typeof Workspace>;
 export type SessionEvent = z.output<typeof SessionEvent>;
+export type SessionIdle = z.output<typeof SessionIdle>;
 export type ClientMessage = z.output<typeof ClientMessage>;
 export type ServerMessage = z.output<typeof ServerMessage>;

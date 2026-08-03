@@ -23,6 +23,16 @@ export interface ChatImage {
   mimeType?: string;
   /** Shown while loading and read out by screen readers. */
   alt?: string;
+  /**
+   * Set only for a file the *phone* holds — a photo the user just attached.
+   *
+   * Such a `file://` URI is indistinguishable from one an agent named, which
+   * points at the desktop and must be fetched over the socket. Asking the
+   * daemon for a path that only exists on this handset returns a permanent
+   * error card, so the difference is recorded at the point it is known rather
+   * than guessed from the scheme later.
+   */
+  origin?: "device";
 }
 
 export type ImageSourceKind = "inline" | "remote" | "local";
@@ -142,6 +152,30 @@ export function imagesFromToolCall(update: any): ChatImage[] {
   for (const entry of content) {
     if (entry?.type !== "content") continue;
     images.push(...imagesFromContent(entry.content));
+  }
+  return images;
+}
+
+/**
+ * Pictures among the files a user attached, as echoed back by the daemon.
+ *
+ * These have no `origin`: the daemon wrote them to *its* tempdir, so the path
+ * names the desktop and is fetched over the socket like any other agent image.
+ * The optimistic turn on the sending device uses `attachmentImages()` instead,
+ * which does carry the flag.
+ */
+export function imagesFromAttachments(attachments: unknown): ChatImage[] {
+  if (!Array.isArray(attachments)) return [];
+  const images: ChatImage[] = [];
+  for (const file of attachments) {
+    const uri = typeof file?.uri === "string" ? file.uri : "";
+    if (!uri) continue;
+    if (!isImageMime(file?.mimeType) && !isDisplayableImage(uri)) continue;
+    images.push({
+      src: uri,
+      mimeType: isImageMime(file?.mimeType) ? file.mimeType : undefined,
+      alt: typeof file?.name === "string" ? file.name : undefined,
+    });
   }
   return images;
 }

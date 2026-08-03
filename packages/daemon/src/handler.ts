@@ -14,7 +14,9 @@
 import type { Daemon } from "./index.js";
 import { humanError } from "./errors.js";
 import { loadImage } from "./images.js";
+import { workspaceStatus } from "./git.js";
 import { resolveWorkspace } from "./workspace.js";
+import { wire } from "@pew2/protocol";
 
 export interface HandlerContext {
   daemon: Daemon;
@@ -40,6 +42,7 @@ interface ClientMessage {
   agentSessionId?: string;
   refresh?: boolean;
   uri?: string;
+  attachments?: unknown;
 }
 
 /**
@@ -156,6 +159,11 @@ export async function handleMessage(raw: string, ctx: HandlerContext): Promise<v
           // Models and thinking levels come from the agent itself, so a newly
           // connected app brings its own without any mapping here.
           configOptions: daemon.configOptions(sessionId),
+          // The agent's own id for this conversation. Clients merge the agent's
+          // stored history into the same list, and without this the next probe
+          // lists this very session again as a stub — reopening that copy is
+          // what threw away the model just picked.
+          agentSessionId: daemon.agentSessionId(sessionId),
         });
         // Agents can emit updates during `session/new` itself; those were held
         // back so no event ever precedes the session it belongs to.
@@ -167,16 +175,32 @@ export async function handleMessage(raw: string, ctx: HandlerContext): Promise<v
         if (!message.sessionId || message.text === undefined) {
           throw new Error("sessionId and text required");
         }
+        // The one field here that is neither a scalar nor optional-by-default:
+        // it becomes bytes on this disk, so its shape is parsed rather than
+        // trusted. `storeAttachments` then re-checks the size limits.
+        const attachments = wire.PromptAttachment.array()
+          .default([])
+          .parse(message.attachments ?? []);
         // Deliberately not awaited: a turn can run for minutes, and the client
         // is driven by streamed events rather than this reply.
         const sessionId = message.sessionId;
         daemon
-          .prompt(sessionId, message.text)
+          .prompt(sessionId, message.text, attachments)
           .catch((error) => reply(errorMessage("prompt_failed", error)))
           // Tell every client the turn is over, so they can stop showing a
           // working indicator. Broadcast, not reply: other devices watching this
           // session need it too.
-          .finally(() => broadcast({ t: "session.idle", sessionId }));
+          //
+          // Carries the project and agent so a client can announce a session it
+          // is not showing — the phone is usually elsewhere by the time a long
+          // turn ends, and only this machine knows the path.
+          .finally(() =>
+            broadcast({
+              t: "session.idle",
+              sessionId,
+              ...daemon.sessionOrigin(sessionId),
+            }),
+          );
         break;
       }
 
@@ -243,6 +267,28 @@ export async function handleMessage(raw: string, ctx: HandlerContext): Promise<v
         break;
       }
 
+      case "workspace.status": {
+        // The project the session is in, plus how dirty it is. Replied rather
+        // than logged as a session event: it describes the machine right now,
+        // so replaying it on every reconnect would only restate stale counts.
+        //
+        // The directory comes from the session (or the provider's last
+        // project), never from the message: a client-supplied path would let a
+        // caller probe any directory on this machine for its existence.
+        const root =
+          (message.sessionId ? daemon.sessionCwd(message.sessionId) : undefined) ??
+          (message.providerId ? await daemon.lastWorkspace(message.providerId) : undefined) ??
+          cwd;
+        reply({
+          t: "workspace",
+          // Echoed so a client can drop an answer for a conversation it has
+          // already navigated away from.
+          sessionId: message.sessionId,
+          ...(await workspaceStatus(root)),
+        });
+        break;
+      }
+
       case "session.permission": {
         if (!message.sessionId || !message.requestId || !message.optionId) {
           throw new Error("sessionId, requestId and optionId required");
@@ -252,7 +298,13 @@ export async function handleMessage(raw: string, ctx: HandlerContext): Promise<v
       }
 
       default:
-        throw new Error(`Unknown message type '${message.t}'`);
+        // Its own code, not `command_failed`: an app newer than this daemon
+        // asks for things it does not have yet (the workspace bar being the
+        // first), and the client has to tell "you are out of date" apart from
+        // "your prompt failed" — the latter belongs in the transcript, this
+        // does not.
+        reply(errorMessage("unknown_message", `Unknown message type '${message.t}'`));
+        return;
     }
   } catch (error) {
     reply(errorMessage("command_failed", error));

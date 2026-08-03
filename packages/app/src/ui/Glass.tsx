@@ -63,7 +63,10 @@ export function Glass({
     tier === "raised" ? "rgba(255,255,255,0.34)" : "rgba(255,255,255,0.28)";
 
   useEffect(() => {
-    void AccessibilityInfo.isReduceTransparencyEnabled().then(setReduceTransparency);
+    // Optional-called: `isReduceTransparencyEnabled` is an iOS API, and a
+    // platform without it (react-native-web) otherwise throws during mount and
+    // takes the whole tree down — a blank screen rather than a missing blur.
+    void AccessibilityInfo.isReduceTransparencyEnabled?.().then(setReduceTransparency);
     const subscription = AccessibilityInfo.addEventListener(
       "reduceTransparencyChanged",
       setReduceTransparency,

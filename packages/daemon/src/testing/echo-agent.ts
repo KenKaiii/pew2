@@ -135,6 +135,73 @@ const app = agent({ name: "pew2-echo" })
       await new Promise((r) => setTimeout(r, 40));
     }
 
+    // Exercise the tool-call path on demand: a client's activity line names the
+    // tool an agent is running, and without this no offline agent emits one at
+    // all. They overlap deliberately — real agents run tools in parallel, and a
+    // client that only handles them one at a time looks correct until it does.
+    if (text.toLowerCase().includes("tools")) {
+      const calls = [
+        { toolCallId: "echo_read", title: "Reading src/useDaemon.ts", kind: "read" },
+        { toolCallId: "echo_grep", title: "Searching for foldActivity", kind: "search" },
+        { toolCallId: "echo_test", title: "Running bun test packages/app", kind: "execute" },
+      ];
+      for (const call of calls) {
+        await ctx.client.notify("session/update", {
+          sessionId,
+          update: { sessionUpdate: "tool_call", ...call, status: "in_progress" },
+        });
+        await new Promise((r) => setTimeout(r, 700));
+      }
+      for (const call of calls) {
+        await ctx.client.notify("session/update", {
+          sessionId,
+          update: {
+            sessionUpdate: "tool_call_update",
+            toolCallId: call.toolCallId,
+            // One fails, so a client's failure path is reachable offline
+            // without breaking anything else in the check.
+            status: call.toolCallId === "echo_test" ? "failed" : "completed",
+          },
+        });
+        await new Promise((r) => setTimeout(r, 400));
+      }
+
+      // A real turn alternates: the agent explains what it found, then picks up
+      // another tool. A client that shows tool activity has to yield to the
+      // prose and come back — without this second half the interleaving is
+      // never exercised at all.
+      for (const word of "Right, the tests fail. Patching it now.".split(" ")) {
+        await ctx.client.notify("session/update", {
+          sessionId,
+          update: {
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text: `${word} ` },
+          },
+        });
+        await new Promise((r) => setTimeout(r, 60));
+      }
+
+      await ctx.client.notify("session/update", {
+        sessionId,
+        update: {
+          sessionUpdate: "tool_call",
+          toolCallId: "echo_edit",
+          title: "Editing src/activity.ts",
+          kind: "edit",
+          status: "in_progress",
+        },
+      });
+      await new Promise((r) => setTimeout(r, 900));
+      await ctx.client.notify("session/update", {
+        sessionId,
+        update: {
+          sessionUpdate: "tool_call_update",
+          toolCallId: "echo_edit",
+          status: "completed",
+        },
+      });
+    }
+
     // Exercise the approval path on demand.
     if (text.toLowerCase().includes("permission")) {
       const result = (await ctx.client.request("session/request_permission", {

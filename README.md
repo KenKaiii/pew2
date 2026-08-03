@@ -67,12 +67,24 @@ change anything, rebuild, and it is on your phone.
 
 ```bash
 cd packages/app
+npx eas init                                           # once, links YOUR Expo account
 npx eas build --profile apk       --platform android   # APK, install it, done
 npx eas build --profile device    --platform ios       # signed for your own device
 npx eas build --profile simulator --platform ios       # no signing, no account
 ```
 
 Builds run on Expo's machines, so a local Xcode/NDK toolchain is not required.
+
+`eas init` comes first because no one's Expo account is committed here. Put the
+account and project id it gives you in `packages/app/eas-project.json`, which is
+gitignored:
+
+```json
+{ "owner": "your-expo-username", "projectId": "the-uuid-from-eas-init" }
+```
+
+So a fork builds under its own account, and pulling upstream never fights you over
+whose it is. CI can set `EAS_OWNER` and `EAS_PROJECT_ID` instead of the file.
 
 **Android needs no developer account, ever.** A signed APK installs once and
 keeps working. Nothing expires.

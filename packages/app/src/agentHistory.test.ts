@@ -4,7 +4,12 @@
  * control for a desktop agent.
  */
 import { test, expect } from "bun:test";
-import { mergeAgentSessions, agentSessionKey } from "./agentHistory";
+import {
+  mergeAgentSessions,
+  agentSessionKey,
+  isAgentSessionStub,
+  needsResume,
+} from "./agentHistory";
 import type { Session } from "./useDaemon";
 
 const NOW = 1_700_000_000_000;
@@ -43,6 +48,53 @@ test("conversations from the agent's disk appear in the list", () => {
   expect(merged[0]!.cwd).toBe("/repo");
   expect(merged[0]!.id).toBe(agentSessionKey("claude-code", "s1"));
   expect(merged[0]!.messageCount).toBe(12);
+});
+
+test("a session started here is not listed again as the agent's own", () => {
+  // The daemon reports the agent's id for sessions this app started, so the
+  // next history probe recognises the conversation already on screen. Without
+  // that, it appeared twice and reopening the copy lost the session's model.
+  const live: Session = { ...local, agentSessionId: "s1" };
+  const merged = mergeAgentSessions(
+    [live],
+    "claude-code",
+    [{ sessionId: "s1", cwd: "/repo", title: "Started on this phone" }],
+    true,
+    NOW,
+  );
+
+  expect(merged).toEqual([live]);
+  // ...and it still opens from memory rather than reloading from the agent.
+  expect(isAgentSessionStub(live.id)).toBe(false);
+  expect(isAgentSessionStub(agentSessionKey("claude-code", "s1"))).toBe(true);
+  expect(needsResume(live, new Set([live.id]))).toBe(false);
+});
+
+test("a session the daemon no longer holds is reopened, not prompted", () => {
+  // Session ids belong to a daemon *process*. The drawer outlives it, so after
+  // a daemon restart an entry can name an id that is gone — which is what
+  // answered "Unknown session" on the next prompt.
+  const survivor: Session = { ...local, agentSessionId: "s1" };
+
+  expect(needsResume(survivor, new Set(["some-other-session"]))).toBe(true);
+  expect(needsResume(survivor, new Set([survivor.id]))).toBe(false);
+
+  // The agent's own copy always reloads: its turns were never in this app.
+  const stub: Session = {
+    ...local,
+    id: agentSessionKey("claude-code", "s1"),
+    agentSessionId: "s1",
+  };
+  expect(needsResume(stub, new Set([stub.id]))).toBe(true);
+});
+
+test("nothing is reopened when the daemon never reported its sessions", () => {
+  // An older daemon says nothing about which sessions it holds. Guessing they
+  // are all dead would reload every conversation the user opens.
+  expect(needsResume({ ...local, agentSessionId: "s1" }, undefined)).toBe(false);
+  // ...and a conversation with no agent id has nothing to reopen from, so it
+  // is shown from memory whatever the daemon says.
+  expect(needsResume(local, new Set())).toBe(false);
 });
 
 test("newest first, so the thread just worked on is at the top", () => {

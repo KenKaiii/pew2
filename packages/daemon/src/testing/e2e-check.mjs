@@ -94,7 +94,12 @@ check("streams multiple events", events.length > 3);
 const text = events.map((e) => e.payload?.update?.content?.text ?? "").join("");
 check("echoes the prompt back", text.includes("hello from the simulator"));
 // Without this the app's working indicator would spin forever.
-check("signals idle when the turn ends", inbox.some((m) => m.t === "session.idle"));
+const idle = inbox.find((m) => m.t === "session.idle");
+check("signals idle when the turn ends", Boolean(idle));
+// The phone is usually looking at something else by the time a turn lands, and
+// only this machine knows which project finished: without the stamp the
+// "agent finished" notification cannot name the work.
+check("names the project on the finished turn", Boolean(idle?.folder));
 
 // Permission round trip.
 inbox.length = 0;

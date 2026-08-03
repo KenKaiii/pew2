@@ -10,6 +10,8 @@ import { Readable, Writable } from "node:stream";
 import { client, ndJsonStream, type ClientConnection } from "@agentclientprotocol/sdk";
 import type { LoadedProvider } from "../providers/registry.js";
 import { humanError } from "../errors.js";
+import type { StoredAttachment } from "../attachments.js";
+import { promptBlocks, type PromptCapabilities } from "./promptBlocks.js";
 import { SESSION_HISTORY_LIMIT } from "../session-history.js";
 import { hydrateClaudeMessageCounts } from "./claude-history.js";
 import { hydrateGgCoderMessageCounts } from "./ggcoder-history.js";
@@ -182,7 +184,15 @@ export interface AcpSessionHandle {
    * instead of spawning again.
    */
   adopt(options: AdoptOptions): Promise<void>;
-  prompt(text: string): Promise<unknown>;
+  /**
+   * What this agent accepts in a prompt besides text.
+   *
+   * Undefined when it advertised nothing, which means text only: sending an
+   * image block to an agent that never claimed `image` is a protocol error,
+   * not a graceful degradation.
+   */
+  readonly promptCapabilities?: PromptCapabilities;
+  prompt(text: string, attachments?: readonly StoredAttachment[]): Promise<unknown>;
   cancel(): Promise<void>;
   setConfigOption(configId: string, value: string | boolean): Promise<ConfigOption[]>;
   answerPermission(requestId: string, optionId: string): boolean;
@@ -194,6 +204,7 @@ export interface AdoptOptions {
   loadSessionId?: string;
   onUpdate: (payload: unknown) => void;
   onPermissionRequest: (request: { requestId: string; params: unknown }) => void;
+  onConfigOptions?: (options: ConfigOption[]) => void;
   onExit?: (code: number | null, signal: NodeJS.Signals | null) => void;
 }
 
@@ -207,6 +218,16 @@ export interface ConnectOptions {
    * returned promise by calling `answerPermission` with one of the option ids.
    */
   onPermissionRequest: (request: { requestId: string; params: unknown }) => void;
+  /**
+   * The agent changed the session's selectors on its own.
+   *
+   * Not every change comes from `setConfigOption`: the option set is
+   * model-dependent, so switching model adds or removes the thinking-level
+   * selector, and `/model` typed as a prompt changes it with no request at all.
+   * Without this the pills keep describing the model that was current when the
+   * session opened.
+   */
+  onConfigOptions?: (options: ConfigOption[]) => void;
   onStderr?: (line: string) => void;
   onExit?: (code: number | null, signal: NodeJS.Signals | null) => void;
   /**
@@ -241,6 +262,39 @@ function replayMessageRole(payload: unknown): "user" | "agent" | "thought" | und
   if (update?.sessionUpdate === "user_message_chunk") return "user";
   if (update?.sessionUpdate === "agent_message_chunk") return "agent";
   if (update?.sessionUpdate === "agent_thought_chunk") return "thought";
+  return undefined;
+}
+
+/**
+ * The selector list after an update the agent sent unprompted, or undefined
+ * when this notification does not carry one.
+ *
+ * Two shapes, because two protocol generations are live. `config_option_update`
+ * resends the whole list and so replaces it — an option can legitimately
+ * disappear, which is exactly what happens to the thinking level on a model
+ * that does not support one. The legacy `current_mode_update` carries only an
+ * id, so the selector synthesised from the `modes` block is edited in place.
+ */
+function applyConfigUpdate(
+  currentOptions: ConfigOption[],
+  update: { sessionUpdate?: string; configOptions?: unknown; currentModeId?: unknown } | undefined,
+): ConfigOption[] | undefined {
+  if (update?.sessionUpdate === "config_option_update") {
+    const announced = normaliseConfigOptions(update.configOptions);
+    // An empty list is a malformed notification, not "this session has no
+    // selectors": treating it as truth would blank every pill.
+    return announced.length > 0 ? announced : undefined;
+  }
+  if (update?.sessionUpdate === "current_mode_update" && typeof update.currentModeId === "string") {
+    const modeId = update.currentModeId;
+    // Agents that advertise a real `configOptions` mode entry announce it via
+    // `config_option_update` above; this only touches the synthetic one, so
+    // nothing changes when the session has none.
+    if (!currentOptions.some((option) => option.id === MODE_CONFIG_ID)) return undefined;
+    return currentOptions.map((option) =>
+      option.id === MODE_CONFIG_ID ? { ...option, currentValue: modeId } : option,
+    );
+  }
   return undefined;
 }
 
@@ -310,14 +364,41 @@ export async function connectProvider(options: ConnectOptions): Promise<AcpSessi
   // the app offers commands in the empty state, before a session exists.
   let availableCommands: AvailableCommand[] = [];
 
+  // Assigned by the first `openSession` below. Initialised rather than left in
+  // the temporal dead zone: `session/load` replays through the notification
+  // handler *before* that assignment lands, and the config branch there reads
+  // this — a bare `let` would throw mid-replay.
+  let current: { sessionId: string; configOptions: ConfigOption[] } = {
+    sessionId: "",
+    configOptions: [],
+  };
+  const configHandlers = new Map<string, (options: ConfigOption[]) => void>();
+
   const app = client({ name: "pew2-daemon" })
     .onNotification("session/update", async (ctx: { params: unknown }) => {
       const params = ctx.params as {
         sessionId?: string;
-        update?: { sessionUpdate?: string; availableCommands?: unknown };
+        update?: {
+          sessionUpdate?: string;
+          availableCommands?: unknown;
+          configOptions?: unknown;
+          currentModeId?: unknown;
+        };
       };
       if (params?.update?.sessionUpdate === "available_commands_update") {
         availableCommands = readAvailableCommands(params.update.availableCommands);
+      }
+      // The agent changing the session's selectors on its own. Scoped to the
+      // session prompts actually target: one connection carries several — the
+      // capability probe's throwaway, and whatever `adopt` opened before this —
+      // and letting any of them write here would hand a live conversation the
+      // wrong agent's model list.
+      if (params?.sessionId && params.sessionId === current.sessionId) {
+        const changed = applyConfigUpdate(current.configOptions, params.update);
+        if (changed) {
+          current = { ...current, configOptions: changed };
+          configHandlers.get(params.sessionId)?.(changed);
+        }
       }
       const sid = params?.sessionId;
       const handler = (sid ? updateHandlers.get(sid) : undefined) ?? pendingRoute?.onUpdate;
@@ -354,12 +435,16 @@ export async function connectProvider(options: ConnectOptions): Promise<AcpSessi
   })) as {
     agentCapabilities?: {
       loadSession?: boolean;
+      promptCapabilities?: PromptCapabilities;
       sessionCapabilities?: { list?: unknown };
     };
   };
 
   const caps = initialized.agentCapabilities;
   const canLoadSession = caps?.loadSession === true;
+  // How an attachment may be sent to this agent: pixels inline, file text
+  // inline, or a path it can open for itself.
+  const promptCapabilities = caps?.promptCapabilities;
   // Asking an agent that never advertised `session/list` is a protocol error,
   // not an empty list, so the capability is checked rather than the call tried.
   const canListSessions = caps?.sessionCapabilities?.list !== undefined;
@@ -415,11 +500,13 @@ export async function connectProvider(options: ConnectOptions): Promise<AcpSessi
     route: {
       onUpdate: (payload: unknown) => void;
       onPermissionRequest: ConnectOptions["onPermissionRequest"];
+      onConfigOptions?: (options: ConfigOption[]) => void;
     },
   ): Promise<{ sessionId: string; configOptions: ConfigOption[] }> {
     if (loadSessionId) {
       updateHandlers.set(loadSessionId, route.onUpdate);
       permissionHandlers.set(loadSessionId, route.onPermissionRequest);
+      if (route.onConfigOptions) configHandlers.set(loadSessionId, route.onConfigOptions);
     }
     // Belongs to the session being replaced, and the next one may be a
     // different project entirely.
@@ -441,15 +528,17 @@ export async function connectProvider(options: ConnectOptions): Promise<AcpSessi
           })) as NewSessionResult);
       updateHandlers.set(created.sessionId, route.onUpdate);
       permissionHandlers.set(created.sessionId, route.onPermissionRequest);
+      if (route.onConfigOptions) configHandlers.set(created.sessionId, route.onConfigOptions);
       return { sessionId: created.sessionId, configOptions: buildConfigOptions(created) };
     } finally {
       pendingRoute = undefined;
     }
   }
 
-  let current = await openSession(options.loadSessionId, {
+  current = await openSession(options.loadSessionId, {
     onUpdate: options.onUpdate,
     onPermissionRequest: options.onPermissionRequest,
+    onConfigOptions: options.onConfigOptions,
   });
 
   return {
@@ -470,6 +559,7 @@ export async function connectProvider(options: ConnectOptions): Promise<AcpSessi
       current = await openSession(adoptOptions.loadSessionId, {
         onUpdate: adoptOptions.onUpdate,
         onPermissionRequest: adoptOptions.onPermissionRequest,
+        onConfigOptions: adoptOptions.onConfigOptions,
       });
       exitHandler = adoptOptions.onExit;
     },
@@ -593,10 +683,11 @@ export async function connectProvider(options: ConnectOptions): Promise<AcpSessi
         );
       }
     },
-    prompt: (text: string) =>
+    promptCapabilities,
+    prompt: (text: string, attachments: readonly StoredAttachment[] = []) =>
       connection.agent.request("session/prompt", {
         sessionId: current.sessionId,
-        prompt: [{ type: "text", text }],
+        prompt: promptBlocks(text, attachments, promptCapabilities),
       }),
     cancel: () =>
       connection.agent.notify("session/cancel", { sessionId: current.sessionId }),

@@ -58,9 +58,12 @@ type Resolved =
  * is deduped by the daemon hook, so a recycled cell scrolling back into view
  * costs nothing.
  */
-function useResolvedSource(src: string): Resolved {
+function useResolvedSource(src: string, origin?: "device"): Resolved {
   const resolver = useContext(ImageResolverContext);
-  const kind = imageSourceKind(src);
+  // A photo attached from this phone is already local to the renderer. It looks
+  // exactly like an agent's `file://` path, so only the flag can tell them
+  // apart — and asking the daemon for it would fail permanently.
+  const kind = origin === "device" ? "remote" : imageSourceKind(src);
   const entry = kind === "local" ? resolver?.images[src] : undefined;
   const fetchImage = resolver?.fetchImage;
 
@@ -93,7 +96,7 @@ function Placeholder({
 }
 
 function ChatImageView({ image }: { image: ChatImageModel }) {
-  const resolved = useResolvedSource(image.src);
+  const resolved = useResolvedSource(image.src, image.origin);
   // Sized from the picture itself once it decodes; until then a stable box, so
   // the transcript does not jump as each image lands.
   const [ratio, setRatio] = useState(DEFAULT_RATIO);
@@ -107,7 +110,11 @@ function ChatImageView({ image }: { image: ChatImageModel }) {
     setViewing(false);
   }, [image.src]);
 
-  if (!isDisplayableImage(image.src) && resolved.status !== "ready") return null;
+  // A device attachment is displayable by construction: it was chosen from a
+  // photo library, so its own extension is not the authority its mime type is.
+  if (image.origin !== "device" && !isDisplayableImage(image.src) && resolved.status !== "ready") {
+    return null;
+  }
 
   if (resolved.status === "loading") {
     return (
@@ -188,7 +195,10 @@ function ChatImageView({ image }: { image: ChatImageModel }) {
 
 export const ChatImage = memo(
   ChatImageView,
-  (before, after) => before.image.src === after.image.src && before.image.alt === after.image.alt,
+  (before, after) =>
+    before.image.src === after.image.src &&
+    before.image.alt === after.image.alt &&
+    before.image.origin === after.image.origin,
 );
 
 /** The image strip under a message's text. */

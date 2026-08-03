@@ -24,6 +24,40 @@ export function agentSessionKey(providerId: string, sessionId: string): string {
   return `agent:${providerId}:${sessionId}`;
 }
 
+/**
+ * Whether a list entry is the agent's own copy rather than a live session.
+ *
+ * A session started here also carries an `agentSessionId` now — that is what
+ * stops the next history probe listing it twice — so the id is what says
+ * whether opening it means reloading from the agent's disk or simply showing
+ * the transcript already in memory.
+ */
+export function isAgentSessionStub(id: string): boolean {
+  return id.startsWith("agent:");
+}
+
+/**
+ * Does opening this conversation mean asking the agent to reload it?
+ *
+ * Two reasons it does. It may be the agent's own copy, whose turns have never
+ * been in this app. Or the daemon may no longer hold the session the entry
+ * names: ids are assigned per daemon process and die with it, while this list
+ * survives restarts and reconnects — prompting one of those answered "Unknown
+ * session". Either way the agent's id is what reopens it, so an entry without
+ * one is shown from memory and nothing else can be done for it.
+ *
+ * `liveSessionIds` undefined means the daemon never reported them (an older
+ * build): assume live rather than reloading conversations that were fine.
+ */
+export function needsResume(
+  session: Pick<Session, "id" | "agentSessionId">,
+  liveSessionIds: Set<string> | undefined,
+): boolean {
+  if (!session.agentSessionId) return false;
+  if (isAgentSessionStub(session.id)) return true;
+  return liveSessionIds !== undefined && !liveSessionIds.has(session.id);
+}
+
 /** Replace a disk-history stub with its live session without losing its project. */
 export function replaceAgentSessionStub(existing: Session[], live: Session): Session[] {
   if (!live.agentSessionId) return [live, ...existing];
