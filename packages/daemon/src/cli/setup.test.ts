@@ -133,3 +133,50 @@ test("a broken manifest blocks, and names the file to fix", async () => {
   expect(problem!.fix).toContain("broken.json");
   expect(report.ok).toBe(false);
 });
+
+test("one working agent is enough, whatever the others are doing", async () => {
+  // Nobody signs in to all thirteen: you use the one or two you pay for and the
+  // rest sit unconfigured forever. `setup` used to treat any failed verification
+  // as blocking, so a machine with Claude Code working and Cline never signed
+  // into exited non-zero - telling someone who was completely set up that they
+  // were not.
+  const { bin, providersDir, env } = await sandbox();
+  await install(bin, "claude");
+  await install(bin, "npx");
+
+  const ready = {
+    env,
+    searchDirs: [providersDir],
+    probeDaemon: daemonUp,
+    pairing: async () => ({ token: "t".repeat(48), relay: "wss://relay.test" }),
+    service: async () => ({ state: "running" }),
+  };
+
+  const mixed = await setup({
+    ...ready,
+    verifyProviders: async (providers) =>
+      providers.map((p, i) =>
+        i === 0
+          ? { id: p.manifest.id, status: "ok" as const, updates: 4 }
+          : { id: p.manifest.id, status: "failed" as const, detail: "Authentication required" },
+      ),
+  });
+
+  expect(mixed.ok).toBe(true);
+  // And an unconfigured agent is never offered as a chore when something works.
+  expect(mixed.nextSteps).toEqual([]);
+
+  // With nothing working at all, it does block - and says what to look at.
+  const none = await setup({
+    ...ready,
+    verifyProviders: async (providers) =>
+      providers.map((p) => ({
+        id: p.manifest.id,
+        status: "failed" as const,
+        detail: "Authentication required",
+      })),
+  });
+
+  expect(none.ok).toBe(false);
+  expect(none.nextSteps.join(" ")).toContain("pew2 providers verify");
+});

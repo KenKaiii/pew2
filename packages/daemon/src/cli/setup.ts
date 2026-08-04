@@ -54,6 +54,12 @@ export interface SetupOptions {
   pairing?: (env: NodeJS.ProcessEnv) => Promise<{ token?: string; relay?: string } | undefined>;
   /** Read service state. Injectable so tests never inspect real launchd. */
   service?: () => Promise<{ state: string }>;
+  /**
+   * Run verification. Injectable so a test can describe a mix of working and
+   * unconfigured agents without spawning any, which is the only way to cover
+   * the rule that one working agent is enough.
+   */
+  verifyProviders?: typeof verifyAll;
   onProgress?: (stage: "detect" | "verify" | "doctor", note?: string) => void;
 }
 
@@ -79,7 +85,7 @@ export async function setup(options: SetupOptions = {}): Promise<SetupResult> {
       (p) => isAvailable(p) && p.manifest.pew.transport === "acp",
     );
     for (const provider of runnable) progress("verify", provider.manifest.id);
-    verify = await verifyAll(runnable);
+    verify = await (options.verifyProviders ?? verifyAll)(runnable);
   }
 
   progress("doctor");
@@ -91,11 +97,28 @@ export async function setup(options: SetupOptions = {}): Promise<SetupResult> {
     service: options.service,
   });
 
-  // A provider that verified as failed is a blocking problem even though the
-  // manifest itself is fine, so it is folded into the same decision `doctor`
-  // makes rather than reported alongside it.
+  // Agents are alternatives, not requirements.
+  //
+  // Nobody signs in to all thirteen: you use the one or two you pay for, and the
+  // rest sit there unconfigured forever. Treating an unconfigured agent as a
+  // failure made `pew2 setup` exit non-zero on a machine that was completely
+  // working, which is both wrong and the thing that makes people think they have
+  // broken something.
+  //
+  // So: setup succeeds when at least one agent can actually run. Everything else
+  // is an option the user has not taken.
   const brokenProviders = verify.filter((r) => r.status === "failed");
-  const ok = report.ok && brokenProviders.length === 0;
+
+  // Verification is the strong signal, but it is skippable. With `--skip-verify`
+  // there are no reports at all, and treating that as "nothing works" would make
+  // the fast path permanently report failure — so fall back to what the registry
+  // can see: an agent that is installed and has the environment it declared.
+  const usable =
+    verify.length > 0
+      ? verify.some((r) => r.status === "ok")
+      : (await loadProviders(searchDirs, env, { bundled })).providers.some(isAvailable);
+
+  const ok = report.ok && usable;
 
   const nextSteps: string[] = [];
   if (!ok) {
@@ -104,8 +127,13 @@ export async function setup(options: SetupOptions = {}): Promise<SetupResult> {
         nextSteps.push(problem.fix);
       }
     }
-    for (const broken of brokenProviders) {
-      nextSteps.push(`pew2 providers verify ${broken.id}   # ${broken.detail ?? "failed"}`);
+    // Only worth suggesting when nothing works at all. With a working agent in
+    // hand, these are optional extras and listing them as "next steps" reads as
+    // a list of chores.
+    if (!usable) {
+      for (const broken of brokenProviders) {
+        nextSteps.push(`pew2 providers verify ${broken.id}   # ${broken.detail ?? "failed"}`);
+      }
     }
   }
 

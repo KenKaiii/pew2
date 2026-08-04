@@ -187,7 +187,7 @@ export function agentSections(agents: AgentState[], options: RenderOptions = {})
 
   if (buckets["needs-setup"].length > 0) {
     // Not an error, and worded as the small thing it is.
-    out.push(...r.step("Almost ready", "installed, just needs finishing"));
+    out.push(...r.step("Available if you want them", "installed, but not signed in"));
     for (const agent of buckets["needs-setup"]) {
       out.push(r.line(`${s.hex(PALETTE.warning, g.dot)} ${s.bold(agent.name)}`));
       for (const part of wrapDetail(signinHint(agent), detailWidth(options))) {
@@ -197,7 +197,7 @@ export function agentSections(agents: AgentState[], options: RenderOptions = {})
   }
 
   if (buckets["missing-key"].length > 0) {
-    out.push(...r.step("Needs an API key", "set it where the daemon runs"));
+    out.push(...r.step("Available with a key", "set it where the daemon runs"));
     for (const agent of buckets["missing-key"]) {
       out.push(r.line(`${s.hex(PALETTE.warning, g.dot)} ${s.bold(agent.name)}`));
       out.push(r.line(`  ${s.hex(PALETTE.faint, `${agent.missingEnv.join(", ")}`)}`));
@@ -275,13 +275,16 @@ export function outroFor(
       `${s.bold("No agents yet.")} ${s.hex(PALETTE.faint, "Install one from the list above, then run")} ${s.bold("pew2 setup")} ${s.hex(PALETTE.faint, "again.")}`,
     );
   }
+  // One working agent is the whole requirement. Anything else on the screen is
+  // an option the user has not taken, so the closing line must not read as a
+  // list of outstanding chores — nobody signs in to all thirteen.
   if (!ready) {
     return r.outro(
-      `${s.bold(`${plural(count, "agent")} ready.`)} ${s.hex(PALETTE.faint, "Finish the steps above, then run")} ${s.bold("pew2 setup")}`,
+      `${s.bold(`${plural(count, "agent")} ready.`)} ${s.hex(PALETTE.faint, "Sort the machine out above, then run")} ${s.bold("pew2 setup")}`,
     );
   }
   return r.outro(
-    `${s.bold(`${plural(count, "agent")} ready.`)} ${s.hex(PALETTE.faint, "Run")} ${s.bold("pew2 pair")} ${s.hex(PALETTE.faint, "to connect your phone.")}`,
+    `${s.bold(`${plural(count, "agent")} ready.`)} ${s.hex(PALETTE.faint, "That is all you need — run")} ${s.bold("pew2 pair")} ${s.hex(PALETTE.faint, "to connect your phone.")}`,
   );
 }
 

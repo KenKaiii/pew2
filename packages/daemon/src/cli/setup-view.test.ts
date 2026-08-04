@@ -56,7 +56,7 @@ test("an unfinished setup reads as a small task, not a breakage", () => {
   expect(bucketFor(qwen)).toBe("needs-setup");
 
   const text = stripAnsi(agentSections([qwen], plain).join("\n"));
-  expect(text).toContain("Almost ready");
+  expect(text).toContain("Available if you want them");
   expect(text).not.toContain("✗");
 
   // The agent's own words, not a guessed command. Most manifests launch through
@@ -136,7 +136,12 @@ test("working agents come first, and absent ones are one quiet line", () => {
 test("the closing line says what to do next, never a problem count", () => {
   const ready = [agent({ id: "a", name: "Alpha" })];
 
-  expect(stripAnsi(outroFor(ready, true, plain).join(" "))).toContain("pew2 pair");
+  const done = stripAnsi(outroFor(ready, true, plain).join(" "));
+  expect(done).toContain("pew2 pair");
+  // One agent is the whole requirement, and the closing line has to say so:
+  // nobody signs in to all thirteen, so anything left unconfigured is a choice
+  // rather than an outstanding chore.
+  expect(done).toContain("That is all you need");
 
   // Not ready, but something works: lead with what they have, not what they do
   // not. Counting the good ones is the difference between "you are set up" and
@@ -170,7 +175,7 @@ test("sections are skipped entirely when empty", () => {
   expect(text).toContain("Ready to use");
   expect(text).not.toContain("Also available");
   expect(text).not.toContain("Not working");
-  expect(text).not.toContain("Needs an API key");
+  expect(text).not.toContain("Available with a key");
 });
 
 test("the rail degrades to ASCII without losing structure", () => {
