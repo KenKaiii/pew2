@@ -14,8 +14,33 @@
  */
 import { z } from "zod";
 
-/** Bump only on breaking envelope changes. */
-export const WIRE_VERSION = 1;
+/**
+ * Bump only on breaking envelope changes.
+ *
+ * 2 introduced end-to-end encryption: every message except `hello`, `ready` and
+ * a relay-generated `error` now travels inside an `Envelope`. A v1 peer cannot
+ * read v2 traffic at all, so the mismatch has to be *reported* — left unchecked
+ * it surfaces as a socket that connects and then shows nothing, which looks
+ * exactly like a broken daemon.
+ */
+export const WIRE_VERSION = 2;
+
+/**
+ * Whether a peer speaking `wire` can be talked to, and what to tell the user.
+ *
+ * Returns a sentence rather than a boolean so both sides say the same thing, and
+ * so the side that is *behind* is named: "update the app" and "update pew2 on
+ * your computer" are different actions, and guessing wrong wastes an evening.
+ */
+export function wireMismatch(peer: unknown): string | undefined {
+  if (peer === WIRE_VERSION) return undefined;
+  if (typeof peer !== "number" || !Number.isInteger(peer)) {
+    return "This client did not say which protocol version it speaks. Update it and pair again.";
+  }
+  return peer < WIRE_VERSION
+    ? `This app speaks protocol v${peer}, but this machine needs v${WIRE_VERSION}. Update the app and pair again.`
+    : `This app speaks protocol v${peer}, but this machine only has v${WIRE_VERSION}. Update pew2 on your computer.`;
+}
 
 export const Role = z.enum(["daemon", "app"]);
 export type Role = z.output<typeof Role>;
@@ -28,9 +53,27 @@ export const Hello = z.object({
   deviceId: z.string().min(1),
   /** Highest seq the client already has, per session. Enables gap-free resume. */
   cursors: z.record(z.string(), z.number().int().nonnegative()).default({}),
+  /**
+   * An envelope proving the sender holds the pairing key.
+   *
+   * `hello` cannot itself be encrypted — it is what establishes the connection —
+   * so possession is proved beside it. Without this, knowing the relay room id
+   * would be enough to open a socket the daemon then does work for, and the room
+   * id is precisely what the relay is given.
+   *
+   * Optional in the schema so a v1 `hello` still parses far enough to be told
+   * *why* it was refused, rather than being dropped as malformed.
+   */
+  proof: z.unknown().optional(),
 });
 
-/** Relay -> both sides, after `hello`. */
+/**
+ * Relay -> both sides, after `hello`.
+ *
+ * One of the few frames that stay in cleartext: it carries no user content, and
+ * it must be readable by a peer that cannot decrypt anything yet — including one
+ * about to be told its protocol version is wrong.
+ */
 export const Ready = z.object({
   t: z.literal("ready"),
   wire: z.literal(WIRE_VERSION),
@@ -463,8 +506,34 @@ export const ErrorMessage = z.object({
   sessionId: z.string().optional(),
 });
 
+/**
+ * A sealed message. Everything with user content travels as one of these.
+ *
+ * `sid` and `seq` are readable on purpose, and only because the relay keeps the
+ * ordered log that lets a reconnecting phone catch up — the daemon does not
+ * replay. They are bound into the AEAD as associated data, so the relay may
+ * *read* them to order its log but cannot alter them without every recipient
+ * rejecting the frame.
+ *
+ * The definitive shape lives in `crypto.ts`, which is what actually seals and
+ * opens these; this mirror exists so a message can be validated on arrival
+ * alongside every other frame.
+ */
+export const Envelope = z.object({
+  t: z.literal("e"),
+  sid: z.string().optional(),
+  seq: z.number().int().nonnegative().optional(),
+  /** Monotonic per connection per sender. Replay protection within a session. */
+  ctr: z.number().int().nonnegative(),
+  /** base64url nonce. */
+  n: z.string(),
+  /** base64url ciphertext, including the Poly1305 tag. */
+  ct: z.string(),
+});
+
 export const ClientMessage = z.discriminatedUnion("t", [
   Hello,
+  Envelope,
   ProviderCapabilitiesRequest,
   ProviderSessionsRequest,
   SetProviderConfig,
@@ -480,6 +549,7 @@ export const ClientMessage = z.discriminatedUnion("t", [
 
 export const ServerMessage = z.discriminatedUnion("t", [
   Ready,
+  Envelope,
   ProviderAnnounce,
   ProviderCapabilities,
   ProviderSessions,
@@ -495,6 +565,7 @@ export const ServerMessage = z.discriminatedUnion("t", [
 
 export type SetProviderConfig = z.output<typeof SetProviderConfig>;
 export type Hello = z.output<typeof Hello>;
+export type Envelope = z.output<typeof Envelope>;
 export type ProviderAnnounce = z.output<typeof ProviderAnnounce>;
 export type ConfigOption = z.output<typeof ConfigOption>;
 export type AgentSession = z.output<typeof AgentSession>;

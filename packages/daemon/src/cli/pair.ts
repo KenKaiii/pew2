@@ -186,7 +186,7 @@ export async function cmdPair(flags: Set<string>): Promise<number> {
   const pairing = options.rotate ? await rotatePairing() : await loadPairing();
   const port = daemonPort();
   const addresses = lanAddresses();
-  const url = pairingUrl({ token: pairing.token, port, relay: pairing.relay });
+  const url = pairingUrl({ token: pairing.token, key: pairing.key, port, relay: pairing.relay });
 
   // Both probes are independent and both are slow enough to notice. Running
   // them together keeps the QR on screen in well under a second.

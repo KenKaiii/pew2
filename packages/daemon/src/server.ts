@@ -141,6 +141,7 @@ const server = Bun.serve({
 
 const url = pairingUrl({
   token: pairing.token,
+  key: pairing.key,
   port: server.port ?? PORT,
   relay: pairing.relay,
 });

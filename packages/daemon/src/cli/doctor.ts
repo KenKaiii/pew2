@@ -12,12 +12,14 @@
  * must not trap an agent in a loop it cannot escape.
  */
 import { loadProviders, isAvailable, unavailableReason, providerDirs } from "../providers/registry.js";
-import { lanAddresses, pairingPath, pairingUrl } from "../pairing.js";
+import { lanAddresses, pairingFromToken, pairingPath, pairingUrl } from "../pairing.js";
 import { serviceStatus } from "./service.js";
 import { readFile } from "node:fs/promises";
 
 export interface StoredPairing {
   token?: string;
+  /** Root key, hex. Absent in a pairing written before encryption existed. */
+  key?: string;
   relay?: string;
 }
 
@@ -28,7 +30,7 @@ export interface StoredPairing {
  * and an absent token is not a problem — starting the daemon mints it.
  */
 async function readPairing(env: NodeJS.ProcessEnv): Promise<StoredPairing | undefined> {
-  if (env.PEW2_TOKEN) return { token: env.PEW2_TOKEN, relay: env.PEW2_RELAY };
+  if (env.PEW2_TOKEN) return { ...pairingFromToken(env.PEW2_TOKEN), relay: env.PEW2_RELAY };
   try {
     const parsed = JSON.parse(await readFile(pairingPath(env), "utf8")) as StoredPairing;
     return {
@@ -210,6 +212,7 @@ export async function doctor(options: DoctorOptions = {}): Promise<DoctorReport>
 
   const stored = await (options.pairing ?? readPairing)(env);
   const token = stored?.token;
+  const key = stored?.key;
   const relay = stored?.relay;
 
   const addresses = (options.addresses ?? lanAddresses)();
@@ -246,7 +249,7 @@ export async function doctor(options: DoctorOptions = {}): Promise<DoctorReport>
     pairing: {
       url:
         token && (relay || addresses[0])
-          ? pairingUrl({ token, port: daemonPort(env), host: addresses[0], relay })
+          ? pairingUrl({ token, key, port: daemonPort(env), host: addresses[0], relay })
           : undefined,
       addresses,
       relay,

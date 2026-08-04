@@ -1,28 +1,41 @@
 /**
  * Pairing: how a phone learns where the daemon is, and proves it may connect.
  *
- * The token is a bearer secret. It is *not* authentication — anyone holding it
- * can drive every agent on this machine — so it is generated with real entropy,
- * stored 0600, and never printed anywhere except the QR the user scans. The
- * relay enforces a 32-character floor for the same reason; this stays well
- * above it.
+ * A pairing is one 32-byte **root key**, and everything else derives from it:
  *
- * Until end-to-end encryption exists, this is safe only on a trusted LAN. That
- * is a deliberate scope limit, not an oversight: it makes the phone work on a
- * real device today without pretending the transport is secure enough for the
- * public internet.
+ *   - the **room id** the relay routes on, via a one-way HKDF. The relay is
+ *     given this and cannot work backwards to the key, so it can order traffic
+ *     without being able to read it. It doubles as the LAN connection token,
+ *     where there is no relay in between.
+ *   - the two **message keys**, one per direction, which never leave the two
+ *     endpoints.
+ *
+ * The root key reaches the phone in the QR's URL *fragment*, which is never
+ * transmitted to a server — so the relay never sees it, even at pairing time.
+ *
+ * Generated with real entropy, stored 0600, and printed nowhere but the QR.
  */
 import { randomBytes } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { networkInterfaces } from "node:os";
 import { dirname, join } from "node:path";
+import { e2e } from "@pew2/protocol";
 import { userProvidersDir } from "./providers/registry.js";
 
-/** 48 hex chars. Well above the relay's 32-character floor. */
-const TOKEN_BYTES = 24;
-
 export interface Pairing {
+  /**
+   * The room id the relay routes on, and the token the LAN transport checks.
+   * Derived from `key`; not a secret the relay must be trusted with.
+   */
   token: string;
+  /**
+   * The root key, hex.
+   *
+   * Absent only in a pairing written before encryption existed. Both sides
+   * treat that as unpaired rather than falling back to plaintext: a silent
+   * downgrade is how encryption gets switched off in practice.
+   */
+  key?: string;
   /** When the token was minted, so the CLI can show its age. */
   createdAt: string;
   /**
@@ -38,8 +51,30 @@ export function pairingPath(env: NodeJS.ProcessEnv = process.env): string {
   return join(dirname(userProvidersDir(env)), "pairing.json");
 }
 
-export function generateToken(): string {
-  return randomBytes(TOKEN_BYTES).toString("hex");
+/**
+ * A fresh pairing: one root key, with the room id derived from it.
+ *
+ * The two are never generated independently. If they were, the relay would be
+ * routing on a value with no relationship to the key, and a mismatch would
+ * surface as a phone that connects to the right room and cannot read anything
+ * in it.
+ */
+export function generatePairing(): { token: string; key: string } {
+  const key = e2e.randomRootKey();
+  return { token: e2e.roomId(key), key: e2e.toHex(key) };
+}
+
+/**
+ * Derive a pairing deterministically from an explicit token.
+ *
+ * `PEW2_TOKEN` exists so a test or a container can run without touching a real
+ * home directory. Hashing it into a key keeps that path working end to end
+ * rather than leaving those runs unencrypted — which would mean the tests
+ * exercised a different protocol than production uses.
+ */
+export function pairingFromToken(token: string): { token: string; key: string } {
+  const key = e2e.deriveKeyFromSecret(token);
+  return { token: e2e.roomId(key), key: e2e.toHex(key) };
 }
 
 /**
@@ -53,15 +88,28 @@ export async function loadPairing(env: NodeJS.ProcessEnv = process.env): Promise
   // An explicit token wins and is never written to disk — this is what lets a
   // test, or a container, run without touching a real home directory.
   if (env.PEW2_TOKEN) {
-    return { token: env.PEW2_TOKEN, createdAt: new Date(0).toISOString(), relay: env.PEW2_RELAY };
+    // Derived, not stored: the same input always yields the same pairing, so a
+    // fixed PEW2_TOKEN keeps working across restarts exactly as it did before.
+    const derived = pairingFromToken(env.PEW2_TOKEN);
+    return { ...derived, createdAt: new Date(0).toISOString(), relay: env.PEW2_RELAY };
   }
 
   const path = pairingPath(env);
   try {
     const parsed = JSON.parse(await readFile(path, "utf8")) as Partial<Pairing>;
-    if (typeof parsed.token === "string" && parsed.token.length >= 32) {
+    // A pairing without a key predates encryption. Treated as absent rather
+    // than reused, because carrying it forward would mean a daemon that still
+    // accepts unencrypted connections — the downgrade this change exists to
+    // remove.
+    if (
+      typeof parsed.token === "string" &&
+      parsed.token.length >= 32 &&
+      typeof parsed.key === "string" &&
+      parsed.key.length === 64
+    ) {
       return {
         token: parsed.token,
+        key: parsed.key,
         createdAt: parsed.createdAt ?? new Date().toISOString(),
         // The environment wins, so a relay can be pointed elsewhere for one run
         // without rewriting stored configuration.
@@ -75,7 +123,7 @@ export async function loadPairing(env: NodeJS.ProcessEnv = process.env): Promise
   }
 
   return writePairing(
-    { token: generateToken(), createdAt: new Date().toISOString(), relay: env.PEW2_RELAY },
+    { ...generatePairing(), createdAt: new Date().toISOString(), relay: env.PEW2_RELAY },
     env,
   );
 }
@@ -85,7 +133,7 @@ export async function rotatePairing(env: NodeJS.ProcessEnv = process.env): Promi
   const existing = await loadPairing(env).catch(() => undefined);
   return writePairing(
     {
-      token: generateToken(),
+      ...generatePairing(),
       createdAt: new Date().toISOString(),
       // Rotating a token must not silently drop remote access.
       relay: env.PEW2_RELAY ?? existing?.relay,
@@ -150,6 +198,12 @@ export function lanAddresses(): string[] {
 
 export interface PairingUrlOptions {
   token: string;
+  /**
+   * The root key, hex. Carried in the URL *fragment*, which is never sent to a
+   * server \u2014 so the relay routes this connection without ever seeing the key
+   * that decrypts it.
+   */
+  key?: string;
   port: number;
   host?: string;
   /** When set, the URL points at the relay and works from any network. */
@@ -165,16 +219,19 @@ export interface PairingUrlOptions {
  * mobile network; without one it is a LAN address that only works on the same
  * Wi-Fi. Same shape either way, so the app needs no second code path.
  */
-export function pairingUrl({ token, port, host, relay }: PairingUrlOptions): string {
+export function pairingUrl({ token, key, port, host, relay }: PairingUrlOptions): string {
+  // base64url, and appended last: a fragment must be the final component of a
+  // URL, and this one has to survive being copied by hand as well as scanned.
+  const fragment = key ? `#k=${e2e.toBase64Url(e2e.fromHex(key))}` : "";
   if (relay) {
     const base = relay.replace(/\/$/, "").replace(/^http/, "ws");
     // `deviceId` is required by the relay, which answers 400 without it. The
     // app replaces this placeholder with its own stable id; including it here
     // keeps the printed link valid on its own.
-    return `${base}/connect?pairing=${token}&role=app&deviceId=phone`;
+    return `${base}/connect?pairing=${token}&role=app&deviceId=phone${fragment}`;
   }
   const address = host ?? lanAddresses()[0] ?? "127.0.0.1";
-  return `ws://${address}:${port}/?token=${token}`;
+  return `ws://${address}:${port}/?token=${token}${fragment}`;
 }
 
 /**

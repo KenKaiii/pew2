@@ -11,7 +11,7 @@ import { mkdtemp, readFile, stat, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  generateToken,
+  generatePairing,
   loadPairing,
   pairingPath,
   pairingUrl,
@@ -28,17 +28,24 @@ async function sandbox() {
   return { home, env: { PEW2_HOME: home } as NodeJS.ProcessEnv };
 }
 
-test("a minted token is long, hex, and unpredictable", () => {
-  const tokens = new Set(Array.from({ length: 200 }, generateToken));
+test("a minted pairing is long, hex, and unpredictable", () => {
+  const pairings = Array.from({ length: 200 }, generatePairing);
 
   // 200 draws with no collision is the cheap proof that this is not a counter
   // or a timestamp.
-  expect(tokens.size).toBe(200);
-  for (const token of tokens) {
+  expect(new Set(pairings.map((p) => p.token)).size).toBe(200);
+  expect(new Set(pairings.map((p) => p.key)).size).toBe(200);
+
+  for (const pairing of pairings) {
     // The relay rejects anything under 32 characters, so that is the floor the
     // daemon must clear too.
-    expect(token.length).toBeGreaterThanOrEqual(32);
-    expect(token).toMatch(/^[0-9a-f]+$/);
+    expect(pairing.token.length).toBeGreaterThanOrEqual(32);
+    expect(pairing.token).toMatch(/^[0-9a-f]+$/);
+    // 32 bytes of root key, hex.
+    expect(pairing.key).toMatch(/^[0-9a-f]{64}$/);
+    // The room id must not contain the key it was derived from: the relay is
+    // given one and must not be able to recover the other.
+    expect(pairing.token).not.toContain(pairing.key);
   }
 });
 
@@ -82,7 +89,7 @@ test("rotating invalidates the previous token", async () => {
 });
 
 test("token comparison rejects wrong, short, long and missing values", () => {
-  const token = generateToken();
+  const token = generatePairing().token;
 
   expect(tokenMatches(token, token)).toBe(true);
   expect(tokenMatches(token, null)).toBe(false);
@@ -94,7 +101,7 @@ test("token comparison rejects wrong, short, long and missing values", () => {
 });
 
 test("the pairing url round-trips through the app's parser", () => {
-  const token = generateToken();
+  const token = generatePairing().token;
 
   const url = pairingUrl({ token, port: 8787, host: "192.168.1.24" });
 
