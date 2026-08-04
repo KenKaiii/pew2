@@ -12,7 +12,7 @@ import {
   agentSections,
   bucketFor,
   group,
-  isAuthFailure,
+  needsSetup,
   outroFor,
   type AgentState,
 } from "./setup-view.js";
@@ -42,7 +42,7 @@ test("an agent you have not installed is not a failure", () => {
   expect(text).not.toMatch(/delete/i);
 });
 
-test("needing a sign-in reads as a small task, not a breakage", () => {
+test("an unfinished setup reads as a small task, not a breakage", () => {
   // Logging in is thirty seconds of work. Showing it beside a real crash makes
   // both look equally hopeless, which is what the old flat list did.
   const qwen = agent({
@@ -53,10 +53,10 @@ test("needing a sign-in reads as a small task, not a breakage", () => {
     verify: { status: "failed", detail: "Authentication required: Use Qwen Code CLI to authenticate first." },
   });
 
-  expect(bucketFor(qwen)).toBe("signin");
+  expect(bucketFor(qwen)).toBe("needs-setup");
 
   const text = stripAnsi(agentSections([qwen], plain).join("\n"));
-  expect(text).toContain("Just needs a sign-in");
+  expect(text).toContain("Almost ready");
   expect(text).not.toContain("✗");
 
   // The agent's own words, not a guessed command. Most manifests launch through
@@ -86,18 +86,23 @@ test("a real breakage is still called out, and only that", () => {
 test("auth failures are recognised across the wordings agents actually use", () => {
   // None of them return a machine-readable code, so this matches on text. These
   // are the real strings observed from the agents pew2 ships with.
-  expect(isAuthFailure("Authentication required: Call authenticate before starting a session")).toBe(true);
-  expect(isAuthFailure("Authentication required: Use Qwen Code CLI to authenticate first.")).toBe(true);
-  expect(isAuthFailure("Please log in first")).toBe(true);
-  expect(isAuthFailure("401 Unauthorized")).toBe(true);
-  expect(isAuthFailure("Missing API key")).toBe(true);
+  expect(needsSetup("Authentication required: Call authenticate before starting a session")).toBe(true);
+  expect(needsSetup("Authentication required: Use Qwen Code CLI to authenticate first.")).toBe(true);
+  expect(needsSetup("Please log in first")).toBe(true);
+  expect(needsSetup("401 Unauthorized")).toBe(true);
+  expect(needsSetup("Missing API key")).toBe(true);
 
   // Being wrong in this direction is the expensive one: it sends someone to run
   // a login command that works fine, and leaves them stuck on the real problem.
-  expect(isAuthFailure("Internal error")).toBe(false);
-  expect(isAuthFailure("ECONNREFUSED 127.0.0.1:8080")).toBe(false);
-  expect(isAuthFailure("spawn ENOENT")).toBe(false);
-  expect(isAuthFailure(undefined)).toBe(false);
+  // goose reports this, and it is a setup step rather than a crash: the older
+  // code showed the JSON-RPC wrapper ("Internal error") and buried this in the
+  // `data` field, turning one command into an unexplained failure.
+  expect(needsSetup("Failed to resolve provider: Configuration value not found: GOOSE_PROVIDER")).toBe(true);
+
+  expect(needsSetup("Internal error")).toBe(false);
+  expect(needsSetup("ECONNREFUSED 127.0.0.1:8080")).toBe(false);
+  expect(needsSetup("spawn ENOENT")).toBe(false);
+  expect(needsSetup(undefined)).toBe(false);
 });
 
 test("not being installed outranks every other state", () => {
@@ -176,6 +181,34 @@ test("the rail degrades to ASCII without losing structure", () => {
 
   expect(/[\u2500-\u257f\u25c6\u25c7]/.test(text)).toBe(false);
   expect(stripAnsi(text)).toContain("Ready to use");
+});
+
+test("long messages wrap instead of losing their ending", () => {
+  // These messages *are* the instruction, and the actionable part is usually
+  // last: "Configuration value not found: GOOSE_PROVIDER" names the exact thing
+  // to set. Truncating puts an ellipsis exactly where the answer was.
+  const detail = "Failed to resolve provider: Configuration value not found: GOOSE_PROVIDER";
+  const lines = agentSections(
+    [agent({ id: "goose", name: "goose", verify: { status: "failed", detail } })],
+    { ...plain, columns: 60 },
+  ).map(stripAnsi);
+
+  expect(lines.join(" ")).toContain("GOOSE_PROVIDER");
+  expect(lines.join("")).not.toContain("…");
+  for (const line of lines) expect(line.length).toBeLessThanOrEqual(60);
+});
+
+test("a fresh machine's list of absent agents still fits the terminal", () => {
+  // The first screen a new user sees: nothing installed, so every agent lands
+  // in one section. Joined on a single line that is over 140 characters.
+  const agents = Array.from({ length: 13 }, (_, i) =>
+    agent({ id: `a${i}`, name: `Some Agent Number ${i}`, notInstalled: true }),
+  );
+  const lines = agentSections(agents, { ...plain, columns: 80 }).map(stripAnsi);
+
+  for (const line of lines) expect(line.length).toBeLessThanOrEqual(80);
+  // Still complete, just across more than one line.
+  expect(lines.join(" ")).toContain("Some Agent Number 12");
 });
 
 test("grouping is stable and alphabetical within a section", () => {

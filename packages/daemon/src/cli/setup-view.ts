@@ -15,7 +15,7 @@
  * Rendering is separated from doing so the whole screen can be tested without
  * spawning a single agent. Every function takes plain data and returns lines.
  */
-import { PALETTE, styler, glyphs, type Glyphs, type Style } from "./ui.js";
+import { PALETTE, styler, glyphs, terminalWidth, type Glyphs, type Style } from "./ui.js";
 
 /** What we know about one agent after looking at the machine. */
 export interface AgentState {
@@ -42,24 +42,28 @@ export interface AgentState {
 /**
  * The four things an agent can be, in the order a person cares about.
  *
- * `signin` is split out from `broken` deliberately. "Run `qwen` to log in" is a
- * thirty-second fix the user can act on; "Internal error" is not, and mixing
+ * `needs-setup` is split out from `broken` deliberately. "Run `qwen` to log in"
+ * is a thirty-second fix the user can act on; a genuine crash is not, and mixing
  * them makes both look equally hopeless.
  */
-export type Bucket = "ready" | "signin" | "missing-key" | "not-installed" | "broken";
+export type Bucket = "ready" | "needs-setup" | "missing-key" | "not-installed" | "broken";
 
 /**
- * Does this failure mean "you have not logged in yet"?
+ * Is this a "you have not finished setting it up yet" failure?
  *
- * Agents word this differently and none of them use a machine-readable code, so
- * matching on the text is the only option. Being wrong is cheap in one
- * direction and not the other: calling a real breakage a sign-in problem sends
- * someone to run a login command that works fine and leaves them stuck, so the
- * patterns stay narrow rather than clever.
+ * Covers signing in and configuring, because to the person reading the screen
+ * they are the same thing: one command away from working. goose saying
+ * "Configuration value not found: GOOSE_PROVIDER" is no more a crash than Qwen
+ * saying "authenticate first".
+ *
+ * Agents word these differently and none use a machine-readable code, so
+ * matching on text is the only option. Being wrong is cheap in one direction
+ * and not the other: calling a real breakage a setup step sends someone to run
+ * a command that works fine and leaves them stuck. So the patterns stay narrow.
  */
-export function isAuthFailure(detail: string | undefined): boolean {
+export function needsSetup(detail: string | undefined): boolean {
   if (!detail) return false;
-  return /\bauthenticat|\blog ?in\b|\bsign ?in\b|not logged in|unauthori[sz]ed|api[- ]?key/i.test(
+  return /\bauthenticat|\blog ?in\b|\bsign ?in\b|not logged in|unauthori[sz]ed|api[- ]?key|configuration value not found|not configured|no provider configured|missing configuration|run .*configure/i.test(
     detail,
   );
 }
@@ -71,7 +75,7 @@ export function bucketFor(agent: AgentState): Bucket {
   if (agent.notInstalled) return "not-installed";
   if (agent.missingEnv.length > 0) return "missing-key";
   if (agent.verify?.status === "failed") {
-    return isAuthFailure(agent.verify.detail) ? "signin" : "broken";
+    return needsSetup(agent.verify.detail) ? "needs-setup" : "broken";
   }
   return "ready";
 }
@@ -79,7 +83,7 @@ export function bucketFor(agent: AgentState): Bucket {
 export function group(agents: AgentState[]): Record<Bucket, AgentState[]> {
   const out: Record<Bucket, AgentState[]> = {
     ready: [],
-    signin: [],
+    "needs-setup": [],
     "missing-key": [],
     "not-installed": [],
     broken: [],
@@ -92,6 +96,20 @@ export function group(agents: AgentState[]): Record<Bucket, AgentState[]> {
 export interface RenderOptions {
   style?: Style;
   glyph?: Glyphs;
+  /** Terminal width. Defaults to the real one, or 80 when it is not a terminal. */
+  columns?: number;
+}
+
+/**
+ * Room for a wrapped detail line.
+ *
+ * Subtracts the rail prefix and the two-space hang, then clamps: a very narrow
+ * terminal should still wrap somewhere sensible rather than one word per line,
+ * and a very wide one should not stretch prose to 200 characters.
+ */
+function detailWidth(options: RenderOptions): number {
+  const columns = options.columns ?? terminalWidth();
+  return Math.max(32, Math.min(96, columns - 6));
 }
 
 /**
@@ -167,12 +185,14 @@ export function agentSections(agents: AgentState[], options: RenderOptions = {})
     }
   }
 
-  if (buckets.signin.length > 0) {
+  if (buckets["needs-setup"].length > 0) {
     // Not an error, and worded as the small thing it is.
-    out.push(...r.step("Just needs a sign-in", "installed, but not logged in yet"));
-    for (const agent of buckets.signin) {
+    out.push(...r.step("Almost ready", "installed, just needs finishing"));
+    for (const agent of buckets["needs-setup"]) {
       out.push(r.line(`${s.hex(PALETTE.warning, g.dot)} ${s.bold(agent.name)}`));
-      out.push(r.line(`  ${s.hex(PALETTE.faint, signinHint(agent))}`));
+      for (const part of wrapDetail(signinHint(agent), detailWidth(options))) {
+        out.push(r.line(`  ${s.hex(PALETTE.faint, part)}`));
+      }
     }
   }
 
@@ -191,7 +211,11 @@ export function agentSections(agents: AgentState[], options: RenderOptions = {})
     for (const agent of buckets.broken) {
       out.push(r.line(`${s.hex(PALETTE.danger, g.cross)} ${s.bold(agent.name)}`));
       const detail = agent.verify?.detail;
-      if (detail) out.push(r.line(`  ${s.hex(PALETTE.faint, firstLine(detail))}`));
+      if (detail) {
+        for (const part of wrapDetail(detail, detailWidth(options))) {
+          out.push(r.line(`  ${s.hex(PALETTE.faint, part)}`));
+        }
+      }
       out.push(r.line(`  ${s.hex(PALETTE.faint, `pew2 providers verify ${agent.id}`)}`));
     }
   }
@@ -200,7 +224,12 @@ export function agentSections(agents: AgentState[], options: RenderOptions = {})
     // One line, no marks, no colour beyond dim. You are not missing anything by
     // not having these, and the screen should not imply that you are.
     out.push(...r.step("Also available", "not on this computer"));
-    out.push(r.line(s.hex(PALETTE.faint, buckets["not-installed"].map((a) => a.name).join(", "))));
+    // Wrapped: on a fresh machine every agent lands here, and thirteen names on
+    // one line is 140 characters. That is the first screen a new user sees.
+    const names = buckets["not-installed"].map((a) => a.name).join(", ");
+    for (const part of wrapDetail(names, detailWidth(options))) {
+      out.push(r.line(s.hex(PALETTE.faint, part)));
+    }
     out.push(r.line(s.hex(PALETTE.faint, "pew2 providers list   shows how to add any of them")));
   }
 
@@ -223,7 +252,7 @@ export function agentSections(agents: AgentState[], options: RenderOptions = {})
  */
 function signinHint(agent: AgentState): string {
   const detail = agent.verify?.detail;
-  return detail ? firstLine(detail) : "sign in with this agent's own CLI, then run pew2 setup again";
+  return detail ? detail.split("\n")[0]!.trim() : "finish this agent's own setup, then run pew2 setup again";
 }
 
 /**
@@ -261,7 +290,36 @@ function plural(n: number, word: string): string {
 }
 
 /** Agents report multi-line stack traces; only the first line is readable here. */
-function firstLine(text: string): string {
+/**
+ * An agent's message, wrapped rather than cut.
+ *
+ * These messages are the instruction — "Configuration value not found:
+ * GOOSE_PROVIDER" names the exact thing to set, and it sits at the *end* of the
+ * sentence. Truncating removes the only part worth reading and leaves an
+ * ellipsis where the answer was.
+ *
+ * Only the first line of a multi-line error is kept: agents sometimes attach a
+ * stack, and that belongs in `pew2 providers verify`, not on a summary screen.
+ */
+function wrapDetail(text: string, width: number): string[] {
   const line = text.split("\n")[0]!.trim();
-  return line.length > 72 ? `${line.slice(0, 71)}…` : line;
+  if (line.length <= width) return [line];
+
+  const out: string[] = [];
+  let current = "";
+  for (const word of line.split(/\s+/)) {
+    if (!current) {
+      current = word;
+    } else if (current.length + 1 + word.length <= width) {
+      current += ` ${word}`;
+    } else {
+      out.push(current);
+      current = word;
+    }
+    // A single unbroken token longer than the line — a path, a URL — is left
+    // whole and allowed to overflow, because breaking it makes it
+    // uncopyable and that is worse than a wrapped terminal line.
+  }
+  if (current) out.push(current);
+  return out;
 }
