@@ -124,6 +124,12 @@ Three things about it are deliberate:
   inherit and one more thing every fork must remember to change. `eas submit`
   prompts for what it needs and caches it under `~/.eas`.
 
+  The cost of that choice is that **`submit` must be run interactively** — with
+  `--non-interactive` it stops on `Set ascAppId in the submit profile`, because
+  there is nowhere for it to have learned your app's id. Run it without that
+  flag and it signs in, finds or creates the App Store Connect record, and
+  remembers the id for next time.
+
 A reviewer cannot pair with a machine they do not have, so a first submission
 needs either a demo video or a daemon left running for them. Expect to explain
 what the app connects to.
