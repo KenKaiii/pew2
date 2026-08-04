@@ -20,29 +20,56 @@ import { getRandomValues } from "expo-crypto";
 
 const scope = globalThis as { crypto?: Crypto };
 
-// Left alone if the runtime already provides one. On web, and in Node under the
-// test runner, the native implementation is already correct and replacing it
-// would be strictly worse.
-if (!scope.crypto?.getRandomValues) {
-  const existing = scope.crypto;
-  const shim = {
-    getRandomValues,
-  } as unknown as Crypto;
+/**
+ * Install it, wherever it will go.
+ *
+ * Three attempts, because a runtime may expose `crypto` as a frozen object, as a
+ * non-configurable accessor, or not at all, and each rejects a different one of
+ * these. Every step is guarded: a throw here happens before the first frame is
+ * drawn, so it would be a blank-screen crash with no message anywhere — strictly
+ * worse than the clear "No secure random source" the encryption layer already
+ * raises at the point of use.
+ */
+function install(): void {
+  // Already present and working. On web, and in Node under the test runner, the
+  // native implementation is correct and replacing it would be strictly worse.
+  if (scope.crypto?.getRandomValues) return;
 
+  const existing = scope.crypto;
   if (existing) {
-    // Some runtimes expose a frozen partial `crypto`; adding to it can throw,
-    // and a throw here would take the whole app down at startup over a
-    // polyfill. Falling back to replacing it keeps that from being fatal.
     try {
       Object.defineProperty(existing, "getRandomValues", {
         value: getRandomValues,
         configurable: true,
         writable: true,
       });
+      return;
     } catch {
-      scope.crypto = shim;
+      // Frozen. Fall through and try to replace the object itself.
     }
-  } else {
+  }
+
+  const shim = { getRandomValues } as unknown as Crypto;
+  try {
     scope.crypto = shim;
+    // Re-read rather than trust the write: a read-only accessor swallows the
+    // assignment silently outside strict mode instead of throwing.
+    if (scope.crypto === shim) return;
+  } catch {
+    // A read-only accessor: assignment throws in strict mode, which every
+    // module is. Fall through.
+  }
+
+  try {
+    Object.defineProperty(globalThis, "crypto", {
+      value: shim,
+      configurable: true,
+      writable: true,
+    });
+  } catch {
+    // Non-configurable too. Nothing further is possible, and failing loudly here
+    // would replace a legible error later with an unexplained blank screen now.
   }
 }
+
+install();
