@@ -1,0 +1,114 @@
+name: Release
+
+# Tag-driven, because a release is a deliberate act. Pushing `v0.2.0` builds the
+# binaries that `install.sh` and `install.ps1` download; nothing else publishes.
+on:
+  push:
+    tags: ["v*"]
+  # Also runnable by hand, so a broken release can be rebuilt without inventing
+  # a version number nobody wanted.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      # One failing target must not cancel the rest: a missing linux build is
+      # better than a release where three of four platforms silently vanished.
+      fail-fast: false
+      matrix:
+        include:
+          - target: bun-darwin-arm64
+            asset: pew2-darwin-arm64
+          - target: bun-darwin-x64
+            asset: pew2-darwin-x64
+          - target: bun-linux-x64
+            asset: pew2-linux-x64
+          - target: bun-linux-arm64
+            asset: pew2-linux-arm64
+          - target: bun-windows-x64
+            asset: pew2-windows-x64.exe
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - run: bun install --frozen-lockfile
+
+      # Cross-compiled from one runner: bun downloads the target runtime itself,
+      # so there is no need for a mac and a windows machine in the matrix.
+      - name: Compile
+        run: |
+          bun build --compile --minify \
+            --target=${{ matrix.target }} \
+            packages/daemon/src/cli/index.ts \
+            --outfile ${{ matrix.asset }}
+
+      # The provider manifests are compiled in rather than read from disk, and a
+      # binary that finds none of them looks exactly like a machine with no
+      # agents installed. Prove the shipped artifact knows its agents before it
+      # is published, not after someone reports it as broken.
+      #
+      # Only the native target can be executed here; the others are checked by
+      # the same assertion on their own platform when someone runs them.
+      - name: Verify the binary finds its agents
+        if: matrix.target == 'bun-linux-x64'
+        run: |
+          # The manifests are compiled into the binary rather than read from
+          # disk, and a build that lost them reports zero agents — which on a
+          # user's machine is indistinguishable from "you have nothing
+          # installed". Catch that here rather than in a bug report.
+          #
+          # Counts distinct known ids in the output rather than parsing the
+          # layout, so it also fails on a *wrong* set and not just an empty one.
+          expected=$(bun -e 'import { BUNDLED_MANIFESTS } from "./packages/daemon/src/providers/bundled.ts"; console.log(BUNDLED_MANIFESTS.map(m => m.id).join("|"))')
+          found=$(./${{ matrix.asset }} providers list | grep -oE "$expected" | sort -u | wc -l)
+          # `printf '%s'` emits no trailing newline, so `wc -l` counts one fewer
+          # line than there are ids. Counting separators and adding one is exact.
+          total=$(( $(printf '%s' "$expected" | tr -cd '|' | wc -c) + 1 ))
+          echo "providers found: $found of $total"
+          if [ "$found" -ne "$total" ]; then
+            echo "::error::The compiled binary reports $found of $total providers."
+            echo "The bundled manifests did not survive compilation - see packages/daemon/src/providers/bundled.ts"
+            ./${{ matrix.asset }} providers list
+            exit 1
+          fi
+
+      - name: Checksum
+        run: sha256sum ${{ matrix.asset }} > ${{ matrix.asset }}.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: |
+            ${{ matrix.asset }}
+            ${{ matrix.asset }}.sha256
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      # The install scripts read from `/releases/latest/download/<name>`, so the
+      # asset names are effectively an API: renaming one breaks every install
+      # command already published.
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --title "${{ github.ref_name }}" \
+            --generate-notes \
+            dist/*

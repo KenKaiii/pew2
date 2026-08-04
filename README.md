@@ -1,145 +1,251 @@
-# pew2
+# 📱 pew2
 
-A remote control for your coding agents. Run Claude Code, Codex, Gemini CLI — or
-your own app — on your machine, and drive them from your phone.
+<p align="center">
+  <img src="docs/icon.png" alt="pew2" width="180">
+</p>
 
-> **Status: early.** Daemon, provider system, relay and the phone app work and
-> are tested, including over the internet via your own relay.
->
-> **Run it for yourself, on your own relay — not for other people.** Traffic is
-> end-to-end encrypted and the relay cannot read it, but your pairing key is a
-> bearer secret with no expiry: anyone holding it can start agents and read files
-> on your machine. Treat it like an SSH key — never paste it anywhere, and
-> `pew2 pair --rotate` if you ever do. See [Known gaps](#known-gaps).
+<p align="center">
+  <strong>Your coding agents. On your phone. From anywhere.</strong>
+</p>
 
-## Install
+<p align="center">
+  <a href="https://github.com/KenKaiii/pew2/releases/latest"><img src="https://img.shields.io/github/v/release/KenKaiii/pew2?style=for-the-badge&label=CLI&color=d97757" alt="Latest release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge" alt="MIT License"></a>
+  <a href="https://youtube.com/@kenkaidoesai"><img src="https://img.shields.io/badge/YouTube-FF0000?style=for-the-badge&logo=youtube&logoColor=white" alt="YouTube"></a>
+  <a href="https://skool.com/kenkai"><img src="https://img.shields.io/badge/Skool-Community-7C3AED?style=for-the-badge" alt="Skool"></a>
+</p>
+
+---
+
+Claude Code, Codex, Gemini and about ten others already run on your computer.
+They just can't leave the room. pew2 puts them in your pocket.
+
+Your computer keeps doing the work. Your phone becomes the way you talk to it.
+Kick something off from the couch, check on it from the train, approve a file
+write while you're getting coffee.
+
+**Nothing runs in the cloud.** No API keys leave your machine. The agent is the
+one you already installed, running on your own hardware, on your own files.
+
+<p align="center">
+  <img src="docs/screenshots/01-empty.png" alt="pew2 on iPhone, ready for a prompt with Claude Code" width="290">
+  &nbsp;&nbsp;
+  <img src="docs/screenshots/02-session.png" alt="Claude Code working through a task, with the model and thinking picker open" width="290">
+</p>
+
+---
+
+## 🚀 Get it running
+
+Two things: the app on your phone, and a small program on your computer.
+
+### 1. The app
+
+Coming to TestFlight. Android APK builds are in
+[Releases](https://github.com/KenKaiii/pew2/releases/latest).
+
+### 2. The computer bit
+
+Open Terminal (macOS) or PowerShell (Windows) and paste one line.
+
+**macOS and Linux**
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/KenKaiii/pew2/main/install.sh | sh
+```
+
+**Windows**
+
+```powershell
+irm https://raw.githubusercontent.com/KenKaiii/pew2/main/install.ps1 | iex
+```
+
+Then:
+
+```bash
+pew2 setup
+```
+
+That looks at your computer, finds the coding agents you already have, gets
+everything running in the background, and shows you a QR code. Scan it with the
+app. Done.
+
+You do not need Node, Bun, Docker, a GitHub account or a copy of this repo. It is
+one file that runs on its own.
+
+> Want to read the script before you run it? Sensible.
+> [install.sh](install.sh) and [install.ps1](install.ps1) are short on purpose.
+
+---
+
+## 🤖 Which agents work
+
+pew2 does not include an AI. It drives the agents already installed on your
+machine, so you keep your own subscription, your own keys, your own limits.
+
+| Agent | Get it | Notes |
+| --- | --- | --- |
+| **Claude Code** | [claude.ai/code](https://claude.ai/code) | Works out of the box |
+| **Codex** | [OpenAI Codex CLI](https://github.com/openai/codex) | Works out of the box |
+| **GG Coder** | [gg-framework](https://github.com/KenKaiii/gg-framework) | Mine. Obviously it works |
+| **Gemini CLI** | `npm i -g @google/gemini-cli` | Needs a `GEMINI_API_KEY` |
+| **OpenCode** | `npm i -g opencode-ai` | Works out of the box |
+| **GitHub Copilot** | `npm i -g @github/copilot` | Needs a Copilot subscription |
+| **Cline** | `npm i -g cline` | Works out of the box |
+| **Qwen Code** | `npm i -g @qwen-code/qwen-code` | Run `qwen` once to log in first |
+| **goose** | [block.github.io/goose](https://block.github.io/goose) | Works out of the box |
+| **Cursor Agent** | [cursor.com/cli](https://cursor.com/cli) | Works out of the box |
+| **Hermes** | `pip install 'hermes-agent[acp]'` | Nous Research |
+| **OpenClaw** | `npm i -g openclaw` | Needs a Gateway running |
+
+Do not have any of them? `pew2 setup` tells you what is missing and where to get
+it. You only need one.
+
+Anything that speaks [ACP](https://agentclientprotocol.com) works, and adding one
+is a single JSON file. There are 40-odd more in the public registry:
+
+```bash
+pew2 registry sync
+```
+
+---
+
+## ✨ What it does
+
+### Picks up where you left off
+
+Every conversation lives on your computer, not the phone. Start on your laptop,
+carry on from your phone, go back to the laptop. Same thread, nothing lost.
+
+### Switch models mid-thought
+
+Sonnet to Opus, standard thinking to extended, without leaving the chat. The app
+reads what your agent actually offers, so you get its real options rather than a
+guess.
+
+### Approve things without being at your desk
+
+When an agent wants to write a file or run a command, the request comes to your
+phone. Approve or deny with a thumb.
+
+### Every project on your machine
+
+It finds your git repos on its own and lists them newest first. Pick one and
+start. Never worked in it before? Browse straight to it from the phone.
+
+### Talk instead of typing
+
+Hold the mic, say what you want. Phone keyboards are miserable for prompts.
+
+### Photos and screenshots
+
+Send a screenshot of a bug, a design, a whiteboard. Straight into the
+conversation.
+
+### It tells you when it is done
+
+Push notification the moment a long run finishes, so you can put the phone down
+and get on with your life.
+
+---
+
+## 🔒 About your data
+
+**Your machine, your agents, your files.** pew2 runs no AI and has no server that
+sees your work.
+
+**Traffic is end-to-end encrypted.** The phone and your computer share a key that
+travels by QR code, and nothing in between can read the messages. Not even the
+relay that connects them, which only ever sees ciphertext.
+
+**The relay is yours too.** Off your home Wi-Fi, the connection goes through a
+small Cloudflare Worker you deploy to your own account. No shared server, no
+signup. The free tier is plenty.
+
+```bash
+npm run relay:deploy
+pew2 relay wss://your-worker.workers.dev
+```
+
+Straight about the limits: your pairing key is a bearer secret with no expiry.
+Anyone holding it can drive the agents on your machine, so treat it like an SSH
+key, and run `pew2 pair --rotate` if it ever ends up somewhere it should not be.
+Full detail in [SECURITY.md](SECURITY.md).
+
+---
+
+## 🛠 Everyday commands
+
+```bash
+pew2 setup             # find agents, start the service, show the QR
+pew2 pair              # pair another phone
+pew2 doctor            # what is broken, and how to fix it
+pew2 providers list    # what is installed and what is missing
+pew2 registry sync     # add every agent in the public ACP registry
+```
+
+---
+
+## 🏗 How it works
+
+Three pieces, and only one of them is doing anything clever.
+
+| Piece | What it does |
+| --- | --- |
+| **Daemon** | Runs on your computer. Owns the agents, the sessions and the history. |
+| **App** | Runs on your phone. A remote control, not a client. |
+| **Relay** | Optional. A dumb pipe on Cloudflare for when you are not home. |
+
+The daemon holds the state, so both ends can drop off the network and pick up
+again without losing a conversation. Agents are spoken to over
+[ACP](https://agentclientprotocol.com), which is why adding one is a JSON
+manifest and no code.
+
+---
+
+## 👨‍💻 Build it yourself
+
+Everything above is the shipped path. If you want to hack on it:
+
+```bash
+git clone https://github.com/KenKaiii/pew2.git
+cd pew2
 bun install
 cd packages/daemon && bun link     # puts `pew2` on your PATH
 ```
 
-Then, from anywhere:
-
-```bash
-pew2 setup             # find agents, verify them, report what is missing
-pew2 service install   # keep the daemon running across reboots
-pew2 pair              # QR + link for the phone, then waits and confirms the scan
-```
-
-Pairing is one time per phone. The daemon is what must keep running, which is
-what `service install` handles.
-
-## The idea
-
-Rather than integrating each agent one by one, pew2 speaks the
-[Agent Client Protocol](https://agentclientprotocol.com) (ACP). Any ACP agent
-works — and there are already ~40, including Claude, Codex, Gemini, Copilot,
-Cursor, Goose, OpenCode and OpenHands.
-
-**You do not have to add them by hand.** `registry sync` pulls the public ACP
-registry, so a newly published agent is available without a release of pew2:
-
-```bash
-pew2 detect                          # configure agents already on your PATH
-pew2 registry sync                   # add every agent in the public ACP registry
-pew2 registry sync --dry-run         # ...or just see what it would add
-```
-
-Sync never downloads anything executable — agents distributed as platform
-binaries are added as manifests that light up once you install the agent its own
-way. It also never overwrites a manifest it did not write; `--force` if you want
-it to.
-
-**Adding your own agent is one JSON file.** No code, no rebuild:
-
-```bash
-npm run providers:validate           # check every manifest
-pew2 providers add my-agent
-pew2 providers verify my-agent
-```
-
-`verify` is not a lint — it spawns the process, does the ACP handshake, sends a
-real prompt and counts what came back. See [docs/ADDING_A_PROVIDER.md](docs/ADDING_A_PROVIDER.md).
-
-## Architecture
-
-```
-Phone  ──ws──▶  Relay (Cloudflare Durable Object)  ◀──ws──  Daemon (your machine)
-                                                              ├─ ACP ▶ Claude Code
-                                                              ├─ ACP ▶ Codex
-                                                              └─ ACP ▶ your own app
-```
-
-- **Daemon** — spawns agents over stdio and owns an append-only, sequence-numbered
-  event log per session. It is the fan-out point: ACP is one client to one agent,
-  so the daemon is what lets a phone and a desktop watch the same session.
-- **Relay** — a Durable Object per pairing. Both sides dial out, so neither needs a
-  public address. Hibernation keeps idle sockets connected at no compute cost, and
-  the DO's built-in SQLite stores the event log, so there is no separate database.
-
-## Getting the app on your phone
-
-pew2 is not on any store, and does not need to be. You build it yourself and
-install it on your own device — which is also what makes forking it useful:
-change anything, rebuild, and it is on your phone.
+Then the app:
 
 ```bash
 cd packages/app
 
-# The package is `eas-cli`; a bare `npx eas` resolves to an unrelated package
-# with no executable and fails with "could not determine executable to run".
-npx eas-cli@latest init                                       # once, links YOUR Expo account
+# The npm package is `eas-cli`. A bare `npx eas` is an unrelated package
+# and fails with "could not determine executable to run".
+npx eas-cli@latest init                                       # links YOUR Expo account
 npx eas-cli@latest build --profile apk --platform android     # APK, install it, done
 npx eas-cli@latest build --profile device --platform ios      # signed for your own device
 npx eas-cli@latest build --profile simulator --platform ios   # no signing, no account
 ```
 
-Builds run on Expo's machines, so a local Xcode/NDK toolchain is not required.
-
-`eas init` comes first because no one's Expo account is committed here. Put the
-account and project id it gives you in `packages/app/eas-project.json`, which is
-gitignored:
+Builds run on Expo's machines, so no local Xcode or NDK needed. `eas init` comes
+first because nobody's Expo account is committed here. Put what it gives you in
+`packages/app/eas-project.json`, which is gitignored:
 
 ```json
 { "owner": "your-expo-username", "projectId": "the-uuid-from-eas-init" }
 ```
 
-So a fork builds under its own account, and pulling upstream never fights you over
-whose it is. CI can set `EAS_OWNER` and `EAS_PROJECT_ID` instead of the file.
+**On iOS signing:** you do not need the $99 Apple Developer Program to run this
+on your own phone. The free tier gives you a **7-day** signature and caps you at
+3 sideloaded apps. That is Apple policy, not a pew2 thing.
+[AltStore](https://altstore.io) or [SideStore](https://sidestore.io) re-sign in
+the background on a schedule, which normally needs a computer awake on your
+network at the right moment. pew2 already requires exactly that.
 
 **Android needs no developer account, ever.** A signed APK installs once and
-keeps working. Nothing expires.
+keeps working.
 
-**iOS is where Apple charges rent.** Not for building — the $99/year Developer
-Program buys *distribution*, and you can install on your own device without it.
-What the free tier costs you is a **7-day signature**: a free ("personal team")
-provisioning profile expires a week after it is issued, and you are capped at 3
-sideloaded apps. That is Apple policy, not a pew2 limitation, and no tool removes
-it. Two ways out:
-
-| | Cost | What you do |
-| --- | --- | --- |
-| **Free + auto-refresh** | £0 | [AltStore](https://altstore.io) or [SideStore](https://sidestore.io) re-signs in the background, on a schedule. Set up once. |
-| **Paid** | $99/yr | 1-year profile. Rebuild annually. |
-
-Auto-refresh normally has a catch — it wants a computer awake on your network at
-the moment the certificate expires. **pew2 already requires exactly that**: the
-daemon runs on your machine under `service install`. The cost is already paid.
-
-Forking? Nothing here is tied to an account, so a fork needs four things of its
-own — none of which are inherited:
-
-1. **Identity.** `name`, `slug`, `ios.bundleIdentifier` and `android.package` in
-   `packages/app/app.json`. An identifier is unique per store, so a fork keeping
-   the original's cannot be submitted alongside it.
-2. **A relay.** `npm run relay:deploy`, then `pew2 relay wss://<your-worker>`.
-   The URL is never committed; without this a fork is same-Wi-Fi only.
-3. **An EAS project**, if you build with it: `npx eas-cli@latest init`.
-4. **A pairing token**, minted per machine on first run. Yours never leaves your
-   own `~/.pew2`.
-
-## Layout
+### Layout
 
 | Path | What |
 | --- | --- |
@@ -149,36 +255,43 @@ own — none of which are inherited:
 | `packages/app` | Expo app (iOS + Android) |
 | `providers/` | One JSON manifest per agent |
 
-## Develop
+### Checks
 
 ```bash
-bun install
-npm run typecheck        # daemon + protocol, and relay separately
-npm test                 # pipeline tests against a local echo ACP agent
-npm run relay:dev        # relay on :8799
-npm run relay:check      # integration check against a running relay
+npm run typecheck            # daemon + protocol + relay + app
+npm test                     # daemon pipeline against the local echo agent
+npm run providers:validate   # every manifest parses and validates
 ```
 
-`providers/echo.json` is a working ACP agent needing no API key and no network,
-so the whole pipeline is testable anywhere.
+Adding an agent is one JSON file and no code. See
+[docs/ADDING_A_PROVIDER.md](docs/ADDING_A_PROVIDER.md).
 
-## Known gaps
+---
 
-1. **No forward secrecy, and no per-device revocation.** Traffic is end-to-end
-   encrypted and the relay cannot read it, but one key lasts the life of a
-   pairing: a key leaked tomorrow decrypts traffic captured today, and removing
-   one device means rotating and re-pairing all of them. Run your own relay.
+## 🕳 Known gaps
 
-   The relay does enforce what it can without being able to authenticate anyone:
-   a token must be hex and at least 32 characters before it names a room, a
-   device is refused unless a daemon is actually connected (so `pew2 pair
-   --rotate` takes effect immediately), the newest daemon connection replaces
-   any older one, and a room is capped at 16 sockets. None of that helps if the
-   token itself leaks — rotate it.
+Being straight with you:
+
+1. **No forward secrecy, no per-device revocation.** One key lasts the life of a
+   pairing, so a key leaked tomorrow decrypts traffic captured today, and
+   removing one device means re-pairing all of them.
 2. **`pty` transport is reserved but unimplemented.** `verify` skips it.
 
-The full threat model, and how to report something, are in [SECURITY.md](SECURITY.md).
+---
 
-## Licence
+## 👥 Community
+
+- [YouTube @kenkaidoesai](https://youtube.com/@kenkaidoesai), tutorials and demos
+- [Skool community](https://skool.com/kenkai), come hang out
+
+---
+
+## 📄 Licence
 
 MIT
+
+---
+
+<p align="center">
+  <strong>Your agents already work. Now they follow you around.</strong>
+</p>
