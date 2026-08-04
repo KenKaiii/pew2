@@ -47,10 +47,16 @@ export const MAX_SOCKETS_PER_ROOM = 16;
 
 export type Role = "daemon" | "app";
 
-/** Rejected with a status and a reason, or admitted — possibly evicting first. */
+/**
+ * Rejected with a status and a reason, or admitted — possibly evicting first.
+ *
+ * The admitted case carries the validated `role` and `deviceId` back out, so the
+ * caller attaches the values this function actually checked rather than casting
+ * the raw query parameters and asserting they must be fine.
+ */
 export type Admission =
   | { ok: false; status: 400 | 409 | 429; reason: string }
-  | { ok: true; evictDaemons: boolean };
+  | { ok: true; role: Role; deviceId: string; evictDaemons: boolean };
 
 /** Is this string shaped like a token `pew2` could have produced? */
 export function isPairingToken(token: string | null): token is string {
@@ -71,17 +77,20 @@ export function admit(input: {
   daemons: number;
   total: number;
 }): Admission {
-  if (input.role !== "daemon" && input.role !== "app") {
+  const role = input.role;
+  const deviceId = input.deviceId;
+
+  if (role !== "daemon" && role !== "app") {
     return { ok: false, status: 400, reason: "role must be 'daemon' or 'app'" };
   }
-  if (!input.deviceId) {
+  if (!deviceId) {
     return { ok: false, status: 400, reason: "deviceId required" };
   }
   if (input.total >= MAX_SOCKETS_PER_ROOM) {
     return { ok: false, status: 429, reason: "too many connections for this pairing" };
   }
 
-  if (input.role === "daemon") {
+  if (role === "daemon") {
     // One desktop per pairing, and the newest connection is the live one.
     //
     // Deliberately *not* "first claim wins". A dropped socket stays attached
@@ -91,7 +100,7 @@ export function admit(input: {
     // Evicting instead makes reconnection reliable, and costs little that
     // matters: anyone able to open this socket already holds the token, and the
     // real daemon reconnects and takes the room straight back.
-    return { ok: true, evictDaemons: input.daemons > 0 };
+    return { ok: true, role, deviceId, evictDaemons: input.daemons > 0 };
   }
 
   if (input.daemons === 0) {
@@ -106,5 +115,5 @@ export function admit(input: {
     return { ok: false, status: 409, reason: "no daemon connected for this pairing" };
   }
 
-  return { ok: true, evictDaemons: false };
+  return { ok: true, role, deviceId, evictDaemons: false };
 }

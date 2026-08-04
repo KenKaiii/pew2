@@ -59,14 +59,13 @@ export class PairingRoom extends DurableObject {
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
-    const role = url.searchParams.get("role");
-    const deviceId = url.searchParams.get("deviceId");
 
     // The rules themselves live in ./admission.ts, where they can be tested
-    // without a Workers runtime.
+    // without a Workers runtime. The validated role and deviceId come back out,
+    // so what gets attached below is what was actually checked.
     const decision = admit({
-      role,
-      deviceId,
+      role: url.searchParams.get("role"),
+      deviceId: url.searchParams.get("deviceId"),
       daemons: this.peers("daemon").length,
       total: this.ctx.getWebSockets().length,
     });
@@ -89,7 +88,10 @@ export class PairingRoom extends DurableObject {
 
     // acceptWebSocket (not server.accept) is what permits hibernation.
     this.ctx.acceptWebSocket(server);
-    server.serializeAttachment({ role, deviceId } as Attachment);
+    server.serializeAttachment({
+      role: decision.role,
+      deviceId: decision.deviceId,
+    } satisfies Attachment);
 
     server.send(JSON.stringify({ t: "ready", wire: 1, now: Date.now() }));
 

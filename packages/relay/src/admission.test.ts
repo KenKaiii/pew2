@@ -45,6 +45,8 @@ test("a device is refused when no daemon is there to answer it", () => {
   // And admitted once the desktop is present.
   expect(admit({ role: "app", deviceId: "phone", daemons: 1, total: 1 })).toEqual({
     ok: true,
+    role: "app",
+    deviceId: "phone",
     evictDaemons: false,
   });
 });
@@ -57,10 +59,14 @@ test("a reconnecting daemon replaces the old socket instead of being locked out"
   // network.
   expect(admit({ role: "daemon", deviceId: "mac", daemons: 0, total: 0 })).toEqual({
     ok: true,
+    role: "daemon",
+    deviceId: "mac",
     evictDaemons: false,
   });
   expect(admit({ role: "daemon", deviceId: "mac", daemons: 1, total: 3 })).toEqual({
     ok: true,
+    role: "daemon",
+    deviceId: "mac",
     evictDaemons: true,
   });
 });
