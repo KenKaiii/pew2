@@ -94,6 +94,37 @@ npx eas build --profile simulator --platform ios       # no signing, no account
 
 Builds run on Expo's machines, so a local Xcode/NDK toolchain is not required.
 
+### TestFlight
+
+The `production` profile builds a store-signed archive rather than one that
+installs directly on a registered device:
+
+```bash
+npx eas build  --profile production --platform ios
+npx eas submit --profile production --platform ios
+```
+
+Three things about it are deliberate:
+
+- **`appVersionSource: "remote"`.** EAS holds the build number and increments it
+  per build, so `ios.buildNumber` is absent from `app.json` rather than being a
+  second source of truth. A duplicate build number is the most common reason a
+  first TestFlight upload is rejected.
+- **`ITSAppUsesNonExemptEncryption` is `true`.** pew2 ships its own cryptography
+  — XChaCha20-Poly1305, for the end-to-end encryption — and the exemption this
+  key asks about covers only encryption provided by the operating system. It was
+  `false` when the app spoke nothing but TLS; leaving it there now would be a
+  false statement on a binding export declaration. Expect App Store Connect to
+  ask the export-compliance questions.
+- **No Apple credentials in `eas.json`.** This repository is public, and an Apple
+  ID or App Store Connect app id in it is both an account detail nobody should
+  inherit and one more thing every fork must remember to change. `eas submit`
+  prompts for what it needs and caches it under `~/.eas`.
+
+A reviewer cannot pair with a machine they do not have, so a first submission
+needs either a demo video or a daemon left running for them. Expect to explain
+what the app connects to.
+
 `eas init` comes first because no one's Expo account is committed here. Put the
 account and project id it gives you in `packages/app/eas-project.json`, which is
 gitignored:
