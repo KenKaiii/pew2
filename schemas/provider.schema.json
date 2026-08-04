@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://pew2.dev/schemas/provider.schema.json",
+  "$id": "https://raw.githubusercontent.com/KenKaiii/pew2/main/schemas/provider.schema.json",
   "title": "pew2 provider manifest",
   "description": "Describes an agent/app/CLI that pew2 can surface in the mobile app. Core fields match the ACP Agent Registry manifest so registry entries can be copied verbatim.",
   "type": "object",

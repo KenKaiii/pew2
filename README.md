@@ -4,8 +4,13 @@ A remote control for your coding agents. Run Claude Code, Codex, Gemini CLI — 
 your own app — on your machine, and drive them from your phone.
 
 > **Status: early.** Daemon, provider system, relay and the phone app work and
-> are tested. There is no authentication beyond a bearer token and no end-to-end
-> encryption — **do not expose this to the internet.** See [Known gaps](#known-gaps).
+> are tested, including over the internet via your own relay.
+>
+> **Run it for yourself, on your own relay — not for other people.** Your
+> pairing token is a bearer secret with no expiry, and the relay sees plaintext.
+> Anyone holding that token can start agents and read files on your machine, so
+> treat it like an SSH key: never paste it anywhere, and `pew2 pair --rotate` if
+> you ever do. See [Known gaps](#known-gaps).
 
 ## Install
 
@@ -119,9 +124,17 @@ Auto-refresh normally has a catch — it wants a computer awake on your network 
 the moment the certificate expires. **pew2 already requires exactly that**: the
 daemon runs on your machine under `service install`. The cost is already paid.
 
-Forking? Change `name`, `slug`, `ios.bundleIdentifier` and `android.package` in
-`packages/app/app.json` to your own, so your build is yours and not a collision
-with someone else's.
+Forking? Nothing here is tied to an account, so a fork needs four things of its
+own — none of which are inherited:
+
+1. **Identity.** `name`, `slug`, `ios.bundleIdentifier` and `android.package` in
+   `packages/app/app.json`. An identifier is unique per store, so a fork keeping
+   the original's cannot be submitted alongside it.
+2. **A relay.** `npm run relay:deploy`, then `pew2 relay wss://<your-worker>`.
+   The URL is never committed; without this a fork is same-Wi-Fi only.
+3. **An EAS project**, if you build with it: `npx eas init`.
+4. **A pairing token**, minted per machine on first run. Yours never leaves your
+   own `~/.pew2`.
 
 ## Layout
 

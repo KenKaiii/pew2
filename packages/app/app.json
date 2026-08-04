@@ -8,13 +8,14 @@
     "userInterfaceStyle": "dark",
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "dev.pew2.app",
+      "//": "Reverse-DNS of the GitHub org that hosts this, not a domain: `pew2.dev` is not registered, and an identifier built from a domain someone else can buy is a claim that can be contested after the app is on a store — at which point it cannot be changed without shipping a new app. Fork this and you must change it: an identifier is unique per store, and a fork keeping this one cannot be submitted alongside the original.",
+      "bundleIdentifier": "io.github.kenkaiii.pew2",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false
       }
     },
     "android": {
-      "package": "dev.pew2.app",
+      "package": "io.github.kenkaiii.pew2",
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/android-icon-foreground.png",

@@ -14,3 +14,24 @@ dist/
 # at the repo root, and one has already been left behind once; the suffix makes
 # that impossible rather than something to remember.
 *.tmp.ts
+
+# Code-signing material, listed before anyone has any.
+#
+# These arrive the first time you build for a store — often written into the
+# project directory by a tool rather than by you — and a committed signing key
+# cannot be un-leaked by deleting it later: it has to be revoked, and every build
+# re-signed. In a public repo that is somebody impersonating your app.
+*.p8
+*.p12
+*.pem
+*.cer
+*.certSigningRequest
+*.mobileprovision
+*.keystore
+*.jks
+credentials.json
+google-services.json
+GoogleService-Info.plist
+
+# EAS writes local build state and credential caches here.
+.eas/
