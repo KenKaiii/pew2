@@ -13,6 +13,7 @@
  */
 import { Daemon } from "./index.js";
 import { loadPairing, pairingUrl, qrCode, tokenMatches } from "./pairing.js";
+import { SecureChannel, e2e, envelopeHeader, wire } from "@pew2/protocol";
 import { handleMessage } from "./handler.js";
 import { RelayClient } from "./relay-client.js";
 import { hostname } from "node:os";
@@ -36,16 +37,53 @@ const daemon = new Daemon(
   { id: "local", name: "this machine" },
   process.env.PEW2_EXPERIMENTAL === "1",
 );
-const clients = new Set<ServerWebSocket<unknown>>();
+/**
+ * The pairing key, as bytes.
+ *
+ * `loadPairing` always mints one, so its absence means a pairing file was
+ * hand-edited or written by a build from before encryption existed. Refusing to
+ * start is the point: the alternative is a daemon that quietly serves plaintext,
+ * which is exactly the downgrade this is meant to remove.
+ */
+if (!pairing.key) {
+  console.error("This pairing has no encryption key. Run `pew2 pair --rotate` and pair again.");
+  process.exit(1);
+}
+const rootKey = e2e.fromHex(pairing.key);
 
-/** Broadcast to every connected client, dropping any that have gone away. */
-function broadcast(message: unknown) {
-  const encoded = JSON.stringify(message);
-  for (const client of clients) {
+/**
+ * One connection's encryption state.
+ *
+ * Per socket, never shared: the counters that make replay detectable are only
+ * meaningful within a single connection, and two sockets sharing them would read
+ * each other's traffic as replays.
+ */
+interface Client {
+  channel: SecureChannel;
+  /** True once a valid `hello` proof has arrived. */
+  authenticated: boolean;
+}
+
+const clients = new Map<ServerWebSocket<unknown>, Client>();
+
+/**
+ * Broadcast to every connected client, dropping any that have gone away.
+ *
+ * Sealed once per socket rather than once overall: each connection has its own
+ * counter, and reusing one frame across sockets would make the second and later
+ * recipients read it as a replay.
+ *
+ * Only authenticated clients are written to. An unauthenticated socket has not
+ * proved it holds the key, so sending it session traffic would leak the fact and
+ * shape of a conversation to whoever opened it.
+ */
+function broadcast(message: unknown, header: { sid?: string; seq?: number } = {}) {
+  for (const [ws, client] of clients) {
+    if (!client.authenticated) continue;
     try {
-      client.send(encoded);
+      ws.send(JSON.stringify(client.channel.seal(message, header)));
     } catch {
-      clients.delete(client);
+      clients.delete(ws);
     }
   }
 }
@@ -62,6 +100,7 @@ const relay = pairing.relay
       daemon,
       url: pairing.relay,
       token: pairing.token,
+      key: pairing.key,
       deviceId: hostname(),
       // Relay traffic is fanned out locally too, so a desktop client and a
       // phone on 5G genuinely see the same conversation.
@@ -74,7 +113,7 @@ const relay = pairing.relay
 // One fan-out point for both transports. The daemon owns the log precisely so
 // that a phone on 5G and a desktop on the LAN see the same conversation.
 daemon.attach((message) => {
-  broadcast(message);
+  broadcast(message, envelopeHeader(message));
   relay?.send(message);
 });
 
@@ -83,7 +122,15 @@ relay?.start();
 const { errors } = await daemon.refreshProviders();
 for (const error of errors) console.error(error.message);
 
+/** Send one sealed message to one client. */
 function send(ws: ServerWebSocket<unknown>, message: unknown) {
+  const client = clients.get(ws);
+  if (!client) return;
+  ws.send(JSON.stringify(client.channel.seal(message, envelopeHeader(message))));
+}
+
+/** Send one cleartext frame. Only for handshake plumbing carrying no content. */
+function sendPlain(ws: ServerWebSocket<unknown>, message: unknown) {
   ws.send(JSON.stringify(message));
 }
 
@@ -112,10 +159,10 @@ const server = Bun.serve({
 
   websocket: {
     open(ws) {
-      clients.add(ws);
-      send(ws, { t: "ready", wire: 1, now: Date.now() });
-      // Re-announce so a client that connects later still sees the provider list.
-      daemon.refreshProviders();
+      clients.set(ws, { channel: new SecureChannel(rootKey, "daemon"), authenticated: false });
+      // Cleartext, and one of the few frames that can be: it carries no content,
+      // and the client has not proved it can decrypt anything yet.
+      sendPlain(ws, { t: "ready", wire: wire.WIRE_VERSION, now: Date.now() });
     },
 
     close(ws) {
@@ -125,14 +172,64 @@ const server = Bun.serve({
     async message(ws, raw) {
       if (typeof raw !== "string") return;
 
+      const client = clients.get(ws);
+      if (!client) return;
+
+      let frame: unknown;
+      try {
+        frame = JSON.parse(raw);
+      } catch {
+        return;
+      }
+
+      // `hello` arrives in cleartext because it is what establishes the
+      // connection. Everything after it must be sealed.
+      if (typeof frame === "object" && frame !== null && (frame as { t?: unknown }).t === "hello") {
+        const hello = frame as { wire?: unknown; deviceId?: unknown; proof?: unknown };
+
+        // Checked before the proof, so a client too old to *have* a proof is
+        // told to update rather than silently refused as unauthenticated.
+        const mismatch = wire.wireMismatch(hello.wire);
+        if (mismatch) {
+          sendPlain(ws, { t: "error", code: "wire-version", message: mismatch });
+          ws.close(1002, "protocol version");
+          return;
+        }
+
+        const deviceId = typeof hello.deviceId === "string" ? hello.deviceId : "";
+        if (!deviceId || !client.channel.verifyProof(hello.proof, deviceId)) {
+          sendPlain(ws, {
+            t: "error",
+            code: "unpaired",
+            message: "This device is not paired with this machine. Run `pew2 pair` and scan again.",
+          });
+          ws.close(1008, "unpaired");
+          return;
+        }
+
+        client.authenticated = true;
+        // Announced only now: the provider list names every agent installed on
+        // this machine, which is not something to hand to an unproven socket.
+        await daemon.refreshProviders();
+        broadcast({ t: "device.joined", deviceId, at: Date.now() });
+        return;
+      }
+
+      // Anything else must be a sealed frame from an authenticated peer. An
+      // unauthenticated socket is ignored entirely rather than answered, so it
+      // learns nothing from what it does or does not get back.
+      if (!client.authenticated) return;
+      const message = client.channel.open(frame);
+      if (message === undefined) return;
+
       // Shared with the relay transport, so a message type can never work on
       // one path and not the other.
-      await handleMessage(raw, {
+      await handleMessage(JSON.stringify(message), {
         daemon,
-        reply: (message) => send(ws, message),
-        broadcast: (message) => {
-          broadcast(message);
-          relay?.send(message);
+        reply: (reply) => send(ws, reply),
+        broadcast: (event) => {
+          broadcast(event, envelopeHeader(event));
+          relay?.send(event);
         },
       });
     },

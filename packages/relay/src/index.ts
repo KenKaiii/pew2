@@ -101,7 +101,13 @@ export class PairingRoom extends DurableObject {
   async webSocketMessage(ws: WebSocket, raw: string | ArrayBuffer) {
     if (typeof raw !== "string") return;
 
-    let message: { t?: string; sessionId?: string; seq?: number; at?: number; cursors?: Record<string, number> };
+    let message: {
+      t?: string;
+      /** Session id, on a sealed envelope. Readable so the log can be ordered. */
+      sid?: string;
+      seq?: number;
+      cursors?: Record<string, number>;
+    };
     try {
       message = JSON.parse(raw);
     } catch {
@@ -112,14 +118,19 @@ export class PairingRoom extends DurableObject {
     const from = ws.deserializeAttachment() as Attachment | null;
     if (!from) return;
 
-    // Persist session events so a client that reconnects can be caught up.
-    if (message.t === "session.event" && message.sessionId && typeof message.seq === "number") {
+    // Persist sealed frames so a client that reconnects can be caught up.
+    //
+    // Stored opaquely: `sid` and `seq` are the only fields read, they are the
+    // only ones the envelope exposes, and they are bound into the frame's AEAD
+    // tag — so this can order a log it cannot read, and cannot rewrite what it
+    // stores without every recipient rejecting it.
+    if (message.t === "e" && message.sid && typeof message.seq === "number") {
       this.ensureSchema();
       this.ctx.storage.sql.exec(
         `INSERT OR IGNORE INTO events (session_id, seq, at, payload) VALUES (?, ?, ?, ?)`,
-        message.sessionId,
+        message.sid,
         message.seq,
-        message.at ?? Date.now(),
+        Date.now(),
         raw,
       );
     }
@@ -154,8 +165,19 @@ export class PairingRoom extends DurableObject {
     }
 
     // Otherwise relay to the opposite role. Daemons talk to apps, apps to daemons.
+    //
+    // Sealed frames are stamped with the sender's device id on the way past. The
+    // daemon has one socket here but many devices behind it, and their replay
+    // counters are independent — without something to tell them apart, a second
+    // phone's first frame looks like a replay of the first phone's and that phone
+    // silently never works.
+    //
+    // This is routing metadata, not a credential: it grants nothing, and a frame
+    // still has to carry a valid tag to be read at all.
+    const forwarded =
+      message.t === "e" ? JSON.stringify({ ...message, from: from.deviceId }) : raw;
     for (const peer of this.peers(from.role === "daemon" ? "app" : "daemon")) {
-      peer.send(raw);
+      peer.send(forwarded);
     }
   }
 

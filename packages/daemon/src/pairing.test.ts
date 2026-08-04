@@ -79,8 +79,8 @@ test("a too-short stored token is replaced rather than trusted", async () => {
 
 test("a pairing stored without a key is replaced rather than reused", async () => {
   // Written before encryption existed. Reusing it would leave a daemon that
-  // still accepts unencrypted connections \u2014 the silent downgrade this change
-  // exists to remove \u2014 so it is treated as no pairing at all.
+  // still accepts unencrypted connections — the silent downgrade this change
+  // exists to remove — so it is treated as no pairing at all.
   const { env } = await sandbox();
   await mkdir(join(env.PEW2_HOME!), { recursive: true });
   const legacy = "a".repeat(48);
@@ -118,7 +118,7 @@ test("the key travels in the fragment, which is never sent to a server", async (
 
   expect(parsed.searchParams.get("pairing")).toBe(token);
   expect(parsed.hash).toMatch(/^#k=[A-Za-z0-9_-]+$/);
-  // Everything the relay actually receives \u2014 path and query \u2014 must be free of it.
+  // Everything the relay actually receives — path and query — must be free of it.
   expect(`${parsed.pathname}${parsed.search}`).not.toContain(parsed.hash.slice(3));
 
   // Same shape on the LAN, so the app needs no second code path.

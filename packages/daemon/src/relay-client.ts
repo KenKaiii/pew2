@@ -13,14 +13,22 @@
  * than no remote access at all.
  */
 import { handleMessage } from "./handler.js";
+import { SecureChannel, e2e, envelopeHeader, wire } from "@pew2/protocol";
 import type { Daemon } from "./index.js";
 
 export interface RelayClientOptions {
   daemon: Daemon;
   /** Relay origin, e.g. `wss://relay.example.com`. */
   url: string;
-  /** The pairing token. Selects the Durable Object both sides meet in. */
+  /**
+   * The relay room id. Selects the Durable Object both sides meet in.
+   *
+   * Derived one-way from the pairing key, so handing it to the relay does not
+   * hand over the ability to read anything.
+   */
   token: string;
+  /** The pairing key, hex. Never sent — only used to seal and open frames. */
+  key: string;
   /** Stable identity for this machine, so the relay can tell devices apart. */
   deviceId: string;
   cwd?: string;
@@ -54,6 +62,14 @@ const HEARTBEAT_MS = 25_000;
 
 export class RelayClient {
   private socket: WebSocket | null = null;
+  /**
+   * Encryption state for the current connection.
+   *
+   * Rebuilt on every reconnect, because the counters that make replay
+   * detectable are only meaningful within one socket: carrying them across a
+   * reconnect would make the fresh connection's first frames look like replays.
+   */
+  private channel: SecureChannel | null = null;
   private attempts = 0;
   private stopped = false;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -88,11 +104,11 @@ export class RelayClient {
     this.socket = null;
   }
 
-  /** Push a message to the relay. Silently dropped while offline. */
+  /** Push a sealed message to the relay. Silently dropped while offline. */
   send(message: unknown): void {
-    if (this.socket?.readyState !== WebSocket.OPEN) return;
+    if (this.socket?.readyState !== WebSocket.OPEN || !this.channel) return;
     try {
-      this.socket.send(JSON.stringify(message));
+      this.socket.send(JSON.stringify(this.channel.seal(message, envelopeHeader(message))));
     } catch {
       // A send failing means the socket is already gone; `close` will fire and
       // reconnection will take over.
@@ -125,17 +141,75 @@ export class RelayClient {
     socket.onopen = () => {
       this.attempts = 0;
       this.status("online");
-      // Announce as the daemon and re-send the provider list: the app may have
-      // been waiting on the relay long before this machine woke up.
-      this.send({ t: "hello", wire: 1, role: "daemon", deviceId: this.options.deviceId });
+      this.channel = new SecureChannel(e2e.fromHex(this.options.key), "daemon");
+      // `hello` is cleartext because it is what establishes the connection, and
+      // carries a sealed proof beside it so the far side can tell a real daemon
+      // from anyone who merely learned the room id.
+      socket.send(
+        JSON.stringify({
+          t: "hello",
+          wire: wire.WIRE_VERSION,
+          role: "daemon",
+          deviceId: this.options.deviceId,
+          proof: this.channel.proof(this.options.deviceId),
+        }),
+      );
+      // The app may have been waiting on the relay long before this machine woke
+      // up, so re-announce rather than assuming it saw the last one.
       this.options.daemon.refreshProviders();
       this.startHeartbeat();
     };
 
     socket.onmessage = (event) => {
       const raw = typeof event.data === "string" ? event.data : null;
-      if (raw === null) return;
-      void handleMessage(raw, {
+      if (raw === null || !this.channel) return;
+
+      let frame: unknown;
+      try {
+        frame = JSON.parse(raw);
+      } catch {
+        return;
+      }
+
+      if (typeof frame !== "object" || frame === null) return;
+      const kind = (frame as { t?: unknown }).t;
+
+      // An app announcing itself. Cleartext, because it is what establishes the
+      // far end of the connection — so it carries a sealed proof beside it, and
+      // is worth nothing without one.
+      if (kind === "hello") {
+        const hello = frame as { wire?: unknown; deviceId?: unknown; proof?: unknown };
+        const deviceId = typeof hello.deviceId === "string" ? hello.deviceId : "";
+
+        // Checked first, so a client too old to carry a proof is told to update
+        // rather than dismissed as unpaired — different problems, different fixes.
+        const mismatch = wire.wireMismatch(hello.wire);
+        if (mismatch) {
+          socket.send(JSON.stringify({ t: "error", code: "wire-version", message: mismatch }));
+          return;
+        }
+        if (!deviceId || !this.channel.verifyProof(hello.proof, deviceId)) return;
+
+        // The app may have been waiting here long before this machine woke up,
+        // so re-announce rather than assume it saw the last list.
+        void this.options.daemon.refreshProviders();
+        const joined = { t: "device.joined", deviceId, at: Date.now() };
+        this.send(joined);
+        this.options.onBroadcast?.(joined);
+        return;
+      }
+
+      // Everything else must be sealed. A cleartext frame from the relay itself
+      // — `ready`, or an error — carries nothing this needs to act on.
+      if (kind !== "e") return;
+
+      // Partitioned by the sender the relay names, so several phones sharing
+      // this one socket do not invalidate each other's counters.
+      const sender = (frame as { from?: unknown }).from;
+      const message = this.channel.open(frame, typeof sender === "string" ? sender : "");
+      if (message === undefined) return;
+
+      void handleMessage(JSON.stringify(message), {
         daemon: this.options.daemon,
         // Over the relay there is no per-client socket to reply to: the relay
         // fans out to whichever apps are attached to this pairing. Both paths
@@ -157,6 +231,7 @@ export class RelayClient {
     socket.onclose = () => {
       this.clearTimers();
       this.socket = null;
+      this.channel = null;
       this.scheduleRetry();
     };
   }

@@ -8,7 +8,24 @@
  */
 import { test, expect } from "bun:test";
 import { RelayClient, backoffBounds, type RelayClientOptions } from "./relay-client.js";
+import { SecureChannel, e2e, wire } from "@pew2/protocol";
+
+const { WIRE_VERSION } = wire;
 import type { Daemon } from "./index.js";
+
+/** The pairing both ends of these tests share. */
+const KEY = "11".repeat(32);
+
+/**
+ * Stands in for the phone.
+ *
+ * Traffic to the daemon is encrypted, so a test that sends bare JSON is testing
+ * a path that no longer exists — the client would drop it, correctly, and the
+ * test would prove nothing.
+ */
+function phone() {
+  return new SecureChannel(e2e.fromHex(KEY), "app");
+}
 
 /** Enough of a Daemon for the client to drive. */
 function fakeDaemon() {
@@ -49,6 +66,7 @@ class FakeSocket {
     this.readyState = 1;
     this.onopen?.();
   }
+  /** Deliver a raw frame, exactly as the relay would. */
   receive(message: unknown) {
     this.onmessage?.({ data: JSON.stringify(message) });
   }
@@ -62,6 +80,7 @@ function client(overrides: Partial<RelayClientOptions> = {}) {
     daemon,
     url: "wss://relay.example.com",
     token: "t".repeat(48),
+    key: "11".repeat(32),
     deviceId: "test-machine",
     onStatus: (status) => statuses.push(status),
     createSocket: (url) => new FakeSocket(url) as unknown as WebSocket,
@@ -171,12 +190,17 @@ test("relayed messages reach the daemon handler", async () => {
   // and daemon can be different versions once this is remote. It carries its
   // own code so a newer app can tell "this daemon is older than me" apart from
   // a real failure and keep it out of the transcript.
-  socket.receive({ t: "nonsense" });
+  const app = phone();
+  socket.receive({ ...app.seal({ t: "nonsense" }), from: "Kens-iPhone" });
   await new Promise((r) => setTimeout(r, 20));
 
-  const errors = socket.sent.map((s) => JSON.parse(s)).filter((m) => m.t === "error");
+  // The reply is sealed too, so reading it means decrypting it — which is also
+  // the proof that what went back out was not plaintext.
+  const errors = socket.sent
+    .map((raw) => app.open(JSON.parse(raw)))
+    .filter((m): m is { t: string; code: string } => (m as { t?: string })?.t === "error");
   expect(errors).toHaveLength(1);
-  expect(errors[0].code).toBe("unknown_message");
+  expect(errors[0]!.code).toBe("unknown_message");
   relay.stop();
 });
 
@@ -192,7 +216,14 @@ test("a phone on the relay is visible to clients on the LAN", async () => {
   relay.start();
   const socket = FakeSocket.instances[0]!;
   socket.open();
-  socket.receive({ t: "hello", wire: 1, role: "app", deviceId: "Kens-iPhone" });
+  const app = phone();
+  socket.receive({
+    t: "hello",
+    wire: WIRE_VERSION,
+    role: "app",
+    deviceId: "Kens-iPhone",
+    proof: app.proof("Kens-iPhone"),
+  });
   // `hello` awaits a provider refresh before broadcasting, so let the
   // microtask queue drain the same way the neighbouring cases do.
   await new Promise((r) => setTimeout(r, 20));
@@ -201,7 +232,9 @@ test("a phone on the relay is visible to clients on the LAN", async () => {
   expect(joined).toMatchObject({ t: "device.joined", deviceId: "Kens-iPhone" });
 
   // Still sent up the relay as well: the fan-out is additional, not a redirect.
-  expect(socket.sent.some((raw) => raw.includes("device.joined"))).toBe(true);
+  expect(
+    socket.sent.some((raw) => (app.open(JSON.parse(raw)) as { t?: string })?.t === "device.joined"),
+  ).toBe(true);
   relay.stop();
 });
 
@@ -213,23 +246,40 @@ test("a relay client with no local listener is still handled", async () => {
   relay.start();
   const socket = FakeSocket.instances[0]!;
   socket.open();
-  socket.receive({ t: "hello", wire: 1, role: "app", deviceId: "Kens-iPhone" });
+  const app = phone();
+  socket.receive({
+    t: "hello",
+    wire: WIRE_VERSION,
+    role: "app",
+    deviceId: "Kens-iPhone",
+    proof: app.proof("Kens-iPhone"),
+  });
   await new Promise((r) => setTimeout(r, 20));
 
-  expect(socket.sent.some((raw) => raw.includes("device.joined"))).toBe(true);
+  expect(
+    socket.sent.some((raw) => (app.open(JSON.parse(raw)) as { t?: string })?.t === "device.joined"),
+  ).toBe(true);
   relay.stop();
 });
 
-test("a malformed frame is answered, not fatal", async () => {
+test("a malformed or unsealed frame is dropped, not answered", async () => {
+  // Answering would be a favour to a stranger. Nothing here has proved it holds
+  // the pairing key, so a reply would confirm the room is live and leak the
+  // daemon's protocol version — and no legitimate peer ever sends any of this.
   const { relay } = client();
 
   relay.start();
   const socket = FakeSocket.instances[0]!;
   socket.open();
+  const before = socket.sent.length;
+
   socket.onmessage?.({ data: "{ not json" });
+  socket.receive({ t: "session.prompt", text: "unsealed" });
+  socket.receive({ t: "e", ctr: 0, n: "AA", ct: "AA" });
   await new Promise((r) => setTimeout(r, 20));
 
-  const errors = socket.sent.map((s) => JSON.parse(s)).filter((m) => m.t === "error");
-  expect(errors[0]?.code).toBe("bad_json");
+  // Still alive, and it said nothing.
+  expect(socket.sent.length).toBe(before);
+  expect(() => relay.send({ t: "ping" })).not.toThrow();
   relay.stop();
 });

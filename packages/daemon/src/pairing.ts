@@ -200,7 +200,7 @@ export interface PairingUrlOptions {
   token: string;
   /**
    * The root key, hex. Carried in the URL *fragment*, which is never sent to a
-   * server \u2014 so the relay routes this connection without ever seeing the key
+   * server — so the relay routes this connection without ever seeing the key
    * that decrypts it.
    */
   key?: string;
