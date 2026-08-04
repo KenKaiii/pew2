@@ -115,6 +115,44 @@ test("two devices can each prove themselves over one socket", () => {
   expect(daemon.verifyProof(phoneB.proof("phone-b"), "phone-b")).toBe(true);
 });
 
+test("a flood of invented senders cannot exhaust memory", () => {
+  // The partition key comes from the sender's own claimed device id, so it is
+  // attacker-controlled over the relay. An unbounded map would grow one entry
+  // per made-up name until the daemon fell over — a denial of service needing
+  // no key, only the room id.
+  const daemon = new SecureChannel(ROOT, "daemon");
+  const app = new SecureChannel(ROOT, "app");
+
+  for (let i = 0; i < 5_000; i++) {
+    expect(daemon.open(app.seal({ t: "noise", i }), `invented-${i}`)).toEqual({ t: "noise", i });
+  }
+
+  // Still bounded, and still working for a real device afterwards.
+  expect(daemon.open(app.seal({ t: "real" }), "phone-a")).toEqual({ t: "real" });
+  const repeat = app.seal({ t: "again" });
+  expect(daemon.open(repeat, "phone-a")).toEqual({ t: "again" });
+  expect(daemon.open(repeat, "phone-a")).toBeUndefined();
+});
+
+test("an active device keeps its replay window while idle ones are evicted", () => {
+  // Eviction is least-recently-used, so the device actually talking is the last
+  // to lose protection — not the first.
+  const daemon = new SecureChannel(ROOT, "daemon");
+  const app = new SecureChannel(ROOT, "app");
+
+  const busy = app.seal({ t: "first" });
+  expect(daemon.open(busy, "phone-busy")).toEqual({ t: "first" });
+
+  for (let i = 0; i < 40; i++) {
+    daemon.open(app.seal({ t: "noise", i }), `other-${i}`);
+    // Keep the busy device in use, so it stays the most recent.
+    daemon.open(app.seal({ t: "keepalive", i }), "phone-busy");
+  }
+
+  // Its window survived: the original frame is still recognised as a replay.
+  expect(daemon.open(busy, "phone-busy")).toBeUndefined();
+});
+
 test("session headers survive the round trip", () => {
   // The relay orders its replay log by these, so they have to arrive intact as
   // well as being tamper-evident.

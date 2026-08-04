@@ -33,6 +33,14 @@ export type ChannelRole = "daemon" | "app";
  */
 const PROOF_SKEW_MS = 120_000;
 
+/**
+ * How many senders one channel tracks replay state for.
+ *
+ * Far above any real pairing — a person's phones and laptops — and low enough
+ * that a stream of invented device ids cannot exhaust memory.
+ */
+const MAX_TRACKED_SENDERS = 64;
+
 /** What a `hello` proof carries, once opened. */
 interface ProofBody {
   t: "proof";
@@ -51,6 +59,14 @@ export class SecureChannel {
    * the first phone's — and that phone would simply never work, silently. The
    * key is whatever the transport can say about who sent a frame; on a
    * point-to-point socket there is only one sender and the default is used.
+   *
+   * Bounded, because the key is attacker-controlled: over the relay it comes
+   * from the sender's own `deviceId`, so an unbounded map would grow one entry
+   * per made-up name until the daemon ran out of memory. Eviction is
+   * least-recently-used, which costs an attacker nothing to trigger and costs a
+   * real device nothing either — losing a window only resets replay protection
+   * for a device that has stopped sending, and every frame still needs a valid
+   * tag to be read at all.
    */
   private readonly seen = new Map<string, ReplayWindow>();
   private counter = 0;
@@ -96,10 +112,21 @@ export class SecureChannel {
     // lied about it could cause replays within one pairing, which is strictly
     // less than the disruption it can cause by simply dropping messages.
     let window = this.seen.get(from);
-    if (!window) {
+    if (window) {
+      // Re-inserting moves it to the end of the Map's iteration order, so the
+      // device evicted below is always the one idle longest.
+      this.seen.delete(from);
+    } else {
       window = new ReplayWindow();
-      this.seen.set(from, window);
     }
+    this.seen.set(from, window);
+
+    while (this.seen.size > MAX_TRACKED_SENDERS) {
+      const oldest = this.seen.keys().next().value;
+      if (oldest === undefined) break;
+      this.seen.delete(oldest);
+    }
+
     if (!window.accept((envelope as Envelope).ctr)) return undefined;
     return message;
   }
