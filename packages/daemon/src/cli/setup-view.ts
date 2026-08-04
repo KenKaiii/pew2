@@ -23,6 +23,14 @@ export interface AgentState {
   name: string;
   /** Where to get it, for the ones that are not here yet. */
   install?: string;
+  /**
+   * The executable this agent runs as.
+   *
+   * Only useful as a sign-in hint when it is the agent itself. Most manifests
+   * launch through `npx`, where this is literally "npx" and tells nobody
+   * anything.
+   */
+  command?: string;
   /** Missing required environment variables, if any. */
   missingEnv: string[];
   /** True when the command is not on PATH. */
@@ -161,7 +169,7 @@ export function agentSections(agents: AgentState[], options: RenderOptions = {})
 
   if (buckets.signin.length > 0) {
     // Not an error, and worded as the small thing it is.
-    out.push(...r.step("Just needs a sign-in", "one command each, then you are set"));
+    out.push(...r.step("Just needs a sign-in", "installed, but not logged in yet"));
     for (const agent of buckets.signin) {
       out.push(r.line(`${s.hex(PALETTE.warning, g.dot)} ${s.bold(agent.name)}`));
       out.push(r.line(`  ${s.hex(PALETTE.faint, signinHint(agent))}`));
@@ -199,9 +207,23 @@ export function agentSections(agents: AgentState[], options: RenderOptions = {})
   return out;
 }
 
-/** What to run to log this agent in. Falls back to the agent's own command. */
+/**
+ * What to tell someone whose agent is installed but not logged in.
+ *
+ * Deliberately not the install command: the agent is already here, so
+ * "npm install -g ..." does nothing and reads as though the install failed.
+ *
+ * Also deliberately not a guessed binary name. Most manifests launch through
+ * `npx`, so `command` is the string "npx", and the actual login binary varies
+ * per agent in ways this cannot know — `claude` and `goose` are on PATH here,
+ * `cline` and `qwen` are not. A confidently wrong command is worse than none.
+ *
+ * So: the agent's own message, which is the one thing that is always accurate,
+ * and a pointer to where the real instructions live.
+ */
 function signinHint(agent: AgentState): string {
-  return agent.install ? `run  ${agent.install}` : `run  ${agent.id}  once to sign in`;
+  const detail = agent.verify?.detail;
+  return detail ? firstLine(detail) : "sign in with this agent's own CLI, then run pew2 setup again";
 }
 
 /**

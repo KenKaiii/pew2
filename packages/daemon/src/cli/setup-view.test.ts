@@ -48,6 +48,8 @@ test("needing a sign-in reads as a small task, not a breakage", () => {
   const qwen = agent({
     id: "qwen-code",
     name: "Qwen Code",
+    install: "npm install -g @qwen-code/qwen-code",
+    command: "npx",
     verify: { status: "failed", detail: "Authentication required: Use Qwen Code CLI to authenticate first." },
   });
 
@@ -56,6 +58,15 @@ test("needing a sign-in reads as a small task, not a breakage", () => {
   const text = stripAnsi(agentSections([qwen], plain).join("\n"));
   expect(text).toContain("Just needs a sign-in");
   expect(text).not.toContain("✗");
+
+  // The agent's own words, not a guessed command. Most manifests launch through
+  // `npx`, so the recorded command is literally "npx", and the real login binary
+  // differs per agent - a confidently wrong instruction is worse than none.
+  expect(text).toContain("Use Qwen Code CLI to authenticate");
+  expect(text).not.toContain("npx");
+  // And never the install command: it is already installed, so that reads as
+  // though the install failed.
+  expect(text).not.toContain("npm install");
 });
 
 test("a real breakage is still called out, and only that", () => {
