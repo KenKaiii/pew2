@@ -9,11 +9,7 @@
     "ios": {
       "supportsTablet": true,
       "//": "Reverse-DNS of the GitHub org that hosts this, not a domain: `pew2.dev` is not registered, and an identifier built from a domain someone else can buy is a claim that can be contested after the app is on a store \u2014 at which point it cannot be changed without shipping a new app. Fork this and you must change it: an identifier is unique per store, and a fork keeping this one cannot be submitted alongside the original.",
-      "bundleIdentifier": "io.github.kenkaiii.pew2",
-      "infoPlist": {
-        "//": "True because pew2 ships its own cryptography: @noble/ciphers implements XChaCha20-Poly1305 for the end-to-end encryption between phone and daemon. The exemption this key asks about covers encryption provided by the operating system \u2014 HTTPS through URLSession, Keychain, CryptoKit \u2014 and not a bundled crypto engine. This was `false` while the app only spoke TLS, and leaving it there after adding E2EE would be a false declaration on a binding export-control statement, not merely a wrong build setting. App Store Connect will now ask the export-compliance questionnaire; standard published algorithms used this way generally fall under the mass-market exemption, but that determination and the annual self-classification report are yours to make.",
-        "ITSAppUsesNonExemptEncryption": true
-      }
+      "bundleIdentifier": "io.github.kenkaiii.pew2"
     },
     "android": {
       "package": "io.github.kenkaiii.pew2",
