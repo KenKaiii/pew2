@@ -45,10 +45,18 @@ export function wireMismatch(peer: unknown): string | undefined {
 export const Role = z.enum(["daemon", "app"]);
 export type Role = z.output<typeof Role>;
 
-/** Sent by both sides immediately after the socket opens. */
+/**
+ * Sent by both sides immediately after the socket opens.
+ *
+ * `wire` is *not* pinned to a literal here, and that is deliberate. Pinning it
+ * would make a v1 `hello` fail schema validation and be discarded as malformed —
+ * so the one client that most needs to be told "update the app" is the one that
+ * could never receive the message. It is accepted as any integer and checked by
+ * `wireMismatch`, which can then say something useful.
+ */
 export const Hello = z.object({
   t: z.literal("hello"),
-  wire: z.literal(WIRE_VERSION),
+  wire: z.number().int(),
   role: Role,
   deviceId: z.string().min(1),
   /** Highest seq the client already has, per session. Enables gap-free resume. */

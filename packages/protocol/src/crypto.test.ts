@@ -12,6 +12,7 @@ import {
   NONCE_BYTES,
   ROOT_KEY_BYTES,
   ReplayWindow,
+  deriveKeyFromSecret,
   directionKey,
   fromBase64Url,
   fromHex,
@@ -222,6 +223,22 @@ test("generated root keys are the right size and not constant", () => {
   const second = randomRootKey();
   expect(first).toHaveLength(ROOT_KEY_BYTES);
   expect(toHex(first)).not.toBe(toHex(second));
+});
+
+test("a key derived from a secret is stable, full-size, and not the secret", () => {
+  // `PEW2_TOKEN` runs through this, so tests and containers exercise the same
+  // encrypted protocol as production rather than a plaintext side-path that
+  // would rot unnoticed.
+  const first = deriveKeyFromSecret("fixed-test-secret");
+  const second = deriveKeyFromSecret("fixed-test-secret");
+
+  expect(toHex(first)).toBe(toHex(second));
+  expect(first).toHaveLength(ROOT_KEY_BYTES);
+  expect(deriveKeyFromSecret("other")).not.toEqual(first);
+  // Stretched, not echoed: the secret must not appear in the key it produces.
+  expect(toHex(first)).not.toContain(toHex(new TextEncoder().encode("fixed-test-secret")));
+  // Even an empty secret yields a full-size key rather than something short.
+  expect(deriveKeyFromSecret("")).toHaveLength(ROOT_KEY_BYTES);
 });
 
 test("the replay window accepts forward progress and rejects repeats", () => {
