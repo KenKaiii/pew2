@@ -7,7 +7,8 @@
  * daemon: the socket opens, and then nothing ever appears.
  */
 import { expect, test } from "bun:test";
-import { ClientMessage, WIRE_VERSION, wireMismatch } from "./wire.js";
+import { directionKey, isEnvelope, seal } from "./crypto.js";
+import { ClientMessage, ServerMessage, WIRE_VERSION, wireMismatch } from "./wire.js";
 
 test("an outdated hello still parses, so its sender can be told why", () => {
   // The subtle one. Pinning `wire` to a literal in the schema would make this
@@ -76,4 +77,20 @@ test("an envelope without a counter is refused", () => {
   expect(ClientMessage.safeParse({ t: "e", n: "AA", ct: "AA" }).success).toBe(false);
   expect(ClientMessage.safeParse({ t: "e", ctr: -1, n: "AA", ct: "AA" }).success).toBe(false);
   expect(ClientMessage.safeParse({ t: "e", ctr: 1.5, n: "AA", ct: "AA" }).success).toBe(false);
+});
+
+test("what seal produces passes both validators, in both directions", () => {
+  // The schema here and `isEnvelope` in crypto.ts are independent descriptions
+  // of the same shape, and a real frame has to satisfy both — the schema on
+  // arrival, `isEnvelope` before decryption. If they drift, valid traffic is
+  // dropped as malformed, which reads as a flaky connection rather than a bug.
+  const key = directionKey(new Uint8Array(32).fill(3), "daemon-to-app");
+
+  for (const header of [{ ctr: 0 }, { sid: "s1", seq: 7, ctr: 42 }]) {
+    const sealed = seal(key, { t: "session.event" }, header);
+    expect(isEnvelope(sealed)).toBe(true);
+    expect(ClientMessage.safeParse(sealed).success).toBe(true);
+    // Both unions carry it: envelopes travel in both directions.
+    expect(ServerMessage.safeParse(sealed).success).toBe(true);
+  }
 });
