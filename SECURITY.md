@@ -38,9 +38,13 @@ Within those limits, the parts that can be checked are:
   room, so an arbitrary string cannot allocate one.
 - A device is refused unless a daemon is actually connected, which is what makes
   rotation take effect immediately rather than eventually.
-- Directory browsing and image serving resolve symlinks *before* checking
-  containment, and refuse anything outside `$HOME` (or `PEW2_BROWSE_ROOTS`).
-  A refusal never says why, so it cannot be used to probe what exists.
+- Directory browsing refuses anything outside `$HOME`, extended only by
+  `PEW2_BROWSE_ROOTS`.
+- Image serving is narrower still: the session's own working directory and the
+  temp directory, extended only by `PEW2_IMAGE_ROOTS`.
+- Both resolve symlinks *before* checking containment, so a link inside an
+  allowed root pointing outside it is refused rather than followed. A refusal
+  never says why, so it cannot be used to probe what exists.
 - Relay rooms are capped at 16 sockets.
 
 ### Out of scope
