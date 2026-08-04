@@ -7,7 +7,13 @@
     "strict": true,
     "skipLibCheck": true,
     "noEmit": true,
-    "types": ["@cloudflare/workers-types"]
+    // Workers types are what the Worker itself must compile against, and are
+    // why this project is separate from the root one. Bun's are here only so
+    // the access-control tests beside `admission.ts` are typechecked rather
+    // than skipped — worth the small risk that a Node-ism in the Worker now
+    // typechecks, since `wrangler deploy` builds against the real runtime and
+    // would still reject it.
+    "types": ["@cloudflare/workers-types", "bun"]
   },
   "include": ["src/**/*.ts"]
 }

@@ -14,6 +14,7 @@
  * blob; the relay only orders it and hands it on.
  */
 import { DurableObject } from "cloudflare:workers";
+import { admit, isPairingToken, MIN_PAIRING_TOKEN_LENGTH } from "./admission.js";
 
 interface Env {
   PAIRING: DurableObjectNamespace<PairingRoom>;
@@ -24,33 +25,36 @@ interface Attachment {
   deviceId: string;
 }
 
-/**
- * The pairing token is the room key: anyone presenting it joins the room and
- * sees its traffic. Enforce enough entropy that a token cannot be guessed or
- * typed by hand. Generate with `crypto.randomUUID()` twice, or 32 random hex
- * chars — never a human-chosen string.
- *
- * This is a floor, not authentication. Before shipping to real users this must
- * be paired with end-to-end encryption, so that a leaked token exposes only
- * ciphertext the relay itself cannot read.
- */
-const MIN_PAIRING_TOKEN_LENGTH = 32;
-
 export class PairingRoom extends DurableObject {
-  constructor(ctx: DurableObjectState, env: Env) {
-    super(ctx, env);
-    // Keep constructor work minimal: it runs again on every wake from hibernation.
-    ctx.blockConcurrencyWhile(async () => {
-      this.ctx.storage.sql.exec(`
-        CREATE TABLE IF NOT EXISTS events (
-          session_id TEXT NOT NULL,
-          seq        INTEGER NOT NULL,
-          at         INTEGER NOT NULL,
-          payload    TEXT NOT NULL,
-          PRIMARY KEY (session_id, seq)
-        );
-      `);
-    });
+  /**
+   * Created on first write rather than in the constructor.
+   *
+   * The constructor runs for *every* room the runtime materialises, including
+   * one named by a token nobody has ever paired with — so creating the table
+   * there meant any string of 32 hex characters left durable storage behind. A
+   * room that never carries an event now leaves nothing at all.
+   */
+  private schemaReady = false;
+
+  private ensureSchema() {
+    if (this.schemaReady) return;
+    this.ctx.storage.sql.exec(`
+      CREATE TABLE IF NOT EXISTS events (
+        session_id TEXT NOT NULL,
+        seq        INTEGER NOT NULL,
+        at         INTEGER NOT NULL,
+        payload    TEXT NOT NULL,
+        PRIMARY KEY (session_id, seq)
+      );
+    `);
+    this.schemaReady = true;
+  }
+
+  /** Sockets currently attached in the given role. */
+  private peers(role: Attachment["role"]): WebSocket[] {
+    return this.ctx
+      .getWebSockets()
+      .filter((peer) => (peer.deserializeAttachment() as Attachment | null)?.role === role);
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -58,17 +62,34 @@ export class PairingRoom extends DurableObject {
     const role = url.searchParams.get("role");
     const deviceId = url.searchParams.get("deviceId");
 
-    if (role !== "daemon" && role !== "app") {
-      return new Response("role must be 'daemon' or 'app'", { status: 400 });
+    // The rules themselves live in ./admission.ts, where they can be tested
+    // without a Workers runtime.
+    const decision = admit({
+      role,
+      deviceId,
+      daemons: this.peers("daemon").length,
+      total: this.ctx.getWebSockets().length,
+    });
+    if (!decision.ok) {
+      return new Response(decision.reason, { status: decision.status });
     }
-    if (!deviceId) return new Response("deviceId required", { status: 400 });
+
+    if (decision.evictDaemons) {
+      for (const stale of this.peers("daemon")) {
+        try {
+          stale.close(1012, "replaced by a newer daemon connection");
+        } catch {
+          // Already gone; the point was only to not leave it attached.
+        }
+      }
+    }
 
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair) as [WebSocket, WebSocket];
 
     // acceptWebSocket (not server.accept) is what permits hibernation.
     this.ctx.acceptWebSocket(server);
-    server.serializeAttachment({ role, deviceId } satisfies Attachment);
+    server.serializeAttachment({ role, deviceId } as Attachment);
 
     server.send(JSON.stringify({ t: "ready", wire: 1, now: Date.now() }));
 
@@ -91,6 +112,7 @@ export class PairingRoom extends DurableObject {
 
     // Persist session events so a client that reconnects can be caught up.
     if (message.t === "session.event" && message.sessionId && typeof message.seq === "number") {
+      this.ensureSchema();
       this.ctx.storage.sql.exec(
         `INSERT OR IGNORE INTO events (session_id, seq, at, payload) VALUES (?, ?, ?, ?)`,
         message.sessionId,
@@ -102,6 +124,9 @@ export class PairingRoom extends DurableObject {
 
     // A client announcing its cursors gets everything it missed, in order.
     if (message.t === "hello" && message.cursors) {
+      // A room that has never stored an event has no table to read, and creating
+      // it here keeps that query from throwing on a first connection.
+      this.ensureSchema();
       for (const [sessionId, cursor] of Object.entries(message.cursors)) {
         const rows = this.ctx.storage.sql
           .exec<{ payload: string }>(
@@ -127,10 +152,8 @@ export class PairingRoom extends DurableObject {
     }
 
     // Otherwise relay to the opposite role. Daemons talk to apps, apps to daemons.
-    const target = from.role === "daemon" ? "app" : "daemon";
-    for (const peer of this.ctx.getWebSockets()) {
-      const attachment = peer.deserializeAttachment() as Attachment | null;
-      if (attachment?.role === target) peer.send(raw);
+    for (const peer of this.peers(from.role === "daemon" ? "app" : "daemon")) {
+      peer.send(raw);
     }
   }
 
@@ -154,10 +177,12 @@ export default {
       }
       // The pairing token maps phone and desktop onto the same Durable Object.
       const token = url.searchParams.get("pairing");
-      if (!token) return new Response("pairing token required", { status: 400 });
-      if (token.length < MIN_PAIRING_TOKEN_LENGTH) {
+      // Checked before the token names a Durable Object, because naming one is
+      // what brings it into existence — so a value that could never have come
+      // from `pew2` must not get that far.
+      if (!isPairingToken(token)) {
         return new Response(
-          `pairing token must be at least ${MIN_PAIRING_TOKEN_LENGTH} characters`,
+          `pairing token must be at least ${MIN_PAIRING_TOKEN_LENGTH} hex characters`,
           { status: 400 },
         );
       }

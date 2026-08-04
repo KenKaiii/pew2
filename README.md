@@ -150,6 +150,13 @@ so the whole pipeline is testable anywhere.
 
 1. **No E2EE.** The token is a bearer secret and the relay sees plaintext. Run
    your own relay. Not safe for real users yet.
+
+   The relay does enforce what it can without being able to authenticate anyone:
+   a token must be hex and at least 32 characters before it names a room, a
+   device is refused unless a daemon is actually connected (so `pew2 pair
+   --rotate` takes effect immediately), the newest daemon connection replaces
+   any older one, and a room is capped at 16 sockets. None of that helps if the
+   token itself leaks — rotate it.
 2. **`pty` transport is reserved but unimplemented.** `verify` skips it.
 
 ## Licence

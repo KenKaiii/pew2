@@ -9,7 +9,7 @@
     "bun": ">=1.2.0"
   },
   "scripts": {
-    "test": "bun test packages/daemon packages/app",
+    "test": "bun test packages/daemon packages/app packages/relay",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p packages/relay/tsconfig.json && (cd packages/app && tsc --noEmit)",
     "relay:dev": "cd packages/relay && wrangler dev --port 8799",
     "relay:check": "bun run packages/relay/src/relay-check.mjs",
