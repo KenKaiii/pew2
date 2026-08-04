@@ -97,51 +97,6 @@ npx eas-cli@latest build --profile simulator --platform ios   # no signing, no a
 
 Builds run on Expo's machines, so a local Xcode/NDK toolchain is not required.
 
-### TestFlight
-
-The `production` profile builds a store-signed archive rather than one that
-installs directly on a registered device:
-
-```bash
-npx eas-cli@latest build  --profile production --platform ios
-npx eas-cli@latest submit --profile production --platform ios
-```
-
-Three things about it are deliberate:
-
-- **`appVersionSource: "remote"`.** EAS holds the build number and increments it
-  per build, so `ios.buildNumber` is absent from `app.json` rather than being a
-  second source of truth. A duplicate build number is the most common reason a
-  first TestFlight upload is rejected.
-- **No `ITSAppUsesNonExemptEncryption` in `app.json`, deliberately.** pew2 ships
-  its own cryptography — XChaCha20-Poly1305, for the end-to-end encryption — so
-  it is *not* covered by the exemption that key asks about, which is for
-  encryption provided by the operating system. `false` would therefore be a false
-  statement on a binding export declaration.
-
-  But `true` does not work either: Apple then requires
-  `ITSEncryptionExportComplianceCode` beside it, and that code only exists after
-  it has approved export documentation for the app. Declaring `true` without one
-  fails upload with `ITMS-90592 Invalid Export Compliance Code`.
-
-  Omitting the key is the honest first-submission path: App Store Connect asks
-  the export-compliance questionnaire on each upload, and you answer it there.
-  Once Apple issues a compliance code, add both keys and the questionnaire stops.
-- **No Apple credentials in `eas.json`.** This repository is public, and an Apple
-  ID or App Store Connect app id in it is both an account detail nobody should
-  inherit and one more thing every fork must remember to change. `eas submit`
-  prompts for what it needs and caches it under `~/.eas`.
-
-  The cost of that choice is that **`submit` must be run interactively** — with
-  `--non-interactive` it stops on `Set ascAppId in the submit profile`, because
-  there is nowhere for it to have learned your app's id. Run it without that
-  flag and it signs in, finds or creates the App Store Connect record, and
-  remembers the id for next time.
-
-A reviewer cannot pair with a machine they do not have, so a first submission
-needs either a demo video or a daemon left running for them. Expect to explain
-what the app connects to.
-
 `eas init` comes first because no one's Expo account is committed here. Put the
 account and project id it gives you in `packages/app/eas-project.json`, which is
 gitignored:
