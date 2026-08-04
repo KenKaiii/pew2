@@ -131,7 +131,9 @@ async function defaultProbe(url: string): Promise<boolean> {
 export async function doctor(options: DoctorOptions = {}): Promise<DoctorReport> {
   const env = options.env ?? process.env;
   const dirs = options.searchDirs ?? providerDirs(env);
-  const { providers, errors } = await loadProviders(dirs, env);
+  // Built-in agents only when the caller did not name directories of its own.
+  const bundled = options.searchDirs === undefined;
+  const { providers, errors } = await loadProviders(dirs, env, { bundled });
   const problems: Problem[] = [];
 
   for (const error of errors) {

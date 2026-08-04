@@ -10,11 +10,13 @@ import { join, resolve, isAbsolute, delimiter, dirname } from "node:path";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
+import { BUNDLED_MANIFESTS } from "./bundled.js";
 import {
   ProviderManifest,
   formatManifestError,
   resolveCommand,
   type ProviderManifest as Manifest,
+  type ProviderManifestInput,
 } from "@pew2/protocol";
 
 export interface LoadedProvider {
@@ -66,11 +68,16 @@ export interface LoadResult {
   errors: { source: string; message: string }[];
 }
 
-/** Manifests bundled with the checkout. Independent of the working directory. */
+/**
+ * Where the bundled manifests live in a checkout.
+ *
+ * Still resolved from this file rather than the working directory, and still
+ * used by tooling that wants the real folder — `providers validate`, the
+ * registry sync. It is deliberately *not* how the daemon loads them any more:
+ * inside a compiled binary this path points into an embedded filesystem, lands
+ * on `/providers`, and finds nothing. See `bundled.ts`.
+ */
 export function defaultProvidersDir(): string {
-  // Resolved from this file, not the working directory. Once `pew2` is linked
-  // onto PATH it runs from wherever the user happens to be, and a cwd-relative
-  // path finds nothing there. Walks up from src/providers/ to the repo root.
   return resolve(fileURLToPath(new URL("../../../..", import.meta.url)), "providers");
 }
 
@@ -94,6 +101,66 @@ export function userProvidersDir(env: NodeJS.ProcessEnv = process.env): string {
  */
 export function providerDirs(env: NodeJS.ProcessEnv = process.env): string[] {
   return [userProvidersDir(env), defaultProvidersDir()];
+}
+
+/**
+ * Turn one validated manifest into a loaded provider.
+ *
+ * Shared by both sources so a bundled agent and a user-written one resolve
+ * identically. Two copies of this drifting would mean an agent behaving one way
+ * in development and another once shipped.
+ */
+function addManifest(
+  manifest: ProviderManifestInput,
+  source: string,
+  env: NodeJS.ProcessEnv,
+  seen: Map<string, string>,
+  providers: LoadedProvider[],
+): void {
+  const parsed = ProviderManifest.parse(manifest);
+  if (seen.has(parsed.id)) return;
+  seen.set(parsed.id, source);
+
+  const { command, args: rawArgs } = resolveCommand(parsed);
+  const args =
+    parsed.distribution.type === "command"
+      ? rawArgs.map((arg) => (/^\.{1,2}\//.test(arg) ? resolve(dirname(source), arg) : arg))
+      : rawArgs;
+  const missingEnv = parsed.pew.env
+    .filter((v) => v.required && !env[v.name])
+    .map((v) => v.name);
+
+  providers.push({
+    manifest: parsed,
+    source,
+    command,
+    args,
+    missingEnv,
+    commandMissing: !canResolveCommand(command, env),
+  });
+}
+
+/**
+ * The manifests compiled into this binary.
+ *
+ * Never throws: these were validated by `providers:validate` before release, so
+ * a failure here is a build problem rather than something a user can fix, and
+ * taking the daemon down would hide every working agent alongside the broken one.
+ */
+function loadBundled(
+  env: NodeJS.ProcessEnv,
+  seen: Map<string, string>,
+  providers: LoadedProvider[],
+  errors: LoadResult["errors"],
+): void {
+  for (const manifest of BUNDLED_MANIFESTS) {
+    const id = (manifest as { id?: string }).id ?? "unknown";
+    try {
+      addManifest(manifest, `bundled:${id}`, env, seen, providers);
+    } catch (error) {
+      errors.push({ source: `bundled:${id}`, message: (error as Error).message });
+    }
+  }
 }
 
 async function loadOneDir(
@@ -176,15 +243,30 @@ async function loadOneDir(
 }
 
 export async function loadProviders(
-  dirs: string | string[] = providerDirs(),
+  dirs?: string | string[],
   env: NodeJS.ProcessEnv = process.env,
+  options: { bundled?: boolean } = {},
 ): Promise<LoadResult> {
+  // Naming directories means "these, and nothing else" — that is what makes a
+  // test that points at a sandbox actually isolated. Production paths that want
+  // the built-in agents as well ask for them explicitly.
+  const searchDirs = dirs ?? providerDirs();
+  const includeBundled = options.bundled ?? dirs === undefined;
   const providers: LoadedProvider[] = [];
   const errors: LoadResult["errors"] = [];
   const seen = new Map<string, string>();
 
-  for (const dir of typeof dirs === "string" ? [dirs] : dirs) {
+  // User manifests first, so one they wrote shadows a bundled agent of the same
+  // id rather than colliding with it.
+  for (const dir of typeof searchDirs === "string" ? [searchDirs] : searchDirs) {
     await loadOneDir(dir, env, seen, providers, errors);
+  }
+
+  // Then the built-in set, from the array compiled into this binary. Callers
+  // that are inspecting a specific directory — `providers validate`, the tests —
+  // pass `bundled: false` and get only what they asked for.
+  if (includeBundled) {
+    loadBundled(env, seen, providers, errors);
   }
 
   // Stable regardless of which directory a manifest came from, so the app's

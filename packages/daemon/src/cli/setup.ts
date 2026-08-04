@@ -52,13 +52,17 @@ export async function setup(options: SetupOptions = {}): Promise<SetupResult> {
   const env = options.env ?? process.env;
   const progress = options.onProgress ?? (() => {});
   const searchDirs = options.searchDirs ?? providerDirs(env);
+  // The built-in agents come from the array compiled into this binary, and are
+  // included only when the caller did not name its own directories — a test
+  // pointing at a sandbox means that sandbox and nothing else.
+  const bundled = options.searchDirs === undefined;
 
   progress("detect");
   const detected = await detectProviders({ env, searchDirs, targetDir: searchDirs[0] });
 
   let verify: VerifyReport[] = [];
   if (options.verify !== false) {
-    const { providers } = await loadProviders(searchDirs, env);
+    const { providers } = await loadProviders(searchDirs, env, { bundled });
     // Only verify what could possibly run. Spawning a provider whose command is
     // missing produces a failure that says nothing `doctor` has not already said
     // more precisely.

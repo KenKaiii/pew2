@@ -377,11 +377,13 @@ export async function detectProviders(options: DetectOptions = {}): Promise<Dete
   const env = options.env ?? process.env;
   const targetDir = options.targetDir ?? userProvidersDir(env);
   const searchDirs = options.searchDirs ?? providerDirs(env);
+  // Built-in agents only when the caller did not name directories of its own.
+  const bundled = options.searchDirs === undefined;
   const catalog = options.catalog ?? CATALOG;
 
   // Ids that already resolve, from any directory. Detection must never write a
   // second manifest for a provider the user has already configured by hand.
-  const { providers } = await loadProviders(searchDirs, env);
+  const { providers } = await loadProviders(searchDirs, env, { bundled });
   const configured = new Map(providers.map((p) => [p.manifest.id, p.source]));
 
   const detected: DetectedProvider[] = [];
