@@ -3,7 +3,7 @@
   "id": "qwen-code",
   "name": "Qwen Code",
   "version": "1.0.0",
-  "description": "Alibaba's Qwen coding assistant, in ACP mode.",
+  "description": "Alibaba's Qwen coding assistant, in ACP mode. Authenticate first with `qwen` on your computer \u2014 an unauthenticated install answers the handshake and then fails every prompt with 'Authentication required'.",
   "distribution": {
     "type": "npx",
     "package": "@qwen-code/qwen-code",

@@ -273,7 +273,12 @@ export const CATALOG: CatalogEntry[] = [
       id: "qwen-code",
       name: "Qwen Code",
       version: "1.0.0",
-      description: "Alibaba's Qwen coding assistant, in ACP mode.",
+      // Qwen authenticates through its own CLI login, not an environment
+      // variable, so there is nothing to gate availability on — an
+      // unauthenticated install looks perfectly healthy right up until the
+      // first prompt. Saying so here is the only warning a user gets.
+      description:
+        "Alibaba's Qwen coding assistant, in ACP mode. Authenticate first with `qwen` on your computer — an unauthenticated install answers the handshake and then fails every prompt with 'Authentication required'.",
       // `--experimental-skills` comes from the registry's own launch line. Qwen
       // answers the handshake without it, so dropping it looks harmless right up
       // until a skill-dependent feature silently does nothing.
