@@ -172,6 +172,8 @@ so the whole pipeline is testable anywhere.
    token itself leaks — rotate it.
 2. **`pty` transport is reserved but unimplemented.** `verify` skips it.
 
+The full threat model, and how to report something, are in [SECURITY.md](SECURITY.md).
+
 ## Licence
 
 MIT
