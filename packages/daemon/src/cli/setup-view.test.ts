@@ -43,8 +43,8 @@ test("an agent you have not installed is not a failure", () => {
 });
 
 test("needing a sign-in reads as a small task, not a breakage", () => {
-  // "Run qwen to log in" is thirty seconds of work. Showing it beside a real
-  // crash makes both look equally hopeless.
+  // Logging in is thirty seconds of work. Showing it beside a real crash makes
+  // both look equally hopeless, which is what the old flat list did.
   const qwen = agent({
     id: "qwen-code",
     name: "Qwen Code",
@@ -133,11 +133,24 @@ test("the closing line says what to do next, never a problem count", () => {
 
   expect(stripAnsi(outroFor(ready, true, plain).join(" "))).toContain("pew2 pair");
 
-  // Not ready, but something works: still tells them what they have.
-  const mixed = [...ready, agent({ id: "b", name: "Bravo", verify: { status: "failed", detail: "log in" } })];
+  // Not ready, but something works: lead with what they have, not what they do
+  // not. Counting the good ones is the difference between "you are set up" and
+  // "you have one problem".
+  const mixed = [
+    ...ready,
+    agent({ id: "b", name: "Bravo", verify: { status: "failed", detail: "Please log in first" } }),
+  ];
   const partial = stripAnsi(outroFor(mixed, false, plain).join(" "));
   expect(partial).toContain("1 agent ready");
   expect(partial).not.toMatch(/\d+ (problems?|errors?|failures?)/i);
+
+  // Same when the blocker is a genuine breakage rather than a sign-in, since
+  // both routes reach this line and only one was covered before.
+  const withBroken = [
+    ...ready,
+    agent({ id: "c", name: "Charlie", verify: { status: "failed", detail: "Internal error" } }),
+  ];
+  expect(stripAnsi(outroFor(withBroken, false, plain).join(" "))).toContain("1 agent ready");
 
   // Nothing at all: the one case where the next step is to install something.
   const none = stripAnsi(outroFor([agent({ notInstalled: true })], false, plain).join(" "));
