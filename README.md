@@ -60,11 +60,6 @@ curl -fsSL https://raw.githubusercontent.com/KenKaiii/pew2/main/install.sh | sh
 irm https://raw.githubusercontent.com/KenKaiii/pew2/main/install.ps1 | iex
 ```
 
-> On macOS, `pew2 setup` also sets the daemon to start itself after a reboot.
-> On Windows and Linux that part is not built yet, so you start it yourself
-> (`pew2 service install` will tell you so rather than pretend). Everything else
-> is identical.
-
 Then:
 
 ```bash
@@ -77,6 +72,10 @@ app. Done.
 
 You do not need Node, Bun, Docker, a GitHub account or a copy of this repo. It is
 one file that runs on its own.
+
+On macOS it also sets itself to start again after a reboot. On Windows and Linux
+that part is not built yet, so you start it yourself after restarting. Everything
+else is identical.
 
 > Want to read the script before you run it? Sensible.
 > [install.sh](install.sh) and [install.ps1](install.ps1) are short on purpose.
@@ -280,7 +279,9 @@ Being straight with you:
 1. **No forward secrecy, no per-device revocation.** One key lasts the life of a
    pairing, so a key leaked tomorrow decrypts traffic captured today, and
    removing one device means re-pairing all of them.
-2. **`pty` transport is reserved but unimplemented.** `verify` skips it.
+2. **Autostart is macOS only.** On Windows and Linux the daemon does not come
+   back by itself after a reboot yet.
+3. **`pty` transport is reserved but unimplemented.** `verify` skips it.
 
 ---
 
