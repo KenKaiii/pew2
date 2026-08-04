@@ -143,14 +143,29 @@ test("an active device keeps its replay window while idle ones are evicted", () 
   const busy = app.seal({ t: "first" });
   expect(daemon.open(busy, "phone-busy")).toEqual({ t: "first" });
 
-  for (let i = 0; i < 40; i++) {
-    daemon.open(app.seal({ t: "noise", i }), `other-${i}`);
+  // Comfortably past the 64-sender cap, or nothing is ever evicted and this
+  // test passes with the eviction logic deleted.
+  let firstOfFlood: ReturnType<typeof app.seal> | undefined;
+  for (let i = 0; i < 500; i++) {
+    const frame = app.seal({ t: "noise", i });
+    if (i === 0) firstOfFlood = frame;
+    daemon.open(frame, `other-${i}`);
     // Keep the busy device in use, so it stays the most recent.
     daemon.open(app.seal({ t: "keepalive", i }), "phone-busy");
   }
 
   // Its window survived: the original frame is still recognised as a replay.
   expect(daemon.open(busy, "phone-busy")).toBeUndefined();
+
+  // And an idle one did not. The very first frame of the flood is replayed here:
+  // with its window evicted it is accepted a second time, which is exactly the
+  // trade being made — the alternative is unbounded memory — and it grants
+  // nothing on its own, because every frame still needs a valid tag.
+  //
+  // Replaying the *same* frame is what makes this discriminating. A freshly
+  // sealed one carries a higher counter and would be accepted whether or not
+  // the window still existed.
+  expect(daemon.open(firstOfFlood, "other-0")).toEqual({ t: "noise", i: 0 });
 });
 
 test("session headers survive the round trip", () => {
