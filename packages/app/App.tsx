@@ -46,6 +46,7 @@ import { ChatThread, type ChatThreadRef } from "./src/ui/ChatThread";
 import { ImageResolverProvider } from "./src/ui/ChatImage";
 import { CommandSheet } from "./src/ui/CommandSheet";
 import { NewChatSheet } from "./src/ui/NewChatSheet";
+import { ErrorBoundary } from "./src/ui/ErrorBoundary";
 import { AttachmentSheet, type AttachmentSource } from "./src/ui/AttachmentSheet";
 import { addAttachments, MAX_ATTACHMENTS, type PendingAttachment } from "./src/attachments";
 import { pickFiles, pickPhotos, takePhoto } from "./src/ui/attachmentPicker";
@@ -92,14 +93,20 @@ export default function App() {
   }
 
   return (
-    // Every keyboard-driven element in this app moves on the keyboard's own
-    // frame-by-frame position rather than a JS animation started alongside it.
-    // Coordinating two animation systems is what made the thread land twice.
-    <KeyboardProvider>
-      <SafeAreaProvider>
-        <Root />
-      </SafeAreaProvider>
-    </KeyboardProvider>
+    // Outermost, so it catches a throw from anything below including the
+    // providers themselves. Without it React unmounts the whole tree and the
+    // app becomes a blank rectangle — no message, and nothing a tester on a
+    // TestFlight build can put in a report.
+    <ErrorBoundary>
+      {/* Every keyboard-driven element in this app moves on the keyboard's own
+          frame-by-frame position rather than a JS animation started alongside
+          it. Coordinating two animation systems made the thread land twice. */}
+      <KeyboardProvider>
+        <SafeAreaProvider>
+          <Root />
+        </SafeAreaProvider>
+      </KeyboardProvider>
+    </ErrorBoundary>
   );
 }
 
