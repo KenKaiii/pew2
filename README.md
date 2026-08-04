@@ -86,10 +86,13 @@ change anything, rebuild, and it is on your phone.
 
 ```bash
 cd packages/app
-npx eas init                                           # once, links YOUR Expo account
-npx eas build --profile apk       --platform android   # APK, install it, done
-npx eas build --profile device    --platform ios       # signed for your own device
-npx eas build --profile simulator --platform ios       # no signing, no account
+
+# The package is `eas-cli`; a bare `npx eas` resolves to an unrelated package
+# with no executable and fails with "could not determine executable to run".
+npx eas-cli@latest init                                       # once, links YOUR Expo account
+npx eas-cli@latest build --profile apk --platform android     # APK, install it, done
+npx eas-cli@latest build --profile device --platform ios      # signed for your own device
+npx eas-cli@latest build --profile simulator --platform ios   # no signing, no account
 ```
 
 Builds run on Expo's machines, so a local Xcode/NDK toolchain is not required.
@@ -100,8 +103,8 @@ The `production` profile builds a store-signed archive rather than one that
 installs directly on a registered device:
 
 ```bash
-npx eas build  --profile production --platform ios
-npx eas submit --profile production --platform ios
+npx eas-cli@latest build  --profile production --platform ios
+npx eas-cli@latest submit --profile production --platform ios
 ```
 
 Three things about it are deliberate:
@@ -163,7 +166,7 @@ own — none of which are inherited:
    the original's cannot be submitted alongside it.
 2. **A relay.** `npm run relay:deploy`, then `pew2 relay wss://<your-worker>`.
    The URL is never committed; without this a fork is same-Wi-Fi only.
-3. **An EAS project**, if you build with it: `npx eas init`.
+3. **An EAS project**, if you build with it: `npx eas-cli@latest init`.
 4. **A pairing token**, minted per machine on first run. Yours never leaves your
    own `~/.pew2`.
 
