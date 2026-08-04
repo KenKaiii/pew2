@@ -77,6 +77,56 @@ test("a too-short stored token is replaced rather than trusted", async () => {
   expect(pairing.token.length).toBeGreaterThanOrEqual(32);
 });
 
+test("a pairing stored without a key is replaced rather than reused", async () => {
+  // Written before encryption existed. Reusing it would leave a daemon that
+  // still accepts unencrypted connections \u2014 the silent downgrade this change
+  // exists to remove \u2014 so it is treated as no pairing at all.
+  const { env } = await sandbox();
+  await mkdir(join(env.PEW2_HOME!), { recursive: true });
+  const legacy = "a".repeat(48);
+  await writeFile(pairingPath(env), JSON.stringify({ token: legacy }));
+
+  const pairing = await loadPairing(env);
+
+  expect(pairing.token).not.toBe(legacy);
+  expect(pairing.key).toMatch(/^[0-9a-f]{64}$/);
+});
+
+test("an explicit PEW2_TOKEN still yields a usable, stable pairing", async () => {
+  // Tests and containers run this way. Deriving a key rather than skipping
+  // encryption keeps those runs on the same protocol as production, so the
+  // encrypted path is the one actually exercised.
+  const env = { PEW2_TOKEN: "fixed-test-secret" } as NodeJS.ProcessEnv;
+
+  const first = await loadPairing(env);
+  const second = await loadPairing(env);
+
+  expect(first.key).toMatch(/^[0-9a-f]{64}$/);
+  expect(second.token).toBe(first.token);
+  expect(second.key).toBe(first.key);
+  // Derived, not echoed: the room id must not be the raw secret.
+  expect(first.token).not.toBe("fixed-test-secret");
+});
+
+test("the key travels in the fragment, which is never sent to a server", async () => {
+  // The whole reason a relay can route this connection without being able to
+  // read it: a URL fragment is not transmitted in an HTTP request.
+  const { token, key } = generatePairing();
+
+  const relayUrl = pairingUrl({ token, key, port: 8787, relay: "wss://relay.example.com" });
+  const parsed = new URL(relayUrl);
+
+  expect(parsed.searchParams.get("pairing")).toBe(token);
+  expect(parsed.hash).toMatch(/^#k=[A-Za-z0-9_-]+$/);
+  // Everything the relay actually receives \u2014 path and query \u2014 must be free of it.
+  expect(`${parsed.pathname}${parsed.search}`).not.toContain(parsed.hash.slice(3));
+
+  // Same shape on the LAN, so the app needs no second code path.
+  expect(pairingUrl({ token, key, port: 8787, host: "192.168.1.24" })).toContain("#k=");
+  // And omitted entirely when there is no key to carry.
+  expect(pairingUrl({ token, port: 8787, host: "192.168.1.24" })).not.toContain("#");
+});
+
 test("rotating invalidates the previous token", async () => {
   const { env } = await sandbox();
 

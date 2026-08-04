@@ -147,13 +147,23 @@ export interface Envelope {
 /**
  * The bytes bound into the AEAD alongside the ciphertext.
  *
- * Canonical and unambiguous: fields are separated by a character that cannot
- * appear in a session id, so no two different headers can serialise identically.
- * If they could, an attacker could move a frame between sessions while keeping
- * the tag valid.
+ * Length-prefixed, not delimiter-separated.
+ *
+ * A separator only works if it cannot occur inside a field, and session ids come
+ * from the agents — this code does not get to promise what is in them. Worse, a
+ * plain `sid ?? ""` makes an absent sid and an empty one encode identically, so a
+ * connection-level frame could be re-presented as belonging to session `""` with
+ * its tag still valid.
+ *
+ * Prefixing each field with its byte length removes both problems: every header
+ * has exactly one encoding, whatever the fields contain. `-1` marks absent,
+ * which no real length can collide with.
  */
 function associatedData(envelope: Pick<Envelope, "sid" | "seq" | "ctr">): Uint8Array {
-  return utf8(`pew2/v2\n${envelope.sid ?? ""}\n${envelope.seq ?? ""}\n${envelope.ctr}`);
+  const sid = envelope.sid === undefined ? "" : envelope.sid;
+  const sidLength = envelope.sid === undefined ? -1 : utf8(sid).length;
+  const seq = envelope.seq === undefined ? -1 : envelope.seq;
+  return utf8(`pew2/v2|${sidLength}|${sid}|${seq}|${envelope.ctr}`);
 }
 
 /**

@@ -91,6 +91,30 @@ test("tampering with the readable header is detected", () => {
   expect(open(key, sealed)).toEqual({ t: "session.event", payload: 1 });
 });
 
+test("an absent session id is not interchangeable with an empty one", () => {
+  // The header is length-prefixed rather than delimiter-joined. With a plain
+  // `sid ?? ""` these two encode identically, so a connection-level frame could
+  // be re-presented as belonging to session `""` with its tag still valid.
+  const key = directionKey(KEY_A, "app-to-daemon");
+
+  const withoutSid = seal(key, { t: "hello-proof" }, { ctr: 1 });
+  expect(open(key, { ...withoutSid, sid: "" })).toBeUndefined();
+
+  const withEmptySid = seal(key, { t: "hello-proof" }, { sid: "", ctr: 1 });
+  expect(open(key, { ...withEmptySid, sid: undefined })).toBeUndefined();
+});
+
+test("a separator inside a session id cannot forge a different header", () => {
+  // Session ids come from the agents, so this code does not get to promise what
+  // characters are in them. Length prefixes make the encoding unambiguous
+  // whatever they contain.
+  const key = directionKey(KEY_A, "daemon-to-app");
+  const sealed = seal(key, { t: "session.event" }, { sid: "a|1", ctr: 2 });
+
+  expect(open(key, sealed)).toEqual({ t: "session.event" });
+  expect(open(key, { ...sealed, sid: "a", seq: 1 })).toBeUndefined();
+});
+
 test("tampering with the ciphertext or nonce is detected", () => {
   const key = directionKey(KEY_A, "daemon-to-app");
   const sealed = seal(key, { t: "providers", providers: [] }, { ctr: 1 });
