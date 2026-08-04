@@ -45,6 +45,12 @@ import {
 } from "./service.js";
 import { loadPairing, setRelay } from "../pairing.js";
 import { cmdPair } from "./pair.js";
+// Imported rather than read from disk: this file ends up inside a compiled
+// binary, where there is no package.json next to it to read.
+import pkg from "../../package.json" with { type: "json" };
+
+/** The version this build was cut from, for `pew2 --version`. */
+const VERSION = (pkg as { version: string }).version;
 
 const GREEN = "\x1b[32m";
 const RED = "\x1b[31m";
@@ -503,6 +509,13 @@ async function main() {
   const flags = new Set(argv.filter((a) => a.startsWith("--")));
   const [group, command, arg] = argv.filter((a) => !a.startsWith("--"));
 
+  // Before anything else: someone who installed a binary needs a way to say
+  // which one they have, and it is the first thing worth asking in a bug report.
+  if (flags.has("--version") || group === "version") {
+    console.log(VERSION);
+    return 0;
+  }
+
   if (group === "setup") return cmdSetup(flags);
   if (group === "pair") return cmdPair(flags);
   if (group === "relay") return cmdRelay(command, flags);
@@ -524,6 +537,7 @@ async function main() {
     console.log("    --dry-run --force --json       Preview / overwrite edited files / machine output");
     console.log("  pew2 providers list              List installed providers");
     console.log("  pew2 providers validate          Validate every manifest");
+    console.log("  pew2 --version                   Which build this is");
     console.log("  pew2 providers add <id>          Scaffold a new manifest");
     console.log("  pew2 providers verify [id]       Spawn a provider and prove it speaks ACP");
     return group ? 1 : 0;

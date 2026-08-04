@@ -60,6 +60,11 @@ curl -fsSL https://raw.githubusercontent.com/KenKaiii/pew2/main/install.sh | sh
 irm https://raw.githubusercontent.com/KenKaiii/pew2/main/install.ps1 | iex
 ```
 
+> On macOS, `pew2 setup` also sets the daemon to start itself after a reboot.
+> On Windows and Linux that part is not built yet, so you start it yourself
+> (`pew2 service install` will tell you so rather than pretend). Everything else
+> is identical.
+
 Then:
 
 ```bash

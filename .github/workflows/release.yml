@@ -5,8 +5,11 @@ name: Release
 on:
   push:
     tags: ["v*"]
-  # Also runnable by hand, so a broken release can be rebuilt without inventing
-  # a version number nobody wanted.
+  # Runnable by hand to rebuild the binaries without cutting a version. It
+  # deliberately does not publish: on a branch `github.ref_name` is the branch
+  # name, so publishing would create a GitHub release called "main" and point
+  # /releases/latest at it - which is the exact URL every published install
+  # command reads from.
   workflow_dispatch:
 
 permissions:
@@ -92,6 +95,9 @@ jobs:
 
   publish:
     needs: build
+    # Tags only. See the note on workflow_dispatch above: a manual run has no
+    # version to release, and naming one after a branch breaks the install URL.
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

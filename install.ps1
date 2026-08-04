@@ -59,18 +59,28 @@ if (-not (Test-Path $exe) -or (Get-Item $exe).Length -eq 0) {
 
 # Best effort: a missing checksum file must not block an install, but a
 # mismatched one must.
+#
+# Fetching is in the try; the comparison is deliberately outside it. `Die` calls
+# `exit`, and whether a catch swallows that is exactly the kind of subtlety not
+# worth depending on in a script that decides whether to run an unverified
+# binary. Outside the try it cannot be swallowed at all.
+$expected = $null
 try {
   $ProgressPreference = 'SilentlyContinue'
   $sumFile = Join-Path $tmp 'pew2.sha256'
   Invoke-WebRequest -Uri "$url.sha256" -OutFile $sumFile -UseBasicParsing
-  $expected = (Get-Content $sumFile -Raw).Split(' ')[0].Trim()
-  $actual   = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLower()
-  if ($expected -and $actual -ne $expected.ToLower()) {
+  # sha256sum writes "<hash>  <filename>", so the hash is the first field.
+  $expected = (Get-Content $sumFile -Raw).Split(' ')[0].Trim().ToLower()
+} catch {
+  # No checksum published, or it could not be fetched. Carry on without it.
+}
+
+if ($expected) {
+  $actual = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLower()
+  if ($actual -ne $expected) {
     Die "The download does not match its checksum. Not installing it. Try again, and if it keeps happening, report it."
   }
   Ok "Checksum verified"
-} catch {
-  # No checksum published, or it could not be fetched. Carry on.
 }
 
 # --- install ----------------------------------------------------------------
@@ -94,8 +104,20 @@ Ok "Installed to $target"
 # The user PATH from the registry, not $env:PATH: this process inherited a copy
 # and writing that back would persist nothing.
 $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-if ($userPath -notlike "*$InstallDir*") {
-  [Environment]::SetEnvironmentVariable('Path', "$userPath;$InstallDir", 'User')
+
+# Compared entry by entry rather than with -like. That does wildcard matching, so
+# a bracket in a custom PEW2_INSTALL_DIR would break the test, and a substring
+# match would see an existing "C:\tools\pew2-old" as this directory already
+# being present and skip adding the real one.
+$entries = @()
+if ($userPath) { $entries = $userPath.Split(';') | Where-Object { $_ } }
+$already = $entries | Where-Object { $_.TrimEnd('\') -ieq $InstallDir.TrimEnd('\') }
+
+if (-not $already) {
+  # A fresh profile can have no user PATH at all, and "$null;C:\..." leaves an
+  # empty leading entry, which Windows reads as the current directory.
+  $updated = if ($entries) { ($entries + $InstallDir) -join ';' } else { $InstallDir }
+  [Environment]::SetEnvironmentVariable('Path', $updated, 'User')
   # Also for this session, so the instructions below work without reopening.
   $env:Path = "$env:Path;$InstallDir"
   Ok "Added to your PATH"
