@@ -11,7 +11,7 @@
     "expo-blur": "~15.0.8",
     "expo-camera": "~17.0.10",
     "expo-clipboard": "~8.0.8",
-    "expo-crypto": "^57.0.1",
+    "expo-crypto": "~15.0.9",
     "expo-document-picker": "~14.0.8",
     "expo-file-system": "~19.0.23",
     "expo-font": "~14.0.12",
