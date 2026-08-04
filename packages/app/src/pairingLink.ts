@@ -30,6 +30,16 @@ export interface Pairing {
    * like two clients.
    */
   deviceId: string;
+  /**
+   * The pairing key, hex.
+   *
+   * Arrives in the link's *fragment*, which is never transmitted to a server —
+   * so the relay routes this connection without ever seeing what decrypts it.
+   * Stripped from `url` before the socket is opened, both because it has no
+   * business on the wire and because a fragment would be sent nowhere useful
+   * anyway.
+   */
+  key: string;
 }
 
 export type ParseResult = { ok: true; pairing: Pairing } | { ok: false; error: string };
@@ -68,6 +78,21 @@ export function parsePairing(input: string, deviceId = "phone"): ParseResult {
     return { ok: false, error: "Token too short. The link looks cut off." };
   }
 
+  // The key rides in the fragment. Its absence means a link from a build before
+  // encryption existed, or one truncated at the `#` by something that treated it
+  // as a comment — either way the connection could only fail later, opaquely.
+  const key = new URLSearchParams(url.hash.replace(/^#/, "")).get("k");
+  if (!key) {
+    return { ok: false, error: "That link has no encryption key. Update pew2 and run `pew2 pair`." };
+  }
+  const keyHex = hexFromBase64Url(key);
+  if (!keyHex) {
+    return { ok: false, error: "The encryption key in that link is damaged. Scan it again." };
+  }
+  // Never sent: a fragment is not transmitted, but clearing it keeps the key out
+  // of anything that later logs or displays this URL.
+  url.hash = "";
+
   const remote = relayToken !== null;
   if (remote) {
     // A daemon-role link would put the phone on the wrong side of the relay,
@@ -88,6 +113,29 @@ export function parsePairing(input: string, deviceId = "phone"): ParseResult {
       label: url.host,
       remote,
       deviceId: url.searchParams.get("deviceId") ?? deviceId,
+      key: keyHex,
     },
   };
+}
+
+/**
+ * base64url -> hex, or `undefined` if it is not a 32-byte key.
+ *
+ * Length is checked here rather than at first use: a truncated key would
+ * otherwise produce a connection that opens and then silently decrypts nothing,
+ * which is the least diagnosable failure this app has.
+ */
+function hexFromBase64Url(value: string): string | undefined {
+  try {
+    const padded = value.replace(/-/g, "+").replace(/_/g, "/");
+    const binary = atob(padded + "=".repeat((4 - (padded.length % 4)) % 4));
+    if (binary.length !== 32) return undefined;
+    let hex = "";
+    for (let i = 0; i < binary.length; i++) {
+      hex += binary.charCodeAt(i).toString(16).padStart(2, "0");
+    }
+    return hex;
+  } catch {
+    return undefined;
+  }
 }

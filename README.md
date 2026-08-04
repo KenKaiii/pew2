@@ -6,11 +6,11 @@ your own app — on your machine, and drive them from your phone.
 > **Status: early.** Daemon, provider system, relay and the phone app work and
 > are tested, including over the internet via your own relay.
 >
-> **Run it for yourself, on your own relay — not for other people.** Your
-> pairing token is a bearer secret with no expiry, and the relay sees plaintext.
-> Anyone holding that token can start agents and read files on your machine, so
-> treat it like an SSH key: never paste it anywhere, and `pew2 pair --rotate` if
-> you ever do. See [Known gaps](#known-gaps).
+> **Run it for yourself, on your own relay — not for other people.** Traffic is
+> end-to-end encrypted and the relay cannot read it, but your pairing key is a
+> bearer secret with no expiry: anyone holding it can start agents and read files
+> on your machine. Treat it like an SSH key — never paste it anywhere, and
+> `pew2 pair --rotate` if you ever do. See [Known gaps](#known-gaps).
 
 ## Install
 
@@ -161,8 +161,10 @@ so the whole pipeline is testable anywhere.
 
 ## Known gaps
 
-1. **No E2EE.** The token is a bearer secret and the relay sees plaintext. Run
-   your own relay. Not safe for real users yet.
+1. **No forward secrecy, and no per-device revocation.** Traffic is end-to-end
+   encrypted and the relay cannot read it, but one key lasts the life of a
+   pairing: a key leaked tomorrow decrypts traffic captured today, and removing
+   one device means rotating and re-pairing all of them. Run your own relay.
 
    The relay does enforce what it can without being able to authenticate anyone:
    a token must be hex and at least 32 characters before it names a room, a

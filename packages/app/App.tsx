@@ -287,7 +287,7 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
 
   // The relay identifies devices by this, and it must match the id baked into
   // the stored pairing URL or the two look like different clients.
-  const daemon = useDaemon(pairing.url, pairing.deviceId, {
+  const daemon = useDaemon(pairing.url, pairing.deviceId, pairing.key, {
     onTurnFinished: announceTurn,
   });
   const [draft, setDraft] = useState("");
@@ -974,11 +974,17 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
                 />
               </Reanimated.View>
               <Text style={styles.greetingText}>
-                {daemon.status !== "online"
-                  ? "Connecting to your machine..."
-                  : active
-                    ? greeting
-                    : "No agents available on this machine."}
+                {/* A refusal the daemon explained outranks the connecting
+                    state: reconnecting cannot fix a rotated key or a version
+                    mismatch, so "Connecting..." would loop forever while
+                    telling the one person who can act nothing at all. */}
+                {daemon.fatal
+                  ? daemon.fatal
+                  : daemon.status !== "online"
+                    ? "Connecting to your machine..."
+                    : active
+                      ? greeting
+                      : "No agents available on this machine."}
               </Text>
             </Pressable>
           </Reanimated.View>

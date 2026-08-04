@@ -10,9 +10,12 @@ import { test, expect } from "bun:test";
 import { parsePairing } from "./pairingLink";
 
 const TOKEN = "a".repeat(48);
+/** 32 bytes of key, base64url, as the daemon puts it in the fragment. */
+const KEY = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQ";
+const FRAGMENT = `#k=${KEY}`;
 
 test("accepts the URL the daemon prints", () => {
-  const result = parsePairing(`ws://192.168.0.102:8787/?token=${TOKEN}`);
+  const result = parsePairing(`ws://192.168.0.102:8787/?token=${TOKEN}${FRAGMENT}`);
 
   expect(result.ok).toBe(true);
   if (!result.ok) return;
@@ -23,12 +26,12 @@ test("accepts the URL the daemon prints", () => {
 });
 
 test("tolerates surrounding whitespace from a paste", () => {
-  const result = parsePairing(`  ws://192.168.0.102:8787/?token=${TOKEN}\n`);
+  const result = parsePairing(`  ws://192.168.0.102:8787/?token=${TOKEN}\n${FRAGMENT}`);
   expect(result.ok).toBe(true);
 });
 
 test("accepts a relay link, and marks it as working from anywhere", () => {
-  const result = parsePairing(`wss://relay.example.com/connect?pairing=${TOKEN}&role=app`);
+  const result = parsePairing(`wss://relay.example.com/connect?pairing=${TOKEN}&role=app${FRAGMENT}`);
 
   expect(result.ok).toBe(true);
   if (!result.ok) return;
@@ -39,7 +42,7 @@ test("accepts a relay link, and marks it as working from anywhere", () => {
 });
 
 test("a direct link is not remote", () => {
-  const result = parsePairing(`ws://192.168.0.102:8787/?token=${TOKEN}`);
+  const result = parsePairing(`ws://192.168.0.102:8787/?token=${TOKEN}${FRAGMENT}`);
 
   expect(result.ok).toBe(true);
   if (!result.ok) return;
@@ -50,7 +53,7 @@ test("adds the device id the relay requires", () => {
   // Without it the relay answers 400 and the socket simply never opens, with
   // nothing on screen to explain why.
   const result = parsePairing(
-    `wss://relay.example.com/connect?pairing=${TOKEN}&role=app`,
+    `wss://relay.example.com/connect?pairing=${TOKEN}&role=app${FRAGMENT}`,
     "phone-abc123",
   );
 
@@ -61,7 +64,7 @@ test("adds the device id the relay requires", () => {
 
 test("keeps a device id already present in the link", () => {
   const result = parsePairing(
-    `wss://relay.example.com/connect?pairing=${TOKEN}&role=app&deviceId=existing`,
+    `wss://relay.example.com/connect?pairing=${TOKEN}&role=app&deviceId=existing${FRAGMENT}`,
     "phone-abc123",
   );
 
@@ -73,7 +76,7 @@ test("keeps a device id already present in the link", () => {
 test("corrects a relay link pasted with the daemon role", () => {
   // Copying the wrong line of terminal output would otherwise put the phone on
   // the daemon side of the relay, where it silently sees no traffic at all.
-  const result = parsePairing(`wss://relay.example.com/connect?pairing=${TOKEN}&role=daemon`);
+  const result = parsePairing(`wss://relay.example.com/connect?pairing=${TOKEN}&role=daemon${FRAGMENT}`);
 
   expect(result.ok).toBe(true);
   if (!result.ok) return;
@@ -98,7 +101,7 @@ test("rejects a truncated token rather than failing later at the socket", () => 
 });
 
 test("rejects the wrong scheme, and says which one it got", () => {
-  const result = parsePairing(`http://192.168.0.102:8787/?token=${TOKEN}`);
+  const result = parsePairing(`http://192.168.0.102:8787/?token=${TOKEN}${FRAGMENT}`);
 
   expect(result.ok).toBe(false);
   if (result.ok) return;
@@ -118,6 +121,49 @@ test("rejects empty and non-URL input", () => {
 test("localhost is allowed, because the simulator shares the host network", () => {
   // A real device cannot reach it, but rejecting it would break the development
   // path the daemon itself prints when off a network.
-  const result = parsePairing(`ws://localhost:8787/?token=${TOKEN}`);
+  const result = parsePairing(`ws://localhost:8787/?token=${TOKEN}${FRAGMENT}`);
   expect(result.ok).toBe(true);
+});
+
+test("the key is taken from the fragment and kept off the wire", () => {
+  // The property the whole design rests on: a URL fragment is never transmitted
+  // to a server, so the relay routes this connection without ever receiving what
+  // decrypts it.
+  const result = parsePairing(
+    `wss://relay.example.com/connect?pairing=${TOKEN}&role=app${FRAGMENT}`,
+    "phone-1",
+  );
+
+  expect(result.ok).toBe(true);
+  if (!result.ok) return;
+
+  expect(result.pairing.key).toMatch(/^[0-9a-f]{64}$/);
+  // Cleared from the URL that gets opened, so it cannot leak into a log or a
+  // settings screen even locally.
+  expect(result.pairing.url).not.toContain("#");
+  expect(result.pairing.url).not.toContain(KEY);
+  expect(result.pairing.label).not.toContain(KEY);
+});
+
+test("a link with no key is refused with something to do about it", () => {
+  // A link from a build before encryption existed, or one truncated at the `#`
+  // by a scanner treating it as a comment. Connecting would produce a socket
+  // that opens and then silently decrypts nothing.
+  const result = parsePairing(`wss://relay.example.com/connect?pairing=${TOKEN}&role=app`);
+
+  expect(result.ok).toBe(false);
+  if (result.ok) return;
+  expect(result.error).toContain("pew2 pair");
+});
+
+test("a damaged or wrong-length key is refused rather than used", () => {
+  // Checked here rather than at first use: a truncated key produces a connection
+  // that opens and then decrypts nothing, which is the least diagnosable failure
+  // this app has.
+  for (const fragment of ["#k=", "#k=!!!!", "#k=AAAA", "#nothing=here"]) {
+    const result = parsePairing(
+      `wss://relay.example.com/connect?pairing=${TOKEN}&role=app${fragment}`,
+    );
+    expect(result.ok).toBe(false);
+  }
 });

@@ -7,6 +7,9 @@
  * per word and scrolling would fight the user.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { SecureChannel, e2e, envelopeHeader, wire } from "@pew2/protocol";
+
+const { WIRE_VERSION } = wire;
 import { USE_FIXTURES, isFixtureSession, sampleSessions } from "./fixtures";
 import { mergeAgentSessions, needsResume, replaceAgentSessionStub } from "./agentHistory";
 import {
@@ -193,6 +196,16 @@ export interface WorkspaceBrowse {
 
 interface State {
   status: Status;
+  /**
+   * A refusal the daemon explained, which reconnecting cannot fix.
+   *
+   * A wrong protocol version or a rotated key both produce a socket that opens
+   * and is then closed. Without somewhere to put the reason, the app would sit
+   * in an endless reconnect loop showing "Connecting..." — which is the same
+   * thing it shows when the desktop is simply asleep, and tells the one user who
+   * needs to act nothing at all.
+   */
+  fatal?: string;
   providers: Provider[];
   sessionId?: string;
   /** The agent the composer will talk to. Chosen before a session exists. */
@@ -382,7 +395,19 @@ interface DaemonOptions {
  * devices apart. Falls back to a constant so a direct LAN connection, where the
  * daemon does not care, still works.
  */
-export function useDaemon(url: string, deviceId = "phone", options: DaemonOptions = {}) {
+export function useDaemon(
+  url: string,
+  deviceId = "phone",
+  /**
+   * The pairing key, hex. Every frame is sealed with it.
+   *
+   * Empty means unpaired: the socket is never opened, because a connection with
+   * nothing to encrypt with could only fail at the far end — and would look to
+   * the user like a broken daemon rather than a missing pairing.
+   */
+  pairingKey = "",
+  options: DaemonOptions = {},
+) {
   const [state, setState] = useState<State>({
     status: "connecting",
     providers: [],
@@ -421,6 +446,10 @@ export function useDaemon(url: string, deviceId = "phone", options: DaemonOption
   const [knownCommands, setKnownCommands] = useState<Record<string, SlashCommand[]>>({});
 
   const socket = useRef<WebSocket | null>(null);
+  /** Encryption state for the live socket. Rebuilt on every reconnect. */
+  const channel = useRef<SecureChannel | null>(null);
+  /** Set once the daemon has refused this device for a reason retrying cannot fix. */
+  const fatal = useRef(false);
   const retry = useRef<ReturnType<typeof setTimeout> | null>(null);
   const attempts = useRef(0);
   const alive = useRef(true);
@@ -554,12 +583,21 @@ export function useDaemon(url: string, deviceId = "phone", options: DaemonOption
   useEffect(() => {
     alive.current = true;
 
+    // A different pairing deserves a fresh attempt: this effect re-runs when the
+    // url changes, which is exactly when someone has scanned a new code.
+    fatal.current = false;
+
     const connect = () => {
       if (!alive.current) return;
       setState((s) => ({ ...s, status: "connecting" }));
 
       const ws = new WebSocket(url);
       socket.current = ws;
+      // Fresh per connection: the counters that make replay detectable are only
+      // meaningful within one socket, so carrying them across a reconnect would
+      // make the new connection's first frames look like replays.
+      const secure = new SecureChannel(e2e.fromHex(pairingKey), "app");
+      channel.current = secure;
 
       ws.onopen = () => {
         attempts.current = 0;
@@ -580,25 +618,56 @@ export function useDaemon(url: string, deviceId = "phone", options: DaemonOption
             session.busy ? { ...session, busy: false } : session,
           ),
         }));
+        // Cleartext, because it is what establishes the connection — and carries
+        // a sealed proof beside it, so the daemon can tell a paired phone from
+        // anyone who merely learned the relay room id.
         ws.send(
           JSON.stringify({
             t: "hello",
-            wire: 1,
+            wire: WIRE_VERSION,
             role: "app",
             deviceId,
             // "Everything after this, please." Empty on a first connection.
             cursors: cursors.current,
+            proof: secure.proof(deviceId),
           }),
         );
       };
 
       ws.onmessage = (event) => {
-        let message: any;
+        let frame: unknown;
         try {
-          message = JSON.parse(event.data as string);
+          frame = JSON.parse(event.data as string);
         } catch {
           return;
         }
+
+        // A cleartext frame from the daemon or the relay. Only two are acted on,
+        // and neither carries user content: a version mismatch, and the refusal
+        // that follows a proof the daemon would not accept. Both have to be
+        // readable *before* anything can be decrypted, which is exactly why they
+        // are the ones left in the open.
+        const kind = (frame as { t?: unknown } | null)?.t;
+        if (kind === "error") {
+          const code = (frame as { code?: unknown }).code;
+          if (code === "wire-version" || code === "unpaired") {
+            const detail = (frame as { message?: unknown }).message;
+            fatal.current = true;
+            setState((s) => ({
+              ...s,
+              status: "offline",
+              fatal: typeof detail === "string" ? detail : "This device is no longer paired.",
+            }));
+          }
+          return;
+        }
+        if (kind !== "e") return;
+
+        const message: any = secure.open(frame);
+        // Undecryptable: a stray frame, a replay, or traffic from a pairing this
+        // phone no longer holds the key for. Silently ignored — there is nothing
+        // useful to show and nothing safe to act on.
+        if (message === undefined) return;
 
         // Replayed history, after a reconnect or a resume. Progressive batches
         // make long transcripts visible from the top while the agent continues
@@ -655,12 +724,17 @@ export function useDaemon(url: string, deviceId = "phone", options: DaemonOption
           queued.current = undefined;
           if (pending) {
             ws.send(
-              JSON.stringify({
-                t: "session.prompt",
-                sessionId: message.sessionId,
-                text: pending.text,
-                attachments: toWireAttachments(pending.attachments),
-              }),
+              JSON.stringify(
+                secure.seal(
+                  {
+                    t: "session.prompt",
+                    sessionId: message.sessionId,
+                    text: pending.text,
+                    attachments: toWireAttachments(pending.attachments),
+                  },
+                  { sid: message.sessionId },
+                ),
+              ),
             );
           }
         }
@@ -719,11 +793,16 @@ export function useDaemon(url: string, deviceId = "phone", options: DaemonOption
           // asking in both places would count the same repo twice.
           if (finished === sessionRef.current) {
             ws.send(
-              JSON.stringify({
-                t: "workspace.status",
-                sessionId: sessionRef.current,
-                providerId: providerRef.current,
-              }),
+              JSON.stringify(
+                secure.seal(
+                  {
+                    t: "workspace.status",
+                    sessionId: sessionRef.current,
+                    providerId: providerRef.current,
+                  },
+                  { sid: sessionRef.current },
+                ),
+              ),
             );
           }
         }
@@ -778,12 +857,14 @@ export function useDaemon(url: string, deviceId = "phone", options: DaemonOption
               sessionRef.current = undefined;
               providerRef.current = stale.providerId;
               ws.send(
-                JSON.stringify({
-                  t: "session.resume",
-                  providerId: stale.providerId,
-                  agentSessionId: stale.agentSessionId,
-                  cwd: stale.cwd,
-                }),
+                JSON.stringify(
+                  secure.seal({
+                    t: "session.resume",
+                    providerId: stale.providerId,
+                    agentSessionId: stale.agentSessionId,
+                    cwd: stale.cwd,
+                  }),
+                ),
               );
               setState((s) => ({ ...s, busy: true, loadingSession: true }));
             }
@@ -793,7 +874,7 @@ export function useDaemon(url: string, deviceId = "phone", options: DaemonOption
             probed.current.add(provider.id);
             pendingCapabilities.current.add(provider.id);
             ws.send(
-              JSON.stringify({ t: "provider.capabilities", providerId: provider.id }),
+              JSON.stringify(secure.seal({ t: "provider.capabilities", providerId: provider.id })),
             );
           }
         }
@@ -1174,6 +1255,14 @@ export function useDaemon(url: string, deviceId = "phone", options: DaemonOption
         // already open; without this guard it would mark us offline and open a
         // duplicate connection that keeps dispatching state updates.
         if (!alive.current || socket.current !== ws) return;
+        // A refusal the daemon explained is not a blip. Retrying a rotated key
+        // or a version mismatch every few seconds forever would never succeed,
+        // would keep the radio awake, and would bury the explanation under a
+        // status line that says the opposite.
+        if (fatal.current) {
+          setState((s) => ({ ...s, status: "offline" }));
+          return;
+        }
         setState((s) => ({ ...s, status: "offline" }));
         // Exponential backoff, capped, so a sleeping laptop does not get hammered.
         const delay = Math.min(1000 * 2 ** attempts.current, 10_000);
@@ -1194,6 +1283,7 @@ export function useDaemon(url: string, deviceId = "phone", options: DaemonOption
       socket.current = null;
       // Drop the handlers before closing so the outgoing socket cannot mutate
       // state or schedule a reconnect after teardown.
+      channel.current = null;
       if (ws) {
         ws.onopen = null;
         ws.onmessage = null;
@@ -1204,11 +1294,19 @@ export function useDaemon(url: string, deviceId = "phone", options: DaemonOption
     };
   }, [url]);
 
-  /** Returns false when nothing was sent, so a caller can report the failure. */
+  /**
+   * Send one sealed message.
+   *
+   * Returns false when nothing was sent, so a caller can report the failure.
+   * A missing channel counts as not connected: sending in the clear would put
+   * the very content this exists to protect on the wire, so it is not a
+   * fallback — it is the failure.
+   */
   const post = useCallback((message: unknown) => {
     const ws = socket.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return false;
-    ws.send(JSON.stringify(message));
+    const secure = channel.current;
+    if (!ws || !secure || ws.readyState !== WebSocket.OPEN) return false;
+    ws.send(JSON.stringify(secure.seal(message, envelopeHeader(message))));
     return true;
   }, []);
 

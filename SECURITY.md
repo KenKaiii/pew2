@@ -16,15 +16,26 @@ you will get is an honest reply and, if the report holds, a fix and credit.
 The threat model is deliberately narrow, and worth reading before deciding
 whether to run this.
 
-**The pairing token is the whole of the authentication.** It is a bearer
-secret: anyone holding it can start agents, send prompts, read files the agent
-can read, and browse directories under your home. There is no expiry, no
-per-device revocation and no rate limiting. Treat it exactly like an SSH private
-key. `pew2 pair --rotate` invalidates it and every paired device at once.
+**The pairing key is the whole of the authentication.** It is a bearer secret:
+anyone holding it can start agents, send prompts, read files the agent can read,
+and browse directories under your home. There is no expiry, no per-device
+revocation and no rate limiting. Treat it exactly like an SSH private key.
+`pew2 pair --rotate` invalidates it and every paired device at once.
 
-**The relay sees plaintext.** There is no end-to-end encryption yet, so whoever
-operates the relay can read everything passing through it. Deploy your own —
-`npm run relay:deploy` — and do not use somebody else's.
+The key never leaves the two endpoints. It reaches the phone in the QR link's
+*fragment*, which is not transmitted to a server, and the relay is given only a
+room id derived from it by a one-way hash.
+
+**The relay cannot read your traffic, but it can see its shape.** Message
+contents — prompts, replies, file paths, provider names, images — are encrypted
+with XChaCha20-Poly1305 under keys the relay never holds. Session ids, sequence
+numbers, message sizes and timing are visible to it, because it keeps the ordered
+log that lets a reconnecting phone catch up. Deploy your own relay anyway:
+`npm run relay:deploy`.
+
+**There is no forward secrecy.** One key lasts the life of a pairing, so traffic
+captured today can be decrypted by a key leaked tomorrow. Rotate if you have any
+reason to think it has been exposed.
 
 **The daemon trusts its own machine.** It runs agents as your user, with your
 files and your credentials. That is what it is for. Do not run it on a machine
@@ -34,8 +45,15 @@ you share, or as a user with more access than you would give the agent directly.
 
 Within those limits, the parts that can be checked are:
 
-- Pairing tokens must be at least 32 hex characters before they name a relay
-  room, so an arbitrary string cannot allocate one.
+- Every message except the handshake is sealed with an AEAD, keyed separately
+  per direction, so a captured frame cannot be replayed back at its own sender.
+- A connection must prove it holds the key before the daemon will serve it.
+  Knowing the relay room id — which is all the relay itself has — is not enough.
+- Replay is rejected per sender within a connection, and the readable routing
+  fields the relay orders its log by are bound into each frame's tag, so it can
+  read them but not alter them.
+- Room ids must be at least 32 hex characters before they name a relay room, so
+  an arbitrary string cannot allocate one.
 - A device is refused unless a daemon is actually connected, which is what makes
   rotation take effect immediately rather than eventually.
 - Directory browsing refuses anything outside `$HOME`, extended only by

@@ -92,6 +92,26 @@ test("a pairing stored without a key is replaced rather than reused", async () =
   expect(pairing.key).toMatch(/^[0-9a-f]{64}$/);
 });
 
+test("upgrading a pre-encryption pairing keeps the relay", async () => {
+  // The pairing itself is discarded and replaced — that part is deliberate — but
+  // the relay is configuration, not a secret. Dropping it turns a machine that
+  // worked from anywhere into one that only works on the same Wi-Fi, silently,
+  // on upgrade, with nothing in the output to explain why.
+  const { env } = await sandbox();
+  await mkdir(join(env.PEW2_HOME!), { recursive: true });
+  await writeFile(
+    pairingPath(env),
+    JSON.stringify({ token: "a".repeat(48), relay: "wss://relay.example.com" }),
+  );
+
+  const pairing = await loadPairing(env);
+
+  expect(pairing.key).toMatch(/^[0-9a-f]{64}$/);
+  expect(pairing.relay).toBe("wss://relay.example.com");
+  // And it is persisted, not just returned once.
+  expect((await loadPairing(env)).relay).toBe("wss://relay.example.com");
+});
+
 test("an explicit PEW2_TOKEN still yields a usable, stable pairing", async () => {
   // Tests and containers run this way. Deriving a key rather than skipping
   // encryption keeps those runs on the same protocol as production, so the

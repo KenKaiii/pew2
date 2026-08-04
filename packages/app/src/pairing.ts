@@ -45,6 +45,9 @@ export async function loadPairing(): Promise<Pairing | null> {
   try {
     const stored = await SecureStore.getItemAsync(KEY);
     if (!stored) return null;
+    // Stored with its fragment intact, because `parsePairing` strips the key out
+    // of the URL it returns — keeping only that would lose the key on the first
+    // reload, and the app would greet a paired user with the pairing screen.
     const parsed = parsePairing(stored, await deviceId());
     return parsed.ok ? parsed.pairing : null;
   } catch {
@@ -54,7 +57,20 @@ export async function loadPairing(): Promise<Pairing | null> {
 }
 
 export async function savePairing(pairing: Pairing): Promise<void> {
-  await SecureStore.setItemAsync(KEY, pairing.url);
+  // The link is re-parsed on load, so what is written has to be a *complete*
+  // link — including the fragment carrying the key, which `parsePairing`
+  // deliberately removes from `pairing.url` so it can never reach the wire.
+  const complete = `${pairing.url}#k=${base64UrlFromHex(pairing.key)}`;
+  await SecureStore.setItemAsync(KEY, complete);
+}
+
+/** hex -> base64url, the form the fragment uses. */
+function base64UrlFromHex(hex: string): string {
+  let binary = "";
+  for (let i = 0; i < hex.length; i += 2) {
+    binary += String.fromCharCode(Number.parseInt(hex.slice(i, i + 2), 16));
+  }
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
 /** Forget the daemon. Used by "Unpair", and after the token is rotated. */

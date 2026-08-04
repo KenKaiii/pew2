@@ -95,6 +95,7 @@ export async function loadPairing(env: NodeJS.ProcessEnv = process.env): Promise
   }
 
   const path = pairingPath(env);
+  let storedRelay: string | undefined;
   try {
     const parsed = JSON.parse(await readFile(path, "utf8")) as Partial<Pairing>;
     // A pairing without a key predates encryption. Treated as absent rather
@@ -118,12 +119,20 @@ export async function loadPairing(env: NodeJS.ProcessEnv = process.env): Promise
     }
     // A short or malformed token is worse than none: it would be accepted by
     // the server while being guessable. Replace it rather than trusting it.
+    // Keep the relay even when the rest is discarded. Losing it turns a machine
+    // that worked from anywhere into one that only works on the same Wi-Fi —
+    // silently, on upgrade, with nothing in the output to explain it.
+    storedRelay = typeof parsed.relay === "string" ? parsed.relay : undefined;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
 
   return writePairing(
-    { ...generatePairing(), createdAt: new Date().toISOString(), relay: env.PEW2_RELAY },
+    {
+      ...generatePairing(),
+      createdAt: new Date().toISOString(),
+      relay: env.PEW2_RELAY ?? storedRelay,
+    },
     env,
   );
 }
