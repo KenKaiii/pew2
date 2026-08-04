@@ -45,6 +45,8 @@ import {
 } from "./service.js";
 import { loadPairing, setRelay } from "../pairing.js";
 import { cmdPair } from "./pair.js";
+import { agentSections, outroFor, rail } from "./setup-view.js";
+import { PALETTE, colorLevel, glyphs, statusLine, styler, unicodeOk } from "./ui.js";
 // Imported rather than read from disk: this file ends up inside a compiled
 // binary, where there is no package.json next to it to read.
 import pkg from "../../package.json" with { type: "json" };
@@ -114,46 +116,57 @@ function printProblems(problems: Problem[]) {
 
 async function cmdSetup(flags: Set<string>) {
   const json = flags.has("--json");
-
-  const result = await setup({
-    verify: !flags.has("--skip-verify"),
-    onProgress: json
-      ? undefined
-      : (stage, note) => {
-          if (stage === "detect") console.log(`${BOLD}Scanning PATH for ACP agents…${RESET}`);
-          if (stage === "verify") console.log(`${DIM}verifying ${note}…${RESET}`);
-          if (stage === "doctor") console.log(`${BOLD}Checking…${RESET}\n`);
-        },
-  });
-
   if (json) {
+    const result = await setup({ verify: !flags.has("--skip-verify") });
     console.log(JSON.stringify(result, null, 2));
     return result.ok ? 0 : 1;
   }
 
-  for (const entry of result.detect.detected) {
-    const note = entry.action === "written" ? `${GREEN}configured${RESET}` : `${DIM}already configured${RESET}`;
-    console.log(`${ok(entry.name)} ${note}`);
+  const style = styler(colorLevel());
+  const glyph = glyphs(unicodeOk());
+  const view = { style, glyph };
+  const r = rail(view);
+
+  for (const line of r.intro("pew2 setup", "looking at what you already have")) {
+    console.log(line);
   }
-  for (const report of result.verify) {
-    if (report.status === "ok") {
-      console.log(ok(`${report.id} ${DIM}verified, ${report.updates} updates${RESET}`));
-    } else if (report.status === "failed") {
-      console.log(bad(`${report.id} ${DIM}${report.detail}${RESET}`));
+
+  // One live line rather than a paragraph per stage. Verification spawns each
+  // agent for real, which takes seconds, and a static screen for that long reads
+  // as a hang — but a wall of "verifying x..." lines reads as noise.
+  const progress = statusLine("Checking your computer", { frames: glyph.spinner, indent: 0 });
+  const result = await setup({
+    verify: !flags.has("--skip-verify"),
+    onProgress: (stage, note) => {
+      if (stage === "detect") progress.update("Looking for agents");
+      if (stage === "verify") progress.update(`Starting ${note}`);
+      if (stage === "doctor") progress.update("Checking everything works");
+    },
+  });
+  progress.stop();
+
+  for (const line of agentSections(result.agents, view)) console.log(line);
+
+  // Only problems that are not about an individual agent: those already have
+  // their own sections above, and repeating them turns one issue into two.
+  const general = result.doctor.problems.filter((p) => !p.provider);
+  if (general.length > 0) {
+    for (const line of r.step("Still to do")) console.log(line);
+    for (const problem of general) {
+      const mark =
+        problem.severity === "error"
+          ? style.hex(PALETTE.warning, glyph.dot)
+          : style.hex(PALETTE.faint, glyph.dot);
+      console.log(r.line(`${mark} ${problem.detail}`));
+      console.log(r.line(`  ${style.hex(PALETTE.faint, problem.fix)}`));
     }
   }
 
-  if (result.doctor.problems.length > 0) console.log("");
-  printProblems(result.doctor.problems);
+  for (const line of outroFor(result.agents, result.ok, view)) console.log(line);
 
-  if (result.ok) {
-    console.log(`\n${GREEN}${BOLD}Ready.${RESET} Start the daemon and pair your phone.`);
-    return 0;
-  }
-
-  console.log(`\n${BOLD}Next:${RESET}`);
-  for (const step of result.nextSteps) console.log(`  ${step}`);
-  return 1;
+  // Exit code still reflects reality for anything scripting this, even though
+  // the screen no longer shouts about it.
+  return result.ok ? 0 : 1;
 }
 
 // `pew2 pair` lives in ./pair.ts: it is the one command with a real screen to

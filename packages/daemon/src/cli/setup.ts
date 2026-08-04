@@ -14,6 +14,8 @@ import { detectProviders, type DetectResult } from "../providers/detect.js";
 import { verifyAll, type VerifyReport } from "../providers/verify.js";
 import { loadProviders, providerDirs, isAvailable } from "../providers/registry.js";
 import { doctor, type DoctorReport } from "./doctor.js";
+import { CATALOG } from "../providers/detect.js";
+import type { AgentState } from "./setup-view.js";
 
 export interface SetupResult {
   /** True when nothing blocking remains. The agent's stop condition. */
@@ -22,6 +24,13 @@ export interface SetupResult {
   /** Empty when verification was skipped. */
   verify: VerifyReport[];
   doctor: DoctorReport;
+  /**
+   * Every agent pew2 knows about, and what state it is in on this machine.
+   *
+   * The presentation layer groups these; assembling the list here keeps the
+   * command from having to re-derive it from three separate result shapes.
+   */
+  agents: AgentState[];
   /** Commands to run next, in order. Empty when setup is complete. */
   nextSteps: string[];
 }
@@ -100,5 +109,26 @@ export async function setup(options: SetupOptions = {}): Promise<SetupResult> {
     }
   }
 
-  return { ok, detect: detected, verify, doctor: report, nextSteps };
+  // One row per agent, from the three sources that each know part of it: the
+  // registry knows what is installed, verification knows what actually ran, and
+  // the catalog knows where to get the rest.
+  const { providers: allProviders } = await loadProviders(searchDirs, env, { bundled });
+  const verifyById = new Map(verify.map((r) => [r.id, r]));
+  const installById = new Map(CATALOG.map((c) => [c.manifest.id, c.install]));
+
+  const agents: AgentState[] = allProviders.map((provider) => {
+    const report = verifyById.get(provider.manifest.id);
+    return {
+      id: provider.manifest.id,
+      name: provider.manifest.name,
+      install: installById.get(provider.manifest.id),
+      missingEnv: provider.missingEnv,
+      notInstalled: provider.commandMissing,
+      verify: report
+        ? { status: report.status, detail: report.detail }
+        : undefined,
+    };
+  });
+
+  return { ok, detect: detected, verify, doctor: report, agents, nextSteps };
 }

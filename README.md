@@ -10,7 +10,7 @@
 
 <p align="center">
   <a href="https://github.com/KenKaiii/pew2/releases/latest"><img src="https://img.shields.io/github/v/release/KenKaiii/pew2?style=for-the-badge&label=CLI&color=d97757" alt="Latest release"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge" alt="MIT License"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-AGPL%203.0-blue.svg?style=for-the-badge" alt="AGPL-3.0 License"></a>
   <a href="https://youtube.com/@kenkaidoesai"><img src="https://img.shields.io/badge/YouTube-FF0000?style=for-the-badge&logo=youtube&logoColor=white" alt="YouTube"></a>
   <a href="https://skool.com/kenkai"><img src="https://img.shields.io/badge/Skool-Community-7C3AED?style=for-the-badge" alt="Skool"></a>
 </p>
@@ -294,7 +294,8 @@ Being straight with you:
 
 ## 📄 Licence
 
-MIT
+AGPL-3.0. Use it, change it, run it for yourself. If you run a modified version
+as a service other people use, share your changes.
 
 ---
 
