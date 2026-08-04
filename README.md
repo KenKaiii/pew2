@@ -1,7 +1,7 @@
 # 📱 pew2
 
 <p align="center">
-  <img src="docs/icon.png" alt="pew2" width="180">
+  <img src="docs/icon.png" alt="pew2" width="160">
 </p>
 
 <p align="center">
@@ -26,12 +26,6 @@ write while you're getting coffee.
 
 **Nothing runs in the cloud.** No API keys leave your machine. The agent is the
 one you already installed, running on your own hardware, on your own files.
-
-<p align="center">
-  <img src="docs/screenshots/01-empty.png" alt="pew2 on iPhone, ready for a prompt with Claude Code" width="290">
-  &nbsp;&nbsp;
-  <img src="docs/screenshots/02-session.png" alt="Claude Code working through a task, with the model and thinking picker open" width="290">
-</p>
 
 ---
 
