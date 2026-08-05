@@ -224,7 +224,14 @@ export class RelayClient {
 
         // The app may have been waiting here long before this machine woke up,
         // so re-announce rather than assume it saw the last list.
-        void this.options.daemon.refreshProviders();
+        //
+        // Caught, like the call in `onopen`. This one was missed when that was
+        // fixed, and it is the worse of the two: it runs the moment a phone
+        // arrives, so a transient scan failure took the daemon down at exactly
+        // the moment someone was watching `pew2 pair` for confirmation.
+        void this.options.daemon.refreshProviders().catch(() => {
+          // The phone is joined either way; the next refresh carries the list.
+        });
         const joined = { t: "device.joined", deviceId, at: Date.now() };
         this.send(joined);
         this.options.onBroadcast?.(joined);

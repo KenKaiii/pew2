@@ -60,6 +60,7 @@ import { haptics } from "./src/ui/haptics";
 import { Sidebar, DRAWER_WIDTH } from "./src/ui/Sidebar";
 import { projectsForProvider } from "./src/projects";
 import { greetingFor, hashSeed } from "./src/greeting";
+import { showsStop } from "./src/composerState";
 import { ConfigPicker, summarise, valueName } from "./src/ui/ConfigPicker";
 import { useReducedMotion } from "./src/ui/useReducedMotion";
 import { ProgressiveBlur } from "./src/ui/ProgressiveBlur";
@@ -1060,7 +1061,7 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
             value={draft}
             onChangeText={setDraft}
             onSend={send}
-            busy={daemon.busy}
+            busy={showsStop(daemon)}
             onStop={daemon.cancel}
             editable={daemon.status === "online"}
             placeholder={
