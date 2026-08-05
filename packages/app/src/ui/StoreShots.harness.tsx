@@ -230,15 +230,20 @@ export default function StoreShotsHarness() {
   return (
     <SafeAreaProvider>
       <StatusBar style="light" />
+      {/* Nothing is drawn over these poses — not even a debug marker.
+
+          There was one: a small pose digit in the bottom-left corner, to tell
+          the poses apart while capturing. The comment beside it claimed the
+          crop to 6.5" removed it. It did not. Going from 1320x2868 to
+          1284x2778 only takes six pixels off each edge, and the digit was
+          about fifteen tall, so it survived into all three screenshots that
+          went up on the product page.
+
+          Poses are told apart by sampling the render instead, which costs
+          nothing and cannot end up in the picture. */}
       {pose === 0 && <Conversation drawerOpen={false} />}
       {pose === 1 && <Conversation drawerOpen />}
       {pose === 2 && <ProjectPicker />}
-      {/* A marker only the capture script reads, so a shot taken mid-rotation
-          can be told apart from the pose it was meant to be. Sits in the corner
-          where the crop for 6.5" removes it. */}
-      <View style={styles.marker} pointerEvents="none">
-        <Text style={styles.markerText}>{pose}</Text>
-      </View>
     </SafeAreaProvider>
   );
 }
@@ -265,6 +270,4 @@ const styles = StyleSheet.create({
   },
   pillText: { color: theme.color.textDim, fontSize: 13 },
   dock: { position: "absolute", left: 0, right: 0, bottom: 0 },
-  marker: { position: "absolute", left: 2, bottom: 2, opacity: 0.35 },
-  markerText: { color: theme.color.textDim, fontSize: 9 },
 });
