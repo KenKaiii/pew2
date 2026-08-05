@@ -1,0 +1,28 @@
+WHAT THIS APP IS
+pew2 is a remote control for coding agents that run on your own computer. It is the phone half of a two part tool. The other half is a free command line program the user installs on their Mac, Windows or Linux machine with one command. The app has no backend of its own and no accounts.
+
+WHY THE APP SHOWS A PAIRING SCREEN ON FIRST LAUNCH
+On launch the app asks you to scan a pairing code. That code is produced by the command line program on the user's own computer. Without a computer running it there is nothing for the app to connect to, in the same way a TV remote does nothing without a TV. This is the intended design and not a defect or a paywall.
+
+HOW TO TEST IT
+The fastest path, on any Mac, takes about a minute:
+
+1. Open Terminal and run:
+     curl -fsSL https://raw.githubusercontent.com/KenKaiii/pew2/main/install.sh | sh
+2. Run:
+     pew2 setup
+   It finds any coding agents already installed, starts a local service, and prints a QR code.
+3. Open pew2 on the device, tap Pair, and scan that QR code.
+
+The app then shows the agents on that computer and you can start a conversation with one. If the computer has no coding agent installed, step 2 prints the command to install one.
+
+If a reviewer would prefer a machine to be running and waiting so that only step 3 is needed, please reply to this note and one will be provided with a pairing code, at a time that suits the review.
+
+ENCRYPTION
+Traffic between the phone and the computer is end to end encrypted with XChaCha20-Poly1305 from the @noble/ciphers library. Only standard cryptography is used and none of it is proprietary. When the two devices are not on the same network the traffic passes through a relay that can only see ciphertext.
+
+PERMISSIONS
+Camera is for scanning the pairing code and for taking a photo to send to an agent. Photos is for attaching an image and saving one an agent returns. Microphone and speech recognition are for dictating a message. Notifications tell the user when an agent has finished or needs an answer. Everything they produce goes only to the user's own computer.
+
+SOURCE CODE
+The entire app, command line tool and relay are open source under AGPL-3.0 at https://github.com/KenKaiii/pew2 if anything needs verifying.

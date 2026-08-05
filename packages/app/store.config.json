@@ -1,0 +1,66 @@
+{
+  "configVersion": 0,
+  "apple": {
+    "version": "1.0",
+    "copyright": "2026 Ken Kai",
+    "release": {
+      "automaticRelease": false,
+      "phasedRelease": false
+    },
+    "info": {
+      "en-US": {
+        "description": "pew2 lets you drive the coding agents already running on your computer from your phone.\n\nYou install a small command line tool on your Mac, Windows or Linux machine, scan a code once, and the agents on that machine show up in the app. Send a message, watch the work happen live, answer a question when it asks one, and approve or reject the changes it wants to make. Your code never goes anywhere it was not already.\n\nWORKS WITH THE AGENTS YOU ALREADY USE\npew2 speaks the Agent Client Protocol, so it works with a long list of agents rather than one. Claude Code, Codex, Gemini CLI, OpenCode, GitHub Copilot, Cline, Qwen Code, goose, Cursor and more are supported out of the box, and the full public ACP registry can be pulled in with one command. If you have none installed, pew2 tells you exactly what to run.\n\nBUILT SO NOBODY CAN READ YOUR WORK\nEverything between your phone and your computer is encrypted end to end with XChaCha20-Poly1305. The key is created when you pair and never leaves your two devices. When you are away from home the traffic passes through a relay so the two can find each other, and that relay only ever sees encrypted blobs. It cannot read a single message. You can point pew2 at your own relay if you would rather not use anyone else's.\n\nNO ACCOUNT, NO TRACKING, NOTHING COLLECTED\nThere is no sign up, no analytics, no crash reporting and no advertising. There is no server holding your conversations because there is no server. Your work stays on your own machine.\n\nWHAT YOU CAN DO FROM THE APP\nStart a conversation with any agent on your computer. Watch its reasoning and its edits stream in as they happen. Approve or deny file changes and commands before they run. Attach a photo or dictate a message instead of typing. Browse the repositories on your machine and pick which one to work in. Get a notification when a long job finishes or an agent needs you.\n\nOPEN SOURCE\nThe app, the command line tool and the relay are all AGPL-3.0 and readable at github.com/KenKaiii/pew2.\n\nREQUIRES A COMPUTER\npew2 is a remote control, so it needs the free pew2 command line tool running on a computer you own. Installing it is one command, and the app is useless without it.",
+        "keywords": [
+          "coding agent",
+          "developer tools",
+          "remote control",
+          "terminal",
+          "programming",
+          "devtools",
+          "ai assistant",
+          "encrypted"
+        ],
+        "marketingUrl": "https://github.com/KenKaiii/pew2",
+        "promoText": "Start a task at your desk, follow it from the sofa. pew2 puts the coding agents running on your computer in your pocket, end to end encrypted the whole way.",
+        "supportUrl": "https://github.com/KenKaiii/pew2/issues",
+        "title": "pew2 (2db077)",
+        "subtitle": "Coding agents on your phone",
+        "privacyPolicyUrl": "https://github.com/KenKaiii/pew2/blob/main/PRIVACY.md",
+        "releaseNotes": "First release.\n\nPair with your computer by scanning a code, then run any coding agent on it from your phone. End to end encrypted, works from any network, and needs no account."
+      }
+    },
+    "categories": [
+      "DEVELOPER_TOOLS",
+      "PRODUCTIVITY"
+    ],
+    "advisory": {
+      "ageRatingOverride": "NONE",
+      "alcoholTobaccoOrDrugUseOrReferences": "NONE",
+      "contests": "NONE",
+      "gambling": false,
+      "gamblingSimulated": "NONE",
+      "horrorOrFearThemes": "NONE",
+      "kidsAgeBand": null,
+      "koreaAgeRatingOverride": "NONE",
+      "lootBox": false,
+      "matureOrSuggestiveThemes": "NONE",
+      "medicalOrTreatmentInformation": "NONE",
+      "profanityOrCrudeHumor": "NONE",
+      "sexualContentGraphicAndNudity": "NONE",
+      "sexualContentOrNudity": "NONE",
+      "unrestrictedWebAccess": false,
+      "violenceCartoonOrFantasy": "NONE",
+      "violenceRealistic": "NONE",
+      "violenceRealisticProlongedGraphicOrSadistic": "NONE",
+      "advertising": false,
+      "ageAssurance": false,
+      "ageRatingOverrideV2": "NONE",
+      "developerAgeRatingInfoUrl": null,
+      "gunsOrOtherWeapons": "NONE",
+      "healthOrWellnessTopics": false,
+      "messagingAndChat": false,
+      "parentalControls": false,
+      "userGeneratedContent": false
+    }
+  }
+}
