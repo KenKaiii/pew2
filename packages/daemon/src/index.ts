@@ -174,8 +174,20 @@ export class Daemon {
     string,
     { handle: AcpSessionHandle; timer: NodeJS.Timeout; cwd: string }
   >();
-  /** At most this many warm processes per provider, oldest evicted first. */
-  private static readonly MAX_SPARES_PER_PROVIDER = 3;
+  /**
+   * At most this many warm processes per provider, oldest evicted first.
+   *
+   * One, not three. A warm agent is a whole language server: opencode measures
+   * 326-491MB each, so three per provider is over a gigabyte idling for one
+   * agent nobody is talking to.
+   *
+   * Three was worth trying when a spare was the only thing standing between a
+   * tap and an empty screen. It is not any more \u2014 the transcript cache paints
+   * the conversation from disk immediately and the agent reconnects behind it,
+   * so a missed spare now costs a background reconnect rather than a visible
+   * wait. Memory is the harder constraint, and this is the side to err on.
+   */
+  private static readonly MAX_SPARES_PER_PROVIDER = 1;
   /** Provider boots already in flight, shared by a tap instead of duplicated. */
   private readonly warming = new Map<string, Promise<void>>();
   /**
@@ -376,6 +388,9 @@ export class Daemon {
     if (old) {
       clearTimeout(old.timer);
       old.handle.close();
+      // Removed as well as closed, so the eviction pass below does not find it
+      // and close the same process a second time.
+      this.spares.delete(key);
     }
 
     // Bounded per provider, oldest first. Each spare is a live agent process

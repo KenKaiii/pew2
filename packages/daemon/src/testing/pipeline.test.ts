@@ -300,10 +300,12 @@ test("a warm process is not reused for a different project", async () => {
   }
 }, 60_000);
 
-test("a second project can be warm at the same time as the first", async () => {
-  // The cost of keying spares by directory, paid back. Keyed by provider alone,
-  // exactly one project could be warm and every other one paid a full cold
-  // spawn — two to three seconds of empty thread after tapping a conversation.
+test("opening a project warms that project, evicting the last one", async () => {
+  // The warm process follows where you are working, and there is only ever one
+  // per provider. Three were kept briefly so switching projects stayed instant;
+  // at 326-491MB each that was over a gigabyte per agent, which is not a trade
+  // worth making now that the transcript cache paints the conversation from
+  // disk before the agent has finished connecting.
   const { Daemon } = await import("../index.js");
   const daemon = new Daemon({ id: "test", name: "test" }, true);
   await daemon.refreshProviders();
@@ -312,19 +314,37 @@ test("a second project can be warm at the same time as the first", async () => {
     await daemon.probeProvider("echo", { refresh: true });
     const first = daemon.spareDirs("echo")[0]!;
 
-    // Opening elsewhere spawns cold and leaves its own process behind.
     const elsewhere = await mkdtemp(join(tmpdir(), "pew2-second-"));
     await daemon.startSession("echo", elsewhere);
     await new Promise((r) => setTimeout(r, 800));
 
-    const dirs = daemon.spareDirs("echo");
-    expect(dirs).toContain(first);
-    expect(dirs).toContain(elsewhere);
+    // The new project is the warm one, and it is the only one.
+    expect(daemon.spareDirs("echo")).toEqual([elsewhere]);
+    expect(daemon.spareDirs("echo")).not.toContain(first);
+  } finally {
+    daemon.closeAll();
+  }
+}, 60_000);
 
-    // And the next conversation there adopts it rather than spawning again.
-    const before = daemon.spareDirs("echo").length;
-    await daemon.startSession("echo", elsewhere);
-    expect(daemon.spareDirs("echo").length).toBeLessThan(before + 1);
+test("a provider never holds more than one warm process", async () => {
+  // A warm agent is a whole language server — opencode measures 326-491MB — so
+  // an unbounded or generous cache is gigabytes of idle memory for agents
+  // nobody is talking to. Found by looking at the process list: three opencode
+  // processes were resident having never been used in that session.
+  const { Daemon } = await import("../index.js");
+  const daemon = new Daemon({ id: "test", name: "test" }, true);
+  await daemon.refreshProviders();
+
+  try {
+    await daemon.probeProvider("echo", { refresh: true });
+
+    // Three different projects, opened in turn.
+    for (let i = 0; i < 3; i++) {
+      const dir = await mkdtemp(join(tmpdir(), `pew2-cap-${i}-`));
+      await daemon.startSession("echo", dir);
+      await new Promise((r) => setTimeout(r, 400));
+      expect(daemon.spareDirs("echo").length).toBeLessThanOrEqual(1);
+    }
   } finally {
     daemon.closeAll();
   }

@@ -313,9 +313,22 @@ const stopWatching = watchPairing(pairingPath(), pairing, () => loadPairing(), {
 process.on("uncaughtException", (error) => console.error("[uncaught]", error));
 process.on("unhandledRejection", (error) => console.error("[unhandled]", error));
 
-process.on("SIGINT", () => {
+/**
+ * Shut down without leaving agents behind.
+ *
+ * SIGTERM matters more than SIGINT here and was missing: `launchctl` stops and
+ * restarts a service with SIGTERM, so every restart orphaned every agent this
+ * daemon had spawned. They reparent to launchd and run forever — a day of
+ * ordinary restarts left 33 of them holding 2.3GB, and nothing on screen said
+ * so. SIGHUP is included for a terminal that closes on a foreground run.
+ */
+function shutdown() {
   stopWatching();
   relay?.stop();
   daemon.closeAll();
   process.exit(0);
-});
+}
+
+for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
+  process.on(signal, shutdown);
+}
