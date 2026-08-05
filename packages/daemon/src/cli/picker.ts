@@ -112,7 +112,10 @@ export function reduce(state: PickerState, key: string): PickerState {
       return { ...state, chosen: new Set(state.items.filter((i) => i.selectable).map((i) => i.id)) };
     case "n":
       return { ...state, chosen: new Set() };
-    case "\u001b":
+    // `q`, not a bare escape. An arrow key *is* an escape sequence, and a
+    // terminal under load or over SSH can deliver the escape byte in one chunk
+    // and `[A` in the next \u2014 so treating a lone escape as "cancel" means a
+    // laggy arrow press silently throws away the user's selection.
     case "q":
       return { ...state, done: "cancelled" };
     default:

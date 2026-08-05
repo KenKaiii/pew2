@@ -100,9 +100,19 @@ test("a and n select all and none, without touching the unusable ones", () => {
   expect(state.chosen.has("codex")).toBe(false);
 });
 
-test("enter accepts and escape backs out", () => {
+test("enter accepts and q backs out", () => {
   expect(reduce(initialState(items), "\r").done).toBe("accepted");
-  expect(reduce(initialState(items), "\u001b").done).toBe("cancelled");
+  expect(reduce(initialState(items), "q").done).toBe("cancelled");
+});
+
+test("a lone escape byte does not throw away the selection", () => {
+  // An arrow key is an escape sequence, and a terminal under load or over SSH
+  // can deliver the escape byte in one chunk and `[A` in the next. Cancelling
+  // on a bare escape meant a laggy arrow press discarded everything the user
+  // had chosen.
+  const state = reduce(initialState(items), "\u001b");
+  expect(state.done).toBeUndefined();
+  expect(state.chosen.size).toBe(3);
 });
 
 test("keys that mean nothing here leave the selection alone", () => {
@@ -117,7 +127,7 @@ test("nothing responds once a choice has been made", () => {
   // can still arrive after enter.
   const done = reduce(initialState(items), "\r");
   expect(reduce(done, " ")).toBe(done);
-  expect(reduce(done, "\u001b")).toBe(done);
+  expect(reduce(done, "q")).toBe(done);
 });
 
 test("the screen shows state, cursor and the keys that work", () => {
@@ -163,7 +173,7 @@ test("choosing none says so, rather than closing silently", () => {
 });
 
 test("backing out is not reported as a change", () => {
-  const state = reduce(initialState(items), "\u001b");
+  const state = reduce(initialState(items), "q");
   expect(stripAnsi(summary(state, plain).join("\n"))).toContain("Left as it was");
 });
 

@@ -48,3 +48,36 @@ test("the cursor is always restored", async () => {
   expect(out).toContain("\u001b[?25h");
   expect(out.lastIndexOf("\u001b[?25h")).toBeGreaterThan(out.lastIndexOf("\u001b[?25l"));
 });
+
+test("Ctrl-C stops the program rather than skipping the question", async () => {
+  // It used to resolve as a plain "cancel", so setup carried on and printed its
+  // closing summary — which reads as the interrupt having been ignored.
+  const written: string[] = [];
+  let exitCode: number | undefined;
+
+  // A fake TTY that delivers Ctrl-C as soon as anything listens.
+  const stream = {
+    isTTY: true,
+    setRawMode: () => {},
+    resume: () => {},
+    pause: () => {},
+    off: () => {},
+    once: () => {},
+    on: (event: string, listener: (chunk: Buffer) => void) => {
+      if (event === "data") queueMicrotask(() => listener(Buffer.from("\u0003", "utf8")));
+    },
+  } as unknown as NodeJS.ReadStream;
+
+  await pickAgents(items, {
+    stream,
+    write: (t) => written.push(t),
+    exit: ((code: number) => {
+      exitCode = code;
+    }) as unknown as (code: number) => never,
+  });
+
+  // 130 is the conventional code for "killed by SIGINT".
+  expect(exitCode).toBe(130);
+  // And the cursor is back, or the user's shell is left broken after we exit.
+  expect(written.join("")).toContain("\u001b[?25h");
+});

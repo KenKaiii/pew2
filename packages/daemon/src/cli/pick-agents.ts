@@ -14,6 +14,8 @@ export interface PickOptions {
   disabled?: Set<string>;
   stream?: NodeJS.ReadStream;
   write?: (text: string) => void;
+  /** Overridable so a test can observe the exit instead of taking it. */
+  exit?: (code: number) => never;
 }
 
 /**
@@ -67,8 +69,15 @@ export async function pickAgents(
         {
           stream: options.stream,
           onAbort: () => {
-            // Ctrl-C. Treated as backing out rather than as an empty choice.
-            state = { ...state, done: "cancelled" };
+            // Ctrl-C means stop the program, not "skip this question". Treating
+            // it as a cancel left setup carrying on to print its closing
+            // summary, which reads as the interrupt having been ignored.
+            //
+            // The cursor is restored first: `onKeypress` has already put the
+            // terminal back, and leaving the cursor hidden would outlive the
+            // process and break the user's shell.
+            write("\u001b[?25h");
+            (options.exit ?? process.exit.bind(process))(130);
             resolve();
           },
         },
