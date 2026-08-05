@@ -68,27 +68,34 @@ export default tseslint.config(
       ],
 
       // ── off, each for a reason ─────────────────────────────────────────
-      // The unsafe-`any` family, ~480 hits. Nearly all of them are one thing:
-      // JSON arriving off a socket, which is genuinely `any` until the schema
-      // check on the next line makes it real. The rule cannot see that the
-      // check is there, so its advice is to write `as Foo` instead — swapping
-      // an honest `any` for an unchecked lie. The wire tests are what actually
-      // guard this boundary.
+      // The unsafe-`any` family: 585 hits, 290 of them in production code, and
+      // that production half is concentrated in exactly the four files that
+      // parse untrusted payloads — `useDaemon.ts` (126), `images.ts` (38),
+      // `ggcoder-history.ts` (31), `activity.ts` (28). All the same shape: JSON
+      // off a socket or an agent's stdout, genuinely `any` until the schema
+      // check on the next line makes it real. The rule cannot see that check,
+      // so its advice is to write `as Foo` instead — swapping an honest `any`
+      // for an unchecked lie. The wire tests are what guard this boundary.
       "@typescript-eslint/no-unsafe-member-access": "off",
       "@typescript-eslint/no-unsafe-assignment": "off",
       "@typescript-eslint/no-unsafe-argument": "off",
       "@typescript-eslint/no-unsafe-call": "off",
       "@typescript-eslint/no-unsafe-return": "off",
 
-      // Fires on every `async` method that satisfies an interface but happens
-      // not to await — Workers' `fetch`, ACP handlers. The signature is fixed
-      // by the caller, so this is asking for a change that cannot be made.
+      // 68 hits, and 64 are test mocks declared `async` purely to match the
+      // signature they stand in for. The 4 in production are all signatures
+      // someone else owns and none of us can change: Workers' `fetch` and
+      // `webSocketMessage`, Expo's `handleNotification`, an ACP notification
+      // handler. Nothing here is a bug, in either group.
       "@typescript-eslint/require-await": "off",
 
-      // Both of these are correct only if the declared types are the whole
-      // truth. Here they are not: values cross a socket and a subprocess
-      // boundary, and the defensive check the rule calls redundant is the one
-      // that catches a peer sending something the types promised it would not.
+      // 58 hits, 51 in production. Both of these rules are correct only if the
+      // declared types are the whole truth, and here they are not: values cross
+      // a socket, a subprocess, and a JSON file on disk. `session-prefs.ts:91`
+      // is the pattern — `Object.entries(...)` on a record parsed from disk, so
+      // the element type is what the file is *supposed* to contain, and the
+      // `?.` the rule calls redundant is what survives a truncated write. The
+      // check the type system calls impossible is the one doing the work.
       "@typescript-eslint/no-unnecessary-condition": "off",
       // Equally: `packages/app` does not set `noUncheckedIndexedAccess` while
       // the root project does, so the same `arr[i]!` is "unnecessary" in one
@@ -120,12 +127,13 @@ export default tseslint.config(
       // written without it.
       "no-control-regex": "off",
 
-      // Every `any` in this repo is the same thing: a payload that just came
-      // off a socket or out of an agent's stdout, which is genuinely untyped
-      // until the schema check on the next line. Started as an allowlist of
-      // the files that parse wire data and it was already eight entries and
-      // growing, which is a list that rots rather than a rule. The unsafe-`any`
-      // family above is off for the same reason, so this was not buying much.
+      // 71 hits, 53 of them in tests and fixtures. The 18 in production are the
+      // same payload-parsing sites as the unsafe-* family above — `chunks.ts`,
+      // `slashCommands.ts`, `activity.ts`, `images.ts` — where the value really
+      // is untyped until it has been checked. This began as an allowlist of
+      // those files and reached eight entries while still growing, which is a
+      // list that rots rather than a rule. With the unsafe-* family already off
+      // for the same reason, keeping this on was not buying much.
       "@typescript-eslint/no-explicit-any": "off",
 
       // Numbers and booleans in template strings are intentional throughout
@@ -160,7 +168,7 @@ export default tseslint.config(
       "react-hooks/set-state-in-effect": "off",
 
       // Animated values and layout measurements are held in refs and touched
-      // during render on purpose throughout this app; ~150 hits, no bugs.
+      // during render on purpose throughout this app; 148 hits, no bugs.
       "react-hooks/refs": "off",
     },
   },
