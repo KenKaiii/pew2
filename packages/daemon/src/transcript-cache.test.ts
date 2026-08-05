@@ -58,7 +58,7 @@ test("an id full of path characters cannot escape the cache directory", async ()
 test("providers do not share a conversation id", async () => {
   const e = await env();
   await writeTranscript("opencode", "same-id", [update("opencode")], e);
-  await writeTranscript("github-copilot", "same-id", [update("copilot")], e);
+  await writeTranscript("codex", "same-id", [update("copilot")], e);
 
   expect((await readTranscript("opencode", "same-id", e))![0]).toMatchObject({
     update: { content: { text: "opencode" } },

@@ -225,28 +225,6 @@ export const CATALOG: CatalogEntry[] = [
     },
   },
   {
-    id: "github-copilot",
-    name: "GitHub Copilot CLI",
-    probe: ["copilot"],
-    install: "npm install -g @github/copilot",
-    manifest: {
-      id: "github-copilot",
-      name: "GitHub Copilot CLI",
-      version: "1.0.0",
-      description:
-        "GitHub's AI pair programmer, in ACP mode. Requires a Copilot subscription.",
-      distribution: {
-        type: "npx",
-        package: "@github/copilot",
-        version: "latest",
-        args: ["--acp"],
-      },
-      repository: "https://github.com/github/copilot-cli",
-      license: "proprietary",
-      pew: { transport: "acp", color: "#a371f7" },
-    },
-  },
-  {
     id: "cline",
     name: "Cline",
     probe: ["cline"],
