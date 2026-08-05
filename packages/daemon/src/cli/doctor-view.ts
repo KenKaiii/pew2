@@ -111,8 +111,9 @@ export function doctorView(report: DoctorReport, options: RenderOptions = {}): s
 
   const out = [...r.intro("pew2 doctor", "checking this machine")];
 
-  out.push(...r.step("Checked", plural(checks(report).length, "thing")));
-  for (const check of checks(report)) {
+  const facts = checks(report);
+  out.push(...r.step("Checked", plural(facts.length, "thing")));
+  for (const check of facts) {
     const mark = check.ok ? s.hex(PALETTE.success, g.tick) : s.hex(PALETTE.warning, g.dot);
     out.push(r.line(`${mark} ${check.label}${check.note ? s.hex(PALETTE.faint, `  ${check.note}`) : ""}`));
   }

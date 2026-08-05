@@ -47,7 +47,8 @@ import {
 } from "./service.js";
 import { loadPairing, setRelay } from "../pairing.js";
 import { cmdPair } from "./pair.js";
-import { agentSections, outroFor, providerList, rail } from "./setup-view.js";
+import { agentSections, outroFor, providerList } from "./setup-view.js";
+import { rail, plural } from "./rail.js";
 import { PALETTE, colorLevel, glyphs, statusLine, styler, unicodeOk } from "./ui.js";
 // Imported rather than read from disk: this file ends up inside a compiled
 // binary, where there is no package.json next to it to read.
@@ -183,11 +184,6 @@ async function cmdValidate() {
     console.log(line);
   }
   return 0;
-}
-
-/** Shared by the commands that count things, so plurals never drift. */
-function plural(n: number, word: string): string {
-  return `${n} ${word}${n === 1 ? "" : "s"}`;
 }
 
 /** Shared rendering: a problem list is the same shape everywhere it appears. */

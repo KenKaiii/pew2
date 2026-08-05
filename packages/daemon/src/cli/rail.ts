@@ -32,16 +32,7 @@ export function detailWidth(options: RenderOptions): number {
   return Math.max(32, Math.min(96, columns - 6));
 }
 
-/**
- * The vertical rail.
- *
- * Borrowed from the visual language `@clack/prompts` popularised, because it
- * solves the actual problem: it makes a sequence of steps read as one connected
- * flow rather than as unrelated blocks of text scrolling past. Implemented here
- * rather than taken as a dependency, since this ships inside a compiled binary
- * and `ui.ts` already degrades colour and glyphs correctly for terminals that
- * cannot render either.
- */
+/** The pieces of the rail a screen draws with. */
 export interface Rail {
   /** Opens the flow. */
   intro: (title: string, subtitle?: string) => string[];
@@ -55,6 +46,16 @@ export interface Rail {
   outro: (text: string) => string[];
 }
 
+/**
+ * The vertical rail.
+ *
+ * Borrowed from the visual language `@clack/prompts` popularised, because it
+ * solves the actual problem: it makes a sequence of steps read as one connected
+ * flow rather than as unrelated blocks of text scrolling past. Implemented here
+ * rather than taken as a dependency, since this ships inside a compiled binary
+ * and `ui.ts` already degrades colour and glyphs correctly for terminals that
+ * cannot render either.
+ */
 export function rail(options: RenderOptions = {}): Rail {
   const s = options.style ?? styler();
   const g = options.glyph ?? glyphs();
@@ -82,11 +83,11 @@ export function rail(options: RenderOptions = {}): Rail {
   };
 }
 
+/** `1 agent` / `2 agents`. Pluralises the last word, so pass a noun. */
 export function plural(n: number, word: string): string {
   return `${n} ${word}${n === 1 ? "" : "s"}`;
 }
 
-/** Agents report multi-line stack traces; only the first line is readable here. */
 /**
  * An agent's message, wrapped rather than cut.
  *

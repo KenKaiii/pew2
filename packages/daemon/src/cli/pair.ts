@@ -34,6 +34,7 @@ import {
 } from "./ui.js";
 import { rail } from "./rail.js";
 import {
+  closingLines,
   hintLine,
   pairedLine,
   renderPair,
@@ -243,13 +244,8 @@ export async function cmdPair(flags: Set<string>): Promise<number> {
 
   if (!options.wait || !daemonRunning) {
     // Closes the rail. Without an outro, `--no-wait` and every piped run ended
-    // on a dangling pipe: the screen just stopped. The daemon-down warning went
-    // out on a hand-indented line too, which put the single most important line
-    // on this screen outside the rail everything else hangs off.
-    const closing = daemonRunning
-      ? style.dim("Scan the code above when you are ready.")
-      : `${style.hex(PALETTE.danger, glyph.cross)} ${style.bold("Start the daemon before scanning:")} ${style.bold("pew2 service install")}`;
-    for (const line of rail(render).outro(closing)) console.log(line);
+    // on a dangling pipe with no closing mark: the screen simply stopped.
+    for (const line of closingLines(daemonRunning, render)) console.log(line);
     return reach === "unreachable" ? 1 : 0;
   }
 

@@ -80,11 +80,10 @@ export function registryView(result: SyncResult, options: RegistryViewOptions = 
     return out;
   }
 
-  const verb = dryRun ? "would be added" : "added";
   out.push(
     ...r.outro(
       dryRun
-        ? `${s.bold(`${plural(result.written.length, "agent")} ${verb}.`)} ${s.hex(PALETTE.faint, "Run without --dry-run to do it.")}`
+        ? `${s.bold(`${plural(result.written.length, "agent")} would be added.`)} ${s.hex(PALETTE.faint, "Run without --dry-run to do it.")}`
         : `${s.hex(PALETTE.success, g.tick)} ${s.bold(`${plural(result.written.length, "agent")} added.`)} ${s.hex(PALETTE.faint, "Run")} ${s.bold("pew2 providers list")} ${s.hex(PALETTE.faint, "to see them.")}`,
     ),
   );

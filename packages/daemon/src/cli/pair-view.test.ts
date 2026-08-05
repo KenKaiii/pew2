@@ -9,6 +9,7 @@ import { expect, test } from "bun:test";
 import {
   blockWidth,
   centerIndent,
+  closingLines,
   hostOf,
   indent,
   pairedLine,
@@ -189,4 +190,24 @@ test("a QR too wide for the window is left alone rather than indented", () => {
 
   // No rail prefix and no padding: every cell of the window belongs to the code.
   expect(qrLine.startsWith("\x1b[107m")).toBe(true);
+});
+
+test("a screen that will not wait still closes its rail", () => {
+  // `--no-wait` and any piped run used to end on a dangling pipe with no
+  // closing mark, because the outro only existed on the interactive path.
+  const lines = closingLines(true, plain).map(stripAnsi);
+  expect(lines.some((l) => l.startsWith("└"))).toBe(true);
+});
+
+test("a stopped daemon closes with the command that starts it, on the rail", () => {
+  // This line was built by hand inside cmdPair with a literal two-space indent,
+  // which put the most important line on the screen outside the rail.
+  const lines = closingLines(false, plain).map(stripAnsi);
+  const closing = lines.find((l) => l.startsWith("└"))!;
+
+  expect(closing).toContain("Start the daemon before scanning");
+  expect(closing).toContain("pew2 service install");
+  for (const line of lines.filter((l) => l !== "")) {
+    expect(/^[│└]/.test(line)).toBe(true);
+  }
 });

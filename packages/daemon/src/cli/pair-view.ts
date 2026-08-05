@@ -53,6 +53,9 @@ export interface RenderOptions {
   now?: number;
 }
 
+/** Visible width of the rail prefix: the pipe plus its two-space hang. */
+const GUTTER_WIDTH = 3;
+
 /**
  * The rail prefix every line hangs off.
  *
@@ -61,13 +64,12 @@ export interface RenderOptions {
  * The pipe carries colour, so unlike a bare string it has to be built per call
  * from the caller's style.
  */
-const GUTTER_WIDTH = 3;
-
 function gut(options: RenderOptions = {}): string {
   const s = options.style ?? styler();
   const g = options.glyph ?? glyphs();
   return `${s.hex(PALETTE.faint, g.unicode ? "\u2502" : "|")}  `;
 }
+
 /** Label column for the status rows. Wide enough for the longest label. */
 const LABEL = 8;
 
@@ -88,8 +90,11 @@ export function indent(block: string, spaces: number): string {
 
 /**
  * Centre a block within `columns`, never negative and never past the left edge.
- * Falls back to the standard gutter when the block is wider than the terminal,
- * which is the case for a QR in a narrow window.
+ *
+ * Returns 0 — not the gutter — when the block is wider than the terminal, so a
+ * QR in a narrow window gets every cell of the width available to it. Callers
+ * must drop the rail prefix in that case too, or they hand back the columns
+ * this just protected.
  */
 export function centerIndent(blockWidth: number, columns: number): number {
   if (blockWidth >= columns) return 0;
@@ -220,6 +225,25 @@ export function urlBlock(view: PairView, options: RenderOptions = {}): string[] 
   ];
 }
 
+/**
+ * The closing line when the screen is not going to wait for a device.
+ *
+ * Lives here rather than inline in the command because that is how it went
+ * wrong: built by hand inside `cmdPair`, it was the one line on this screen
+ * printed with a literal two-space indent instead of the rail, and no test
+ * could see it. A daemon that is not running is the most important thing this
+ * screen ever says, so it is a rendered value like everything else.
+ */
+export function closingLines(daemonRunning: boolean, options: RenderOptions = {}): string[] {
+  const s = options.style ?? styler();
+  const g = options.glyph ?? glyphs();
+  return rail(options).outro(
+    daemonRunning
+      ? s.dim("Scan the code above when you are ready.")
+      : `${s.hex(PALETTE.danger, g.cross)} ${s.dim("Start the daemon before scanning:")} ${s.bold("pew2 service install")}`,
+  );
+}
+
 /** The waiting line's text, before the spinner glyph is prepended. */
 export function waitingLabel(view: PairView, options: RenderOptions = {}): string {
   const s = options.style ?? styler();
@@ -243,7 +267,6 @@ export function pairedLine(
 
 /** Shown when nobody scanned. Not an error: the link stays valid. */
 export function timeoutLines(options: RenderOptions = {}): string[] {
-  const g_ = gut(options);
   const s = options.style ?? styler();
   const g = options.glyph ?? glyphs();
   return rail(options).outro(
@@ -253,8 +276,8 @@ export function timeoutLines(options: RenderOptions = {}): string[] {
 
 /** The keyboard hint, omitted when there is no keyboard to press. */
 export function hintLine(interactive: boolean, options: RenderOptions = {}): string[] {
-  const g_ = gut(options);
   if (!interactive) return [];
+  const g_ = gut(options);
   const s = options.style ?? styler();
   return [
     rail(options).bar(),

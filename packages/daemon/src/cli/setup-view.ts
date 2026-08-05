@@ -16,16 +16,11 @@
  * spawning a single agent. Every function takes plain data and returns lines.
  */
 import { PALETTE, styler, glyphs } from "./ui.js";
-import {
-  rail,
-  plural,
-  wrapDetail,
-  detailWidth,
-  type RenderOptions,
-} from "./rail.js";
+import { rail, plural, wrapDetail, detailWidth, type RenderOptions } from "./rail.js";
 
+// The type travels with the render functions below, since callers need it to
+// build the options they pass in. The rail itself is imported from `rail.js`.
 export type { RenderOptions };
-export { rail };
 
 /** What we know about one agent after looking at the machine. */
 export interface AgentState {

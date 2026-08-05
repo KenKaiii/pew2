@@ -316,13 +316,12 @@ export function statusLine(
     stream?: NodeJS.WriteStream;
     frames?: string[];
     intervalMs?: number;
-    /** Leading spaces, so the live line sits in the same column as the rest. */
-    indent?: number;
     /**
-     * Literal prefix for the live line, used instead of `indent`.
+     * Literal prefix for the live line, so it sits in the same column as the
+     * rest of the screen.
      *
-     * The rail is a coloured glyph, not whitespace, so a screen drawn on it
-     * cannot line its spinner up with a count of spaces.
+     * A string rather than a space count: the rail is a coloured glyph, not
+     * whitespace, and every screen that uses this now draws on the rail.
      */
     prefix?: string;
   } = {},
@@ -330,7 +329,7 @@ export function statusLine(
   const stream = options.stream ?? process.stdout;
   const frames = options.frames ?? glyphs().spinner;
   const interval = options.intervalMs ?? 80;
-  const pad = options.prefix ?? " ".repeat(options.indent ?? 0);
+  const pad = options.prefix ?? "";
   const style = styler();
   let text = label;
   let frame = 0;

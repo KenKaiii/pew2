@@ -12,7 +12,7 @@ import { stripAnsi, styler, glyphs } from "./ui.js";
 import { agentSections, providerList, type AgentState } from "./setup-view.js";
 import { doctorView } from "./doctor-view.js";
 import { registryView } from "./registry-view.js";
-import { renderPair, type PairView } from "./pair-view.js";
+import { closingLines, renderPair, type PairView } from "./pair-view.js";
 import type { DoctorReport } from "./doctor.js";
 import type { SyncResult } from "./registry-sync.js";
 
@@ -75,8 +75,14 @@ test("the rail is never broken by a blank line mid-screen", () => {
   // separated its warning with "" instead of a `│`, leaving a hole in the rail.
   // Only the opening and closing blank lines are legitimate.
   const rotated = renderPair({ ...pairView, rotated: true }, undefined, plain).map(stripAnsi);
-  const inner = rotated.slice(1, -1);
-  expect(inner.filter((l) => l === "")).toEqual([]);
+  // Trim the leading and trailing blanks the intro and outro own, then assert
+  // on what is left — rather than slicing fixed indices, which would silently
+  // stop covering the last line if the screen grew one.
+  let start = 0;
+  let end = rotated.length;
+  while (start < end && rotated[start] === "") start++;
+  while (end > start && rotated[end - 1] === "") end--;
+  expect(rotated.slice(start, end).filter((l) => l === "")).toEqual([]);
 });
 
 test("every full screen opens with the mark and names itself pew2", () => {
@@ -160,11 +166,13 @@ test("all screens degrade to ASCII together", () => {
       ascii,
     ),
     renderPair(pairView, undefined, ascii),
+    // Both closings: the daemon-down one carries a cross glyph.
+    closingLines(true, ascii),
+    closingLines(false, ascii),
   ];
 
   for (const lines of rendered) {
     const text = stripAnsi(lines.join("\n"));
-    // eslint-disable-next-line no-control-regex
     expect(/[^\x00-\x7F]/.test(text)).toBe(false);
   }
 });
