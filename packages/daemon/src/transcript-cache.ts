@@ -18,7 +18,7 @@
  * to, and nothing here leaves the machine. Deleting the directory costs a
  * slower first open and nothing else.
  */
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { userProvidersDir } from "./providers/registry.js";
 
@@ -40,6 +40,16 @@ export interface CachedTranscript {
  * screen, so an over-long transcript keeps its tail.
  */
 const MAX_UPDATES = 400;
+
+/**
+ * How many conversations keep a cached transcript per agent.
+ *
+ * Each file is capped, but the number of files was not: one per conversation,
+ * kept forever, on a machine where someone opens a few every day. The oldest
+ * are dropped, since the cache only ever saves time on a conversation being
+ * reopened and the recent ones are the ones that get reopened.
+ */
+const MAX_TRANSCRIPTS_PER_PROVIDER = 200;
 
 function transcriptPath(
   providerId: string,
@@ -101,8 +111,40 @@ export async function writeTranscript(
     const temp = `${path}.${process.pid}.tmp`;
     await writeFile(temp, JSON.stringify(body), "utf8");
     await rename(temp, path);
+    await prune(dirname(path));
   } catch {
     // Best effort. A cache that cannot be written costs a slow open, and the
     // conversation itself is unaffected.
+  }
+}
+
+/** Drop the oldest transcripts once a provider has too many. */
+async function prune(dir: string): Promise<void> {
+  try {
+    const names = (await readdir(dir)).filter((name) => name.endsWith(".json"));
+    if (names.length <= MAX_TRANSCRIPTS_PER_PROVIDER) return;
+
+    const withTimes = await Promise.all(
+      names.map(async (name) => {
+        const full = join(dir, name);
+        try {
+          return { full, at: (await stat(full)).mtimeMs };
+        } catch {
+          // Vanished between the listing and the stat.
+          return undefined;
+        }
+      }),
+    );
+
+    const sorted = withTimes
+      .filter((entry): entry is { full: string; at: number } => entry !== undefined)
+      .sort((a, b) => a.at - b.at);
+
+    for (const entry of sorted.slice(0, sorted.length - MAX_TRANSCRIPTS_PER_PROVIDER)) {
+      await rm(entry.full, { force: true });
+    }
+  } catch {
+    // A cache that cannot be pruned is a disk-space question, not a correctness
+    // one. The conversation is unaffected either way.
   }
 }

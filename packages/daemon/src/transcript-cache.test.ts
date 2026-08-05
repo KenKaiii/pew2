@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readTranscript, writeTranscript } from "./transcript-cache.js";
@@ -96,4 +96,21 @@ test("two ids that scrub to the same filename do not show each other's messages"
   expect((await readTranscript("opencode", "a/b", e))![0]).toMatchObject({
     update: { content: { text: "from a slash b" } },
   });
+});
+
+test("the cache does not grow one file per conversation forever", async () => {
+  // Each file is capped, but the number of them was not: one per conversation,
+  // kept indefinitely, on a machine where someone opens a few every day.
+  const e = await env();
+  for (let i = 0; i < 210; i++) {
+    await writeTranscript("opencode", `ses_${i}`, [update(`message ${i}`)], e);
+  }
+
+  // PEW2_HOME is the .pew2 directory itself, not its parent.
+  const dir = join(e.PEW2_HOME!, "cache", "transcripts", "opencode");
+  const files = (await readdir(dir)).filter((f) => f.endsWith(".json"));
+  expect(files.length).toBeLessThanOrEqual(200);
+
+  // The newest survive: those are the ones that get reopened.
+  expect(await readTranscript("opencode", "ses_209", e)).toBeDefined();
 });
