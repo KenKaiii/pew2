@@ -206,7 +206,9 @@ test("a warm spare is offered before the probe finishes listing history", async 
 
     await (daemon as any).awaitSpare("echo");
 
-    expect((daemon as any).spares.has("echo")).toBe(true);
+    // Asked by directory rather than by provider id: spares are keyed by both,
+    // so that a second project can stay warm too.
+    expect(daemon.spareDirs("echo").length).toBeGreaterThan(0);
     expect(listed).toBe(false);
 
     await probe;

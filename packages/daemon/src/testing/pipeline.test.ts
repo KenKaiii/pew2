@@ -102,7 +102,7 @@ test("a session adopts the warm spare instead of spawning again", async () => {
   // disk-cached probe from an earlier run would answer without spawning, and
   // there would be no spare to adopt.
   await daemon.probeProvider("echo", { refresh: true });
-  const spare = (daemon as any).spares.get("echo")?.handle;
+  const spare = (daemon as any).spares.get(`echo\u0000${process.cwd()}`)?.handle;
   expect(spare).toBeDefined();
 
   const sessionId = await daemon.startSession("echo", process.cwd());
@@ -279,19 +279,49 @@ test("a warm process is not reused for a different project", async () => {
 
   try {
     await daemon.probeProvider("echo", { refresh: true });
-    const spares = (daemon as unknown as { spares: Map<string, { cwd: string }> }).spares;
-    const warmed = spares.get("echo");
-    expect(warmed).toBeDefined();
+    const warmedDirs = daemon.spareDirs("echo");
+    expect(warmedDirs.length).toBe(1);
+    const warmed = { cwd: warmedDirs[0]! };
 
     // Somewhere real, and definitely not where the spare was booted.
     const elsewhere = await mkdtemp(join(tmpdir(), "pew2-elsewhere-"));
-    expect(elsewhere).not.toBe(warmed!.cwd);
+    expect(elsewhere).not.toBe(warmed.cwd);
 
     await daemon.startSession("echo", elsewhere);
 
-    // Untouched: the session spawned its own process rather than taking one
-    // pinned to another directory.
-    expect(spares.get("echo")?.cwd).toBe(warmed!.cwd);
+    // The original spare is still there, untouched: the session spawned its own
+    // process rather than taking one pinned to another directory.
+    expect(daemon.spareDirs("echo")).toContain(warmed.cwd);
+  } finally {
+    daemon.closeAll();
+  }
+}, 60_000);
+
+test("a second project can be warm at the same time as the first", async () => {
+  // The cost of keying spares by directory, paid back. Keyed by provider alone,
+  // exactly one project could be warm and every other one paid a full cold
+  // spawn — two to three seconds of empty thread after tapping a conversation.
+  const { Daemon } = await import("../index.js");
+  const daemon = new Daemon({ id: "test", name: "test" }, true);
+  await daemon.refreshProviders();
+
+  try {
+    await daemon.probeProvider("echo", { refresh: true });
+    const first = daemon.spareDirs("echo")[0]!;
+
+    // Opening elsewhere spawns cold and leaves its own process behind.
+    const elsewhere = await mkdtemp(join(tmpdir(), "pew2-second-"));
+    await daemon.startSession("echo", elsewhere);
+    await new Promise((r) => setTimeout(r, 800));
+
+    const dirs = daemon.spareDirs("echo");
+    expect(dirs).toContain(first);
+    expect(dirs).toContain(elsewhere);
+
+    // And the next conversation there adopts it rather than spawning again.
+    const before = daemon.spareDirs("echo").length;
+    await daemon.startSession("echo", elsewhere);
+    expect(daemon.spareDirs("echo").length).toBeLessThan(before + 1);
   } finally {
     daemon.closeAll();
   }

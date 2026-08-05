@@ -162,13 +162,19 @@ export class Daemon {
    * idles out after `SPARE_TTL_MS` so an unused agent does not run forever.
    */
   private readonly spares = new Map<
+    // Keyed by provider *and* directory. `cwd` is part of a spare's identity
+    // rather than a note about it: some agents ignore ACP's per-session `cwd`
+    // and run wherever their process was spawned, so a warm process is only
+    // reusable for the project it was booted for.
+    //
+    // Keyed by provider alone, only one project could be warm at a time, and
+    // opening a conversation in any other one paid a full cold spawn — two to
+    // three seconds of staring at an empty thread.
     string,
-    // `cwd` is part of the identity of a spare, not a note about it. Some
-    // agents ignore ACP's per-session `cwd` and run in the directory their
-    // process was spawned in, so a warm process is only reusable for the
-    // project it was booted for.
     { handle: AcpSessionHandle; timer: NodeJS.Timeout; cwd: string }
   >();
+  /** At most this many warm processes per provider, oldest evicted first. */
+  private static readonly MAX_SPARES_PER_PROVIDER = 3;
   /** Provider boots already in flight, shared by a tap instead of duplicated. */
   private readonly warming = new Map<string, Promise<void>>();
   /**
@@ -197,8 +203,32 @@ export class Daemon {
     this.send({ t: "provider.capabilities", providerId, ...fresh });
   }
 
+  /**
+   * Boot a spare in a specific directory, in the background.
+   *
+   * Separate from `warmProvider`, which exists to refresh capabilities and can
+   * only ever warm the probe's own workspace.
+   */
+  private async warmSpareFor(provider: LoadedProvider, cwd: string): Promise<void> {
+    if (this.spares.has(Daemon.spareKey(provider.manifest.id, cwd))) return;
+    try {
+      const handle = await connectProvider({
+        provider,
+        cwd,
+        onUpdate: () => {},
+        onPermissionRequest: () => {},
+      });
+      this.stashSpare(provider.manifest.id, handle, cwd);
+    } catch {
+      // Best effort. The next conversation here spawns cold, which is the
+      // behaviour this is trying to improve on rather than depend on.
+    }
+  }
+
   private warmProvider(providerId: string): Promise<void> {
-    if (this.spares.has(providerId)) {
+    // Any warm process for this provider is enough to skip the boot; the
+    // directory match is `takeSpare`'s business, not this one's.
+    if (this.hasSpare(providerId)) {
       // A spare is already waiting, so anyone armed by a probe that took the
       // disk-cache path has nothing left to wait for. Releasing here is what
       // stops `awaitSpare` blocking on a boot that will never be started.
@@ -313,19 +343,61 @@ export class Daemon {
     await this.spareReady.get(providerId)?.ready;
   }
 
+  /**
+   * The directories a provider currently has a warm process in.
+   *
+   * Exposed for tests, which previously reached into the private map by
+   * provider id \u2014 so keying spares by directory broke three of them without
+   * any behaviour changing. An accessor keeps them honest about what they are
+   * really asserting.
+   */
+  spareDirs(providerId: string): string[] {
+    const prefix = `${providerId}\u0000`;
+    return [...this.spares.entries()]
+      .filter(([key]) => key.startsWith(prefix))
+      .map(([, spare]) => spare.cwd);
+  }
+
+  /** Whether any warm process exists for a provider, in any directory. */
+  private hasSpare(providerId: string): boolean {
+    for (const key of this.spares.keys()) if (key.startsWith(`${providerId}\u0000`)) return true;
+    return false;
+  }
+
+  /** The map key for a warm process. */
+  private static spareKey(providerId: string, cwd: string): string {
+    return `${providerId}\u0000${cwd}`;
+  }
+
   private stashSpare(providerId: string, handle: AcpSessionHandle, cwd: string) {
-    const old = this.spares.get(providerId);
+    const key = Daemon.spareKey(providerId, cwd);
+    const old = this.spares.get(key);
     if (old) {
       clearTimeout(old.timer);
       old.handle.close();
     }
+
+    // Bounded per provider, oldest first. Each spare is a live agent process
+    // holding memory and a model connection, so "keep one per project" cannot
+    // mean "keep one per project the user has ever opened".
+    const mine = [...this.spares.keys()].filter((k) => k.startsWith(`${providerId}\u0000`));
+    while (mine.length >= Daemon.MAX_SPARES_PER_PROVIDER) {
+      const evict = mine.shift()!;
+      const spare = this.spares.get(evict);
+      if (spare) {
+        clearTimeout(spare.timer);
+        spare.handle.close();
+        this.spares.delete(evict);
+      }
+    }
+
     const timer = setTimeout(() => {
-      this.spares.delete(providerId);
+      this.spares.delete(key);
       handle.close();
     }, Daemon.SPARE_TTL_MS);
     // The timer must not keep the daemon process alive on its own.
     timer.unref?.();
-    this.spares.set(providerId, { handle, timer, cwd });
+    this.spares.set(key, { handle, timer, cwd });
   }
 
   /**
@@ -351,10 +423,11 @@ export class Daemon {
    * exactly that.
    */
   private takeSpare(providerId: string, cwd: string): AcpSessionHandle | undefined {
-    const spare = this.spares.get(providerId);
-    if (!spare || spare.cwd !== cwd) return undefined;
+    const key = Daemon.spareKey(providerId, cwd);
+    const spare = this.spares.get(key);
+    if (!spare) return undefined;
     clearTimeout(spare.timer);
-    this.spares.delete(providerId);
+    this.spares.delete(key);
     return spare.handle;
   }
 
@@ -460,7 +533,12 @@ export class Daemon {
 
     // The spare is spent; quietly boot the next one so the session after this
     // opens instantly too. Failure here only means that open is cold again.
-    void this.warmProvider(provider.manifest.id);
+    //
+    // Warmed for *this* project, not the probe's. `warmProvider` re-runs the
+    // capability probe, which always boots in `resolveWorkspace()` — so on its
+    // own it leaves the directory the user is actually working in permanently
+    // cold, and every conversation there pays the spawn again.
+    void this.warmSpareFor(provider, cwd);
   }
 
   /**

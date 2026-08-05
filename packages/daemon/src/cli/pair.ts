@@ -19,6 +19,7 @@
  * it is printed, and `--no-wait` or Ctrl-C leaves it that way.
  */
 import { hostname } from "node:os";
+import { SecureChannel, e2e, wire } from "@pew2/protocol";
 import { daemonPort, daemonUrl } from "./doctor.js";
 import { lanAddresses, loadPairing, pairingUrl, qrCode, rotatePairing } from "../pairing.js";
 import {
@@ -98,16 +99,28 @@ export interface WaitResult {
  * phone on a mobile network too: the daemon announces `device.joined` on every
  * transport it is attached to, so a relay-side arrival reaches this socket.
  *
+ * The socket has to authenticate like any other client. Broadcasts are sealed
+ * per client and skip anyone unproven, so the version of this that stayed
+ * deliberately silent stopped seeing `device.joined` the day both transports
+ * were encrypted \u2014 and `pew2 pair` sat on "waiting for your phone" while the
+ * phone was already connected and working.
+ *
  * Deliberately silent about failure. Not being able to watch is not a pairing
  * problem, and the QR above is valid either way.
  */
 export function waitForDevice(options: {
   url: string;
+  /** Root pairing key, hex. Without it the join can be seen but not read. */
+  rootKey?: string;
   timeoutMs?: number;
   createSocket?: (url: string) => WebSocket;
   signal?: AbortSignal;
 }): Promise<WaitResult | null> {
   const started = Date.now();
+
+  const channel = options.rootKey
+    ? new SecureChannel(e2e.fromHex(options.rootKey), "app")
+    : undefined;
 
   return new Promise((resolve) => {
     let socket: WebSocket | null = null;
@@ -138,10 +151,32 @@ export function waitForDevice(options: {
       return;
     }
 
+    socket.onopen = () => {
+      // Proves this socket, so the daemon will seal broadcasts to it. Without
+      // this the daemon treats it as unproven and it never hears anything.
+      if (!channel) return;
+      try {
+        socket?.send(
+          JSON.stringify({
+            t: "hello",
+            wire: wire.WIRE_VERSION,
+            deviceId: cliDeviceId(),
+            proof: channel.proof(cliDeviceId()),
+          }),
+        );
+      } catch {
+        finish(null);
+      }
+    };
+
     socket.onmessage = (event) => {
       if (typeof event.data !== "string") return;
       try {
-        const message = JSON.parse(event.data) as { t?: string; deviceId?: string };
+        const raw: unknown = JSON.parse(event.data);
+        const opened =
+          (raw as { t?: string }).t === "e" && channel ? channel.open(raw) : raw;
+        if (!opened) return;
+        const message = opened as { t?: string; deviceId?: string };
         if (message.t !== "device.joined") return;
         // This socket deliberately never sends `hello`, so it does not announce
         // itself and should never see its own id here. The guard costs nothing
@@ -249,7 +284,7 @@ export async function cmdPair(flags: Set<string>): Promise<number> {
     return reach === "unreachable" ? 1 : 0;
   }
 
-  return waitInteractively(view, render);
+  return waitInteractively(view, pairing.key, render);
 }
 
 /**
@@ -258,6 +293,14 @@ export async function cmdPair(flags: Set<string>): Promise<number> {
  */
 async function waitInteractively(
   view: PairView,
+  /**
+   * The pairing key, hex.
+   *
+   * Passed separately rather than added to `PairView`, which is a description
+   * of what gets drawn on screen \u2014 the key is the one part of a pairing that
+   * must never be rendered.
+   */
+  rootKey: string | undefined,
   render: { style: ReturnType<typeof styler>; glyph: ReturnType<typeof glyphs>; columns: number },
 ): Promise<number> {
   const { style, glyph } = render;
@@ -293,6 +336,7 @@ async function waitInteractively(
 
   const result = await waitForDevice({
     url: `ws://127.0.0.1:${view.port}/?token=${encodeURIComponent(view.token)}`,
+    rootKey,
     signal: controller.signal,
   });
 
