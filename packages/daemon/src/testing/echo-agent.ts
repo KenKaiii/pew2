@@ -13,6 +13,15 @@ import { agent, ndJsonStream } from "@agentclientprotocol/sdk";
 import { Readable, Writable } from "node:stream";
 
 const sessions = new Set<string>();
+/**
+ * The `cwd` each session was opened with.
+ *
+ * A real agent runs the conversation in this directory, so answering "which
+ * project am I in" is the one question that proves the client sent the right
+ * one. The fixture ignored `cwd` entirely before, which is why a bug that sent
+ * the wrong project to every warm-started session went unnoticed.
+ */
+const sessionCwd = new Map<string, string>();
 let counter = 0;
 
 /**
@@ -58,9 +67,10 @@ const app = agent({ name: "pew2-echo" })
     agentInfo: { name: "pew2-echo", title: "Echo", version: "0.1.0" },
     authMethods: [],
   }))
-  .onRequest("session/new", async () => {
+  .onRequest("session/new", async (ctx: any) => {
     const sessionId = `echo_${++counter}`;
     sessions.add(sessionId);
+    sessionCwd.set(sessionId, (ctx.params as { cwd?: string })?.cwd ?? "");
     return { sessionId, configOptions };
   })
   // A persisted conversation that exists before the phone opens it. It omits
@@ -114,6 +124,19 @@ const app = agent({ name: "pew2-echo" })
       prompt: { type: string; text?: string }[];
     };
     const text = prompt.map((p) => p.text ?? "").join(" ").trim();
+
+    // Ask it where it is and it answers honestly, exactly as a real agent does.
+    // This is the only way a test can see the `cwd` the daemon actually sent.
+    if (text === "pwd") {
+      await ctx.client.notify("session/update", {
+        sessionId,
+        update: {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: sessionCwd.get(sessionId) ?? "" },
+        },
+      });
+      return { stopReason: "end_turn" };
+    }
 
     await ctx.client.notify("session/update", {
       sessionId,

@@ -4,7 +4,9 @@
  * These run with no API key and no network, so they are safe to run in CI and
  * are the regression net for the provider contract itself.
  */
-import { basename } from "node:path";
+import { basename, join } from "node:path";
+import { mkdtemp } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import { test, expect } from "bun:test";
 import { loadProviders } from "../providers/registry.js";
 import { connectProvider } from "../acp/connect.js";
@@ -157,6 +159,7 @@ test("updates route to the session they belong to on a reused connection", async
     const firstSessionId = handle.sessionId;
     const seen: unknown[] = [];
     await handle.adopt({
+      cwd: process.cwd(),
       onUpdate: (payload) => seen.push(payload),
       onPermissionRequest: () => {},
     });
@@ -215,3 +218,81 @@ test("replay after a cursor returns only newer events", () => {
   expect(log.since(0).map((e) => (e.payload as any).n)).toEqual([2, 3]);
   expect(log.since(2)).toHaveLength(0);
 });
+
+test("an adopted warm process opens in the project it was asked for", async () => {
+  // The bug this pins: the daemon keeps a warm agent process so a new
+  // conversation opens instantly, but that process was booted by the
+  // capability probe against the *probe's* workspace — the home directory,
+  // under launchd. Adoption then created the session without saying where it
+  // should run, so the agent inherited the spawn directory.
+  //
+  // The symptom was picking a project on the phone, asking the agent what
+  // directory it was in, and being told the home folder. Everything looked
+  // connected; the work would just have happened in the wrong place.
+  const handle = await connectProvider({
+    provider: await echoProvider(),
+    // Stand-in for the probe's workspace: not the project, and not where the
+    // next conversation should run.
+    cwd: homedir(),
+    onUpdate: () => {},
+    onPermissionRequest: () => {},
+  });
+
+  try {
+    const project = process.cwd();
+    const said: string[] = [];
+    await handle.adopt({
+      cwd: project,
+      onUpdate: (payload) => {
+        const update = (payload as { update?: { content?: { text?: string } } }).update;
+        const text = update?.content?.text;
+        if (typeof text === "string") said.push(text);
+      },
+      onPermissionRequest: () => {},
+    });
+
+    await handle.prompt("pwd");
+    await new Promise((r) => setTimeout(r, 500));
+
+    expect(said).toContain(project);
+    expect(said).not.toContain(homedir());
+  } finally {
+    handle.close();
+  }
+}, 60_000);
+
+test("a warm process is not reused for a different project", async () => {
+  // The second half of the same bug, and the worse half.
+  //
+  // Passing `cwd` on `session/new` fixes agents that honour it. Several do not:
+  // they run in whatever directory their process was spawned in, so a warm
+  // process booted for one project cannot be moved to another at all. Adopting
+  // one anyway gave an agent that looked connected and correct while reading
+  // and writing a completely different tree.
+  //
+  // So a spare is identified by its directory, and a session somewhere else
+  // spawns cold instead. Verified through the daemon rather than the handle,
+  // because the decision lives in `takeSpare`.
+  const { Daemon } = await import("../index.js");
+  const daemon = new Daemon({ id: "test", name: "test" }, true);
+  await daemon.refreshProviders();
+
+  try {
+    await daemon.probeProvider("echo", { refresh: true });
+    const spares = (daemon as unknown as { spares: Map<string, { cwd: string }> }).spares;
+    const warmed = spares.get("echo");
+    expect(warmed).toBeDefined();
+
+    // Somewhere real, and definitely not where the spare was booted.
+    const elsewhere = await mkdtemp(join(tmpdir(), "pew2-elsewhere-"));
+    expect(elsewhere).not.toBe(warmed!.cwd);
+
+    await daemon.startSession("echo", elsewhere);
+
+    // Untouched: the session spawned its own process rather than taking one
+    // pinned to another directory.
+    expect(spares.get("echo")?.cwd).toBe(warmed!.cwd);
+  } finally {
+    daemon.closeAll();
+  }
+}, 60_000);

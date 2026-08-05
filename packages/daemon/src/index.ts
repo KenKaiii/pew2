@@ -161,7 +161,14 @@ export class Daemon {
    * session *adopts* this process instead of paying the spawn again. A spare
    * idles out after `SPARE_TTL_MS` so an unused agent does not run forever.
    */
-  private readonly spares = new Map<string, { handle: AcpSessionHandle; timer: NodeJS.Timeout }>();
+  private readonly spares = new Map<
+    string,
+    // `cwd` is part of the identity of a spare, not a note about it. Some
+    // agents ignore ACP's per-session `cwd` and run in the directory their
+    // process was spawned in, so a warm process is only reusable for the
+    // project it was booted for.
+    { handle: AcpSessionHandle; timer: NodeJS.Timeout; cwd: string }
+  >();
   /** Provider boots already in flight, shared by a tap instead of duplicated. */
   private readonly warming = new Map<string, Promise<void>>();
   /**
@@ -306,7 +313,7 @@ export class Daemon {
     await this.spareReady.get(providerId)?.ready;
   }
 
-  private stashSpare(providerId: string, handle: AcpSessionHandle) {
+  private stashSpare(providerId: string, handle: AcpSessionHandle, cwd: string) {
     const old = this.spares.get(providerId);
     if (old) {
       clearTimeout(old.timer);
@@ -318,12 +325,34 @@ export class Daemon {
     }, Daemon.SPARE_TTL_MS);
     // The timer must not keep the daemon process alive on its own.
     timer.unref?.();
-    this.spares.set(providerId, { handle, timer });
+    this.spares.set(providerId, { handle, timer, cwd });
   }
 
-  private takeSpare(providerId: string): AcpSessionHandle | undefined {
+  /**
+   * A warm process for this provider, but only if it is already in the right
+   * directory.
+   *
+   * The cwd check is the whole point. ACP passes a `cwd` with every
+   * `session/new`, and well-behaved agents honour it — but several do not, and
+   * simply run wherever their process was started. Adopting one of those for a
+   * different project produced an agent that looked connected and correct while
+   * reading and writing entirely the wrong tree, which is about the worst
+   * failure this daemon could have.
+   *
+   * A mismatch is left in place rather than closed: it may still be adopted by
+   * the next session in its own project, and `SPARE_TTL_MS` reaps it otherwise.
+   *
+   * The cost is real and worth stating: spares are only ever booted by the
+   * capability probe, which runs in `resolveWorkspace()` — the home directory
+   * under launchd. A conversation opened in an actual project therefore misses
+   * the warm path and pays the cold spawn. That is the right way round. A few
+   * seconds of boot is a worse outcome than an agent confidently editing the
+   * wrong repository, and the previous behaviour bought its speed by doing
+   * exactly that.
+   */
+  private takeSpare(providerId: string, cwd: string): AcpSessionHandle | undefined {
     const spare = this.spares.get(providerId);
-    if (!spare) return undefined;
+    if (!spare || spare.cwd !== cwd) return undefined;
     clearTimeout(spare.timer);
     this.spares.delete(providerId);
     return spare.handle;
@@ -382,17 +411,19 @@ export class Daemon {
       },
     };
 
-    let spare = this.takeSpare(provider.manifest.id);
+    let spare = this.takeSpare(provider.manifest.id, cwd);
     if (!spare) {
       // Join the background boot started alongside a disk-cached history list
       // instead of spawning a duplicate process on tap. Only the process is
       // waited for: the probe's own `session/list` keeps running behind this.
       await this.awaitSpare(provider.manifest.id);
-      spare = this.takeSpare(provider.manifest.id);
+      spare = this.takeSpare(provider.manifest.id, cwd);
     }
     if (spare) {
       try {
-        await spare.adopt({ loadSessionId, ...agentCallbacks });
+        // `cwd` is what makes the spare usable for this conversation: the warm
+        // process was booted for the probe's workspace, not this project.
+        await spare.adopt({ loadSessionId, cwd, ...agentCallbacks });
         session.handle = spare;
       } catch {
         spare.close();
@@ -839,7 +870,7 @@ export class Daemon {
         // and a new conversation needs none of it. Whoever adopts this calls
         // `session/new` on the same process; `listSessions` does not touch the
         // adopted session, so the two can safely overlap.
-        this.stashSpare(providerId, booted);
+        this.stashSpare(providerId, booted, workspace);
         handle = undefined;
         announceSpare();
 

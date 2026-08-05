@@ -217,6 +217,16 @@ export interface AcpSessionHandle {
 export interface AdoptOptions {
   /** Resume this stored session; a fresh one is created when omitted. */
   loadSessionId?: string;
+  /**
+   * The project this conversation opens in.
+   *
+   * Required, and not optional with a fallback: a warm process was spawned for
+   * whatever workspace the capability probe happened to use, which under
+   * launchd is the home directory. Reusing that for a session the user opened
+   * against a chosen project is what made the agent report the wrong `cwd` —
+   * so every adopt has to say where it is going.
+   */
+  cwd: string;
   onUpdate: (payload: unknown) => void;
   onPermissionRequest: (request: { requestId: string; params: unknown }) => void;
   onConfigOptions?: (options: ConfigOption[]) => void;
@@ -619,6 +629,12 @@ export async function connectProvider(options: ConnectOptions): Promise<AcpSessi
   // it resolves, so the route must exist before the request is made.
   async function openSession(
     loadSessionId: string | undefined,
+    /**
+     * Where this session runs. Defaults to the directory the process was
+     * spawned in, which is right for the first session on a cold connection
+     * and wrong for every adopted one.
+     */
+    sessionCwd: string,
     route: {
       onUpdate: (payload: unknown) => void;
       onPermissionRequest: ConnectOptions["onPermissionRequest"];
@@ -639,13 +655,13 @@ export async function connectProvider(options: ConnectOptions): Promise<AcpSessi
         ? {
             ...((await connection.agent.request("session/load", {
               sessionId: loadSessionId,
-              cwd,
+              cwd: sessionCwd,
               mcpServers: [],
             })) as Omit<NewSessionResult, "sessionId">),
             sessionId: loadSessionId,
           }
         : ((await connection.agent.request("session/new", {
-            cwd,
+            cwd: sessionCwd,
             mcpServers: [],
           })) as NewSessionResult);
       updateHandlers.set(created.sessionId, route.onUpdate);
@@ -657,7 +673,7 @@ export async function connectProvider(options: ConnectOptions): Promise<AcpSessi
     }
   }
 
-  current = await openSession(options.loadSessionId, {
+  current = await openSession(options.loadSessionId, cwd, {
     onUpdate: options.onUpdate,
     onPermissionRequest: options.onPermissionRequest,
     onConfigOptions: options.onConfigOptions,
@@ -678,7 +694,7 @@ export async function connectProvider(options: ConnectOptions): Promise<AcpSessi
     canLoadSession,
 
     async adopt(adoptOptions: AdoptOptions) {
-      current = await openSession(adoptOptions.loadSessionId, {
+      current = await openSession(adoptOptions.loadSessionId, adoptOptions.cwd, {
         onUpdate: adoptOptions.onUpdate,
         onPermissionRequest: adoptOptions.onPermissionRequest,
         onConfigOptions: adoptOptions.onConfigOptions,
