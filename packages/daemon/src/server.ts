@@ -12,7 +12,8 @@
  * conversation at once.
  */
 import { Daemon } from "./index.js";
-import { loadPairing, pairingUrl, qrCode, tokenMatches } from "./pairing.js";
+import { loadPairing, pairingPath, pairingUrl, qrCode, tokenMatches } from "./pairing.js";
+import { watchPairing } from "./pairing-watch.js";
 import { SecureChannel, e2e, envelopeHeader, wire } from "@pew2/protocol";
 import { handleMessage } from "./handler.js";
 import { RelayClient } from "./relay-client.js";
@@ -49,7 +50,11 @@ if (!pairing.key) {
   console.error("This pairing has no encryption key. Run `pew2 pair --rotate` and pair again.");
   process.exit(1);
 }
-const rootKey = e2e.fromHex(pairing.key);
+// Both transports read the pairing through these rather than closing over the
+// values loaded at startup, because `pew2 pair --rotate` changes them while the
+// daemon is running. See `watchPairing` at the bottom of this file.
+let currentToken = pairing.token;
+let rootKey = e2e.fromHex(pairing.key);
 
 /**
  * One connection's encryption state.
@@ -148,7 +153,7 @@ const server = Bun.serve({
     // The token is the only thing standing between the open network and every
     // agent on this machine, so it is checked before the upgrade rather than in
     // the first message: an unpaired socket is never established at all.
-    if (!tokenMatches(pairing.token, url.searchParams.get("token"))) {
+    if (!tokenMatches(currentToken, url.searchParams.get("token"))) {
       console.error(`[pairing] rejected connection from ${server.requestIP(request)?.address ?? "unknown"}`);
       return new Response("pairing token required", { status: 401 });
     }
@@ -262,12 +267,42 @@ console.log(
     : `Same network only. For anywhere: pew2 relay <url>\n`,
 );
 
+// `pew2 pair --rotate` rewrites this file while the daemon is running. Watching
+// it is what stops a rotation from stranding the daemon in the old relay room,
+// where the newly paired phone can never reach it.
+const stopWatching = watchPairing(pairingPath(), pairing, () => loadPairing(), {
+  onPairing: (next) => {
+    // Decoded first. `loadPairing` only checks the key's length, so a
+    // hand-edited file can hold 64 non-hex characters and throw here — and
+    // assigning the token before that throw would leave the daemon accepting a
+    // token it has no matching key for, which is worse than not rotating.
+    const decoded = e2e.fromHex(next.key!);
+    currentToken = next.token;
+    rootKey = decoded;
+  },
+  disconnectClients: () => {
+    // Sealed with the previous key, so they cannot be carried across. The app
+    // reconnects by itself and the new pairing takes effect on the next socket.
+    for (const [ws] of clients) {
+      try {
+        ws.close(1012, "pairing rotated");
+      } catch {
+        // Already gone.
+      }
+    }
+    clients.clear();
+  },
+  rekeyRelay: relay ? (token, key) => relay.rekey(token, key) : undefined,
+  log: (message) => console.log(message),
+});
+
 // A misbehaving agent process must never take the daemon down with it; every
 // client would lose its session.
 process.on("uncaughtException", (error) => console.error("[uncaught]", error));
 process.on("unhandledRejection", (error) => console.error("[unhandled]", error));
 
 process.on("SIGINT", () => {
+  stopWatching();
   relay?.stop();
   daemon.closeAll();
   process.exit(0);

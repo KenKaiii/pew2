@@ -325,3 +325,75 @@ test("a malformed or unsealed frame is dropped, not answered", async () => {
   expect(() => relay.send({ t: "ping" })).not.toThrow();
   relay.stop();
 });
+
+test("rotating the pairing moves the daemon into the new relay room", () => {
+  // The room id is derived from the token and fixed when the socket opens, so a
+  // rotation cannot be applied to a live connection. Before this, `pew2 pair`
+  // left the daemon listening in the old room while the freshly paired phone
+  // joined the new one, and only a restart cleared it.
+  const { relay } = client();
+  relay.start();
+  FakeSocket.instances[0]!.open();
+
+  const before = FakeSocket.instances.length;
+  relay.rekey("new-token", "ff".repeat(32));
+
+  // A fresh socket, pointed at the new room.
+  expect(FakeSocket.instances.length).toBe(before + 1);
+  expect(relay.endpoint).toContain("pairing=new-token");
+  expect(FakeSocket.instances.at(-1)!.url).toContain("pairing=new-token");
+  relay.stop();
+});
+
+test("rekeying with the same credentials does not drop the connection", () => {
+  // The pairing file is written more than once per save, so an unchanged
+  // rotation must not cost the phone its live session.
+  const { relay } = client({ token: "same-token", key: "aa".repeat(32) });
+  relay.start();
+  FakeSocket.instances[0]!.open();
+
+  const before = FakeSocket.instances.length;
+  relay.rekey("same-token", "aa".repeat(32));
+
+  expect(FakeSocket.instances.length).toBe(before);
+  relay.stop();
+});
+
+test("a stopped client does not silently start on rekey", () => {
+  // `stop()` is called on shutdown. A rotation racing it must not resurrect the
+  // socket after the daemon has decided to go away.
+  const { relay } = client();
+  relay.start();
+  FakeSocket.instances[0]!.open();
+  relay.stop();
+
+  const before = FakeSocket.instances.length;
+  relay.rekey("another-token", "bb".repeat(32));
+
+  expect(FakeSocket.instances.length).toBe(before);
+});
+
+test("a rekeyed client does not leave the old socket scheduling retries", () => {
+  // Found by rotating twice against a live daemon: the relay flapped between
+  // online and offline and nothing could reach it. `rekey` closes the old
+  // socket and opens a new one, but the old `onclose` fires *after* that — and
+  // unguarded it nulled the new socket and scheduled a retry beside it, so two
+  // connections raced each other indefinitely.
+  const { relay, statuses } = client();
+  relay.start();
+  const first = FakeSocket.instances[0]!;
+  first.open();
+
+  relay.rekey("rotated-token", "cc".repeat(32));
+  const second = FakeSocket.instances.at(-1)!;
+  second.open();
+
+  // The old socket's close lands late, after the replacement is already up.
+  first.close();
+
+  // Still exactly the two sockets: no retry was scheduled on top of the new one.
+  expect(FakeSocket.instances.length).toBe(2);
+  expect(relay.online).toBe(true);
+  expect(statuses.at(-1)).toBe("online");
+  relay.stop();
+});

@@ -77,6 +77,29 @@ export class RelayClient {
 
   constructor(private readonly options: RelayClientOptions) {}
 
+  /**
+   * Point this client at a new pairing and reconnect into its room.
+   *
+   * `pew2 pair --rotate` mints a new token and writes it to disk, but a daemon
+   * that is already running holds the old one — and the relay room is derived
+   * from it. Without this the daemon sits in a room the freshly paired phone
+   * will never join: the phone shows "connecting" forever, re-pairing makes it
+   * worse rather than better, and only a restart clears it.
+   */
+  rekey(nextToken: string, nextKey: string): void {
+    if (nextToken === this.options.token && nextKey === this.options.key) return;
+    // Written through a computed key: the fields are readonly to everyone
+    // else, and this is the one place allowed to move them.
+    const opts = this.options as unknown as Record<string, unknown>;
+    opts["token"] = nextToken;
+    opts["key"] = nextKey;
+    // Straight back out and in: the room id is fixed at connect time, so an
+    // open socket cannot be moved to the new one.
+    const wasRunning = !this.stopped;
+    this.stop();
+    if (wasRunning) this.start();
+  }
+
   /** Where this daemon connects. The token never appears in logs. */
   get endpoint(): string {
     const base = this.options.url.replace(/\/$/, "");
@@ -239,6 +262,12 @@ export class RelayClient {
 
     socket.onclose = () => {
       this.clearTimers();
+      // Only tear down state that still belongs to *this* socket. `rekey`
+      // closes the old one and immediately opens a new one, and `onclose`
+      // arrives after that \u2014 so an unconditional reset here would null the new
+      // socket and schedule a retry beside it, leaving two connections racing
+      // and the relay flapping between online and offline.
+      if (this.socket !== socket) return;
       this.socket = null;
       this.channel = null;
       this.scheduleRetry();
