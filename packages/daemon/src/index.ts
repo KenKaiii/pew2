@@ -17,6 +17,7 @@ import {
   type ConfigOption,
 } from "./acp/connect.js";
 import { loadClaudeDisplayHistory } from "./acp/claude-history.js";
+import { readTranscript, writeTranscript } from "./transcript-cache.js";
 import { loadGgCoderDisplayHistory } from "./acp/ggcoder-history.js";
 import { SessionLog } from "./session/log.js";
 import { discardAttachments, storeAttachments } from "./attachments.js";
@@ -469,7 +470,11 @@ export class Daemon {
           }))
         : provider.manifest.id === "ggcoder"
           ? await loadGgCoderDisplayHistory(loadSessionId, cwd)
-          : undefined
+          : // Every other agent, from what it replayed last time. Without this
+            // the thread sat empty for the whole cold spawn — measured at 3.2s
+            // on GitHub Copilot against Claude Code's 28ms, purely because
+            // Claude keeps a transcript on disk and the others do not.
+            await readTranscript(provider.manifest.id, loadSessionId)
       : undefined;
     if (localUpdates) {
       for (const update of localUpdates) {
@@ -477,9 +482,15 @@ export class Daemon {
       }
     }
     let loadingDuplicateReplay = localUpdates !== undefined;
+    // What the agent sends while loading, kept so this conversation opens from
+    // disk next time. Only collected when there was no cache to begin with:
+    // re-writing what was just read would grow the file on every open.
+    const replayed: unknown[] = [];
+    const collectReplay = Boolean(loadSessionId) && localUpdates === undefined;
     const agentCallbacks = {
       ...callbacks,
       onUpdate: (payload: unknown) => {
+        if (collectReplay && !session.live) replayed.push(payload);
         if (!loadingDuplicateReplay) callbacks.onUpdate(payload);
       },
     };
@@ -515,6 +526,12 @@ export class Daemon {
     // The agent's own id for the conversation, which is what the per-session
     // selectors below are keyed by and what the app dedupes history against.
     session.agentSessionId = session.handle.sessionId;
+
+    // Stored under the agent's id rather than the one asked for: resuming can
+    // hand back a different id, and the next open will ask by that one.
+    if (collectReplay && replayed.length > 0) {
+      void writeTranscript(provider.manifest.id, session.handle.sessionId, replayed);
+    }
 
     // A reopened conversation gets the selectors *it* was last held at; a new
     // one gets the provider's. Never the other way round: applying the phone's
