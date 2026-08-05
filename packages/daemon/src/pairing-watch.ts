@@ -76,13 +76,6 @@ function snapshot(p: Pairing): PairingSnapshot {
 }
 
 /**
- * Watch the pairing file and apply rotations to a running daemon.
- *
- * Returns a stop function. Failures are swallowed on purpose: a daemon that
- * cannot watch a file must still serve, and the fallback is the old behaviour
- * of needing a restart.
- */
-/**
  * The reload trigger, without the file watching.
  *
  * Split out because the coalescing rule is the part that has to be right and
@@ -158,8 +151,11 @@ export function reloader(
         try {
           if (applyPairing(next, previous, targets)) previous = snapshot(next);
         } catch (error) {
-          // The daemon is now half-rotated and cannot be put back from here, so
-          // say so plainly rather than retrying into the same throw.
+          // Logged every time, because a rotation that will not apply is
+          // something the person at the keyboard has to see \u2014 the phone is not
+          // coming back on its own. Retried under the same cap as a bad read:
+          // a target can fail transiently, and a permanent failure gives up
+          // after a handful of attempts rather than spinning.
           targets.log?.(`[pairing] rotation failed: ${(error as Error).message}`);
           finish(true);
           return;
@@ -170,6 +166,13 @@ export function reloader(
   return reload;
 }
 
+/**
+ * Watch the pairing file and apply rotations to a running daemon.
+ *
+ * Returns a stop function. A watcher that cannot be created is swallowed on
+ * purpose: a daemon that cannot watch a file must still serve, and the fallback
+ * is the old behaviour of needing a restart.
+ */
 export function watchPairing(
   path: string,
   initial: Pairing,
