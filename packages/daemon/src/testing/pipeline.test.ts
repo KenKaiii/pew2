@@ -349,3 +349,36 @@ test("a provider never holds more than one warm process", async () => {
     daemon.closeAll();
   }
 }, 60_000);
+
+test("a turned-off agent cannot be started by a client holding a stale list", async () => {
+  // Filtering the announced list is not enough on its own. A phone that
+  // connected before the agent was turned off still shows it, and tapping that
+  // row would otherwise spawn the exact process the user turned off — the whole
+  // point being that an unused agent should never boot.
+  const { Daemon } = await import("../index.js");
+  const { setEnabled } = await import("../providers/enabled.js");
+
+  const home = await mkdtemp(join(tmpdir(), "pew2-off-"));
+  const previous = process.env.PEW2_HOME;
+  process.env.PEW2_HOME = home;
+
+  try {
+    await setEnabled(["echo"], false);
+    const daemon = new Daemon({ id: "test", name: "test" }, true);
+    await daemon.refreshProviders();
+
+    try {
+      // Not announced.
+      expect(daemon.spareDirs("echo")).toEqual([]);
+
+      // And not startable, even asked directly.
+      await expect(daemon.startSession("echo", process.cwd())).rejects.toThrow(/turned off/i);
+      expect(daemon.spareDirs("echo")).toEqual([]);
+    } finally {
+      daemon.closeAll();
+    }
+  } finally {
+    if (previous === undefined) delete process.env.PEW2_HOME;
+    else process.env.PEW2_HOME = previous;
+  }
+}, 60_000);

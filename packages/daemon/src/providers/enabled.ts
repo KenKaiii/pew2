@@ -17,7 +17,7 @@
  * remember to add it, which is the behaviour people expect from a tool that
  * detects things for them.
  */
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { userProvidersDir } from "./registry.js";
 
@@ -58,7 +58,6 @@ export async function writeDisabled(
   // either the old list or the new one, never a truncated one.
   const temp = `${path}.${process.pid}.tmp`;
   await writeFile(temp, `${JSON.stringify(body, null, 2)}\n`, "utf8");
-  const { rename } = await import("node:fs/promises");
   await rename(temp, path);
 }
 

@@ -806,6 +806,13 @@ export class Daemon {
   async startSession(providerId: string, cwd: string): Promise<string> {
     const provider = this.providers.find((p) => p.manifest.id === providerId);
     if (!provider) throw new Error(`Unknown provider '${providerId}'`);
+    // Checked here too, not just where the list is announced. A phone that
+    // connected before the agent was turned off still holds the old list, and
+    // tapping one of those rows would otherwise spawn the very process that
+    // turning it off was meant to prevent.
+    if (!this.isEnabled(providerId)) {
+      throw new Error(`'${provider.manifest.name}' is turned off on this machine.`);
+    }
     if (!isAvailable(provider)) throw new Error(unavailableReason(provider)!);
 
     // Assign our own session id up front so events are attributable even if the
@@ -1080,6 +1087,13 @@ export class Daemon {
   beginResumeSession(providerId: string, agentSessionId: string, cwd: string) {
     const provider = this.providers.find((p) => p.manifest.id === providerId);
     if (!provider) throw new Error(`Unknown provider '${providerId}'`);
+    // Checked here too, not just where the list is announced. A phone that
+    // connected before the agent was turned off still holds the old list, and
+    // tapping one of those rows would otherwise spawn the very process that
+    // turning it off was meant to prevent.
+    if (!this.isEnabled(providerId)) {
+      throw new Error(`'${provider.manifest.name}' is turned off on this machine.`);
+    }
     if (!isAvailable(provider)) throw new Error(unavailableReason(provider)!);
 
     const log = new SessionLog(`${providerId}-${Date.now().toString(36)}`);
