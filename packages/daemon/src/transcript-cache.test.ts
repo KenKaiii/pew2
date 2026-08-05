@@ -2,7 +2,7 @@ import { test, expect } from "bun:test";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { forgetTranscript, readTranscript, writeTranscript } from "./transcript-cache.js";
+import { readTranscript, writeTranscript } from "./transcript-cache.js";
 
 async function env() {
   const home = await mkdtemp(join(tmpdir(), "pew2-transcript-"));
@@ -85,9 +85,15 @@ test("a very long conversation keeps its most recent updates", async () => {
   expect((back!.at(-1) as any).update.content.text).toBe("line 599");
 });
 
-test("forgetting a transcript leaves no trace", async () => {
+test("two ids that scrub to the same filename do not show each other's messages", async () => {
+  // Scrubbing maps every unsafe character to `_`, so `a/b` and `a_b` land on
+  // one file. The stored id is what stops the second one painting the first
+  // one's conversation.
   const e = await env();
-  await writeTranscript("opencode", "ses_gone", [update("bye")], e);
-  await forgetTranscript("opencode", "ses_gone", e);
-  expect(await readTranscript("opencode", "ses_gone", e)).toBeUndefined();
+  await writeTranscript("opencode", "a/b", [update("from a slash b")], e);
+
+  expect(await readTranscript("opencode", "a_b", e)).toBeUndefined();
+  expect((await readTranscript("opencode", "a/b", e))![0]).toMatchObject({
+    update: { content: { text: "from a slash b" } },
+  });
 });

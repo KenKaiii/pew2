@@ -18,7 +18,7 @@
  * to, and nothing here leaves the machine. Deleting the directory costs a
  * slower first open and nothing else.
  */
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { userProvidersDir } from "./providers/registry.js";
 
@@ -46,8 +46,12 @@ function transcriptPath(
   agentSessionId: string,
   env: NodeJS.ProcessEnv,
 ): string {
-  // The agent's id goes in the filename, so anything that is not plainly safe
-  // in a path is replaced rather than trusted.
+  // Only the agent's id needs scrubbing. `providerId` is checked against
+  // `^[a-z][a-z0-9-]*$` when the manifest loads, so it cannot hold a separator;
+  // session ids come from the agent and routinely do.
+  //
+  // Scrubbing can map two ids onto one filename, which is why `readTranscript`
+  // checks the stored id before trusting what it read.
   const safe = agentSessionId.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 120);
   return join(dirname(userProvidersDir(env)), "cache", "transcripts", providerId, `${safe}.json`);
 }
@@ -96,23 +100,9 @@ export async function writeTranscript(
     // leave a truncated file that reads as a real but corrupt transcript.
     const temp = `${path}.${process.pid}.tmp`;
     await writeFile(temp, JSON.stringify(body), "utf8");
-    const { rename } = await import("node:fs/promises");
     await rename(temp, path);
   } catch {
     // Best effort. A cache that cannot be written costs a slow open, and the
     // conversation itself is unaffected.
-  }
-}
-
-/** Forget a conversation's cached transcript. */
-export async function forgetTranscript(
-  providerId: string,
-  agentSessionId: string,
-  env: NodeJS.ProcessEnv = process.env,
-): Promise<void> {
-  try {
-    await rm(transcriptPath(providerId, agentSessionId, env), { force: true });
-  } catch {
-    // Nothing to forget.
   }
 }
