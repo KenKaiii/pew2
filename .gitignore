@@ -35,3 +35,14 @@ GoogleService-Info.plist
 
 # EAS writes local build state and credential caches here.
 .eas/
+# `eas metadata:pull` dumps a copy of the live App Store listing here whenever it
+# runs. It is a download of what is already on Apple's servers; the file that is
+# actually authored is `store.config.json` beside it.
+packages/app/store/
+
+# Notes the agents write for themselves.
+#
+# pew2 hands every agent a working directory, and an agent is free to keep state
+# there — this one turned up at the repo root the first time an agent was booted
+# from it. Those files belong to whoever ran the agent, not to this repo.
+memories.json
