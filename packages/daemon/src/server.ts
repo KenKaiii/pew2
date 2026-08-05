@@ -213,10 +213,22 @@ const server = Bun.serve({
         }
 
         client.authenticated = true;
+        // Confirmed first, and not behind the provider scan.
+        //
+        // `refreshProviders` reads every manifest off disk, which is slow on a
+        // cold cache and can throw outright on an unreadable file. Awaiting it
+        // here meant the phone was fully joined while `pew2 pair` still showed
+        // "waiting for your phone" \u2014 and if the scan threw, that confirmation
+        // never arrived at all. The join is a fact the moment the proof checks
+        // out; the agent list is a separate thing that follows.
+        broadcast({ t: "device.joined", deviceId, at: Date.now() });
+
         // Announced only now: the provider list names every agent installed on
         // this machine, which is not something to hand to an unproven socket.
-        await daemon.refreshProviders();
-        broadcast({ t: "device.joined", deviceId, at: Date.now() });
+        await daemon.refreshProviders().catch((error: unknown) => {
+          console.error("[providers] refresh on join failed:", error);
+          return { errors: [] };
+        });
         return;
       }
 
