@@ -26,7 +26,14 @@
         "title": "Pew2 Code",
         "subtitle": "Coding agents on your phone",
         "privacyPolicyUrl": "https://github.com/KenKaiii/pew2/blob/main/PRIVACY.md",
-        "releaseNotes": "First release.\n\nPair with your computer by scanning a code, then run any coding agent on it from your phone. End to end encrypted, works from any network, and needs no account."
+        "releaseNotes": "First release.\n\nPair with your computer by scanning a code, then run any coding agent on it from your phone. End to end encrypted, works from any network, and needs no account.",
+        "screenshots": {
+          "APP_IPHONE_65": [
+            "./store-assets/01-conversation.png",
+            "./store-assets/02-your-agents.png",
+            "./store-assets/03-pick-project.png"
+          ]
+        }
       }
     },
     "categories": [

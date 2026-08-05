@@ -4,6 +4,7 @@
  * These run with no API key and no network, so they are safe to run in CI and
  * are the regression net for the provider contract itself.
  */
+import { basename } from "node:path";
 import { test, expect } from "bun:test";
 import { loadProviders } from "../providers/registry.js";
 import { connectProvider } from "../acp/connect.js";
@@ -134,7 +135,11 @@ test("an unopened session crosses ACP, daemon state, and drawer formatting with 
 
     expect(unopened).toBeDefined();
     expect(unopened!.turns).toEqual([]);
-    expect(formatHistoryMetadata(unopened!)).toBe("6 messages · pew2");
+    // The folder name comes from `process.cwd()` by way of the echo agent, so
+    // hardcoding "pew2" made this pass only in a checkout that happened to be
+    // named that — it failed in a clone, a worktree, or CI with a different
+    // directory. The count is the part under test; the folder is incidental.
+    expect(formatHistoryMetadata(unopened!)).toBe(`6 messages · ${basename(process.cwd())}`);
   } finally {
     daemon.closeAll();
   }
