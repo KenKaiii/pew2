@@ -30,7 +30,7 @@ describe("applyTranscript", () => {
 
   test("a revision after typed text still replaces only the dictated tail", () => {
     let state = beginDictation("note:");
-    let draft = "";
+    let draft: string;
     ({ draft, state } = applyTranscript(state, "check"));
     expect(draft).toBe("note: check");
     ({ draft, state } = applyTranscript(state, "check the logs"));

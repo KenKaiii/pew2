@@ -84,7 +84,7 @@ export async function readCommandDirs(
       const name = basename(entry, ".md");
       if (found.has(name)) continue;
 
-      let source = "";
+      let source: string;
       try {
         source = await readFile(join(path, entry), "utf8");
       } catch {

@@ -128,11 +128,19 @@ function Root() {
 
   useEffect(() => {
     let alive = true;
-    loadPairing().then((stored) => {
-      if (!alive) return;
-      setPairing(stored);
-      setChecked(true);
-    });
+    void loadPairing()
+      .catch(() => {
+        // The same reasoning `pair` uses below, which already guards the write
+        // side: a locked or unavailable keychain has to read as "not paired",
+        // not as a rejection. Without this the promise rejects, `setChecked`
+        // never runs, and the app sits on its loading screen with no way out.
+        return null;
+      })
+      .then((stored) => {
+        if (!alive) return;
+        setPairing(stored);
+        setChecked(true);
+      });
     return () => {
       alive = false;
     };
@@ -142,7 +150,7 @@ function Root() {
     // Connect regardless of whether the keychain accepted it. A locked or
     // unavailable keychain costs the user a re-pair next launch; blocking on it
     // would strand them on this screen with a spinner and no way forward.
-    savePairing(next)
+    void savePairing(next)
       .catch(() => {})
       .then(() => setPairing(next));
   }, []);
@@ -150,7 +158,7 @@ function Root() {
   const unpair = useCallback(() => {
     // Same reasoning inverted: forget it locally even if the delete failed, or
     // the confirmed "Forget" action would appear to do nothing.
-    clearPairing()
+    void clearPairing()
       .catch(() => {})
       .then(() => {
         setPairing(null);

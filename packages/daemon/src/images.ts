@@ -123,7 +123,7 @@ export interface ImageBlock {
 export function historyImages(content: unknown): ImageBlock[] {
   if (!Array.isArray(content)) return [];
   const images: ImageBlock[] = [];
-  for (const part of content as any[]) {
+  for (const part of content) {
     if (!part || typeof part !== "object") continue;
 
     // Anthropic: { type: "image", source: { type: "base64", media_type, data } }

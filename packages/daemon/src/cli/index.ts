@@ -26,7 +26,6 @@ import { writeFile, mkdir, access, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   loadProviders,
-  defaultProvidersDir,
   userProvidersDir,
   isAvailable,
   unavailableReason,
@@ -36,7 +35,7 @@ import { fetchRegistry, syncRegistry } from "./registry-sync.js";
 import { verifyProvider } from "../providers/verify.js";
 import { doctorView } from "./doctor-view.js";
 import { registryView } from "./registry-view.js";
-import { doctor, type Problem } from "./doctor.js";
+import { doctor } from "./doctor.js";
 import { setup } from "./setup.js";
 import {
   installService,
@@ -186,18 +185,6 @@ async function cmdValidate() {
   return 0;
 }
 
-/** Shared rendering: a problem list is the same shape everywhere it appears. */
-function printProblems(problems: Problem[]) {
-  for (const problem of problems) {
-    const label = problem.provider ? `${problem.provider}: ` : "";
-    console.log(
-      problem.severity === "error"
-        ? bad(`${label}${problem.detail}`)
-        : warn(`${label}${problem.detail}`),
-    );
-    console.log(`    ${DIM}fix: ${problem.fix}${RESET}`);
-  }
-}
 
 async function cmdSetup(flags: Set<string>) {
   const json = flags.has("--json");

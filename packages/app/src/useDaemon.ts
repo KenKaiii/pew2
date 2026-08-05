@@ -553,9 +553,15 @@ export function useDaemon(
   );
   useEffect(() => {
     let cancelled = false;
-    loadLastProvider().then((id) => {
-      if (!cancelled && id) setRememberedProviderId(id);
-    });
+    loadLastProvider()
+      .then((id) => {
+        if (!cancelled && id) setRememberedProviderId(id);
+      })
+      .catch(() => {
+        // Secure storage can refuse to read (locked keychain, first run after a
+        // restore). Remembering the last agent is a convenience, so falling
+        // back to "no preference" is right - crashing the app for it is not.
+      });
     return () => {
       cancelled = true;
     };

@@ -11,6 +11,7 @@
   "scripts": {
     "test": "bun test packages",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p packages/relay/tsconfig.json && (cd packages/app && tsc --noEmit)",
+    "lint": "eslint .",
     "relay:dev": "cd packages/relay && wrangler dev --port 8799",
     "relay:check": "bun run packages/relay/src/relay-check.mjs",
     "relay:deploy": "cd packages/relay && wrangler deploy",
@@ -21,8 +22,12 @@
     "icon": "bun packages/app/scripts/make-icon.ts"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/bun": "^1.3.14",
     "@types/node": "^22.10.2",
-    "typescript": "~5.9.2"
+    "eslint": "^10",
+    "eslint-plugin-react-hooks": "^7",
+    "typescript": "~5.9.2",
+    "typescript-eslint": "^8"
   }
 }

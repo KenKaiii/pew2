@@ -98,7 +98,11 @@ export class SecureChannel {
    * advance. Both are silent: a caller cannot usefully distinguish them, and
    * saying which would tell an attacker whether their key was right.
    */
-  open(envelope: unknown, from = ""): unknown | undefined {
+  // Returns `unknown` rather than `unknown | undefined`: the union collapses to
+  // `unknown` anyway, so writing it out only implies a distinction the type
+  // system will not enforce. Undefined still means "rejected" — the doc above
+  // is the contract, and the tests are what hold it.
+  open(envelope: unknown, from = ""): unknown {
     const message = openEnvelope(this.receiveKey, envelope);
     if (message === undefined) return undefined;
 

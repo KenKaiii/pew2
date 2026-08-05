@@ -15,7 +15,6 @@
  *
  * Generated with real entropy, stored 0600, and printed nowhere but the QR.
  */
-import { randomBytes } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { networkInterfaces } from "node:os";
 import { dirname, join } from "node:path";

@@ -45,7 +45,9 @@ export async function rotateLog(
   max: number = MAX_LOG_BYTES,
   keep: number = KEEP_LOG_BYTES,
 ): Promise<RotateResult> {
-  let before = 0;
+  // No initialiser: every path out of the catch returns, so a starting value
+  // here would only ever be overwritten or unused.
+  let before: number;
   try {
     before = (await stat(path)).size;
   } catch {

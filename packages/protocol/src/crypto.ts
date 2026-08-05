@@ -203,7 +203,9 @@ export function seal(
  * key" than on "tampered", and reporting which it was tells an attacker whether
  * they have the right key — so both are one silent failure.
  */
-export function open(key: Uint8Array, envelope: unknown): unknown | undefined {
+// `unknown`, not `unknown | undefined`: the union collapses to `unknown`, and
+// spelling it out suggests a narrowing the compiler does not actually do.
+export function open(key: Uint8Array, envelope: unknown): unknown {
   if (!isEnvelope(envelope)) return undefined;
   try {
     const nonce = fromBase64Url(envelope.n);

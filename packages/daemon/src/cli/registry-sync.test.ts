@@ -6,7 +6,7 @@
  * and the ability to run the command twice without it undoing itself.
  */
 import { expect, test } from "bun:test";
-import { mkdtemp, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { bundledEntries, fetchRegistry, syncRegistry } from "./registry-sync.js";

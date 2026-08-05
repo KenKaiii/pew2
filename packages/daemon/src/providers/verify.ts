@@ -140,7 +140,22 @@ export function describe(error: unknown): string {
   }
 
   const message = (error as { message?: unknown }).message;
-  return typeof message === "string" && message.trim() ? message.trim() : String(error);
+  if (typeof message === "string" && message.trim()) return message.trim();
+
+  // `error` is an object and nothing readable was found on it, so `String()`
+  // here renders the literal text "[object Object]" — which is exactly the
+  // unexplained crash this function exists to prevent. It gets worse
+  // downstream: that string reaches `needsSetup()` on the setup screen, matches
+  // none of its patterns, and files an agent that only needed signing in under
+  // "Not working".
+  if (error instanceof Error) return error.name;
+  try {
+    const json = JSON.stringify(error);
+    if (json && json !== "{}" && json !== "null") return json;
+  } catch {
+    // Circular, or something that refuses to serialise. Nothing to show.
+  }
+  return "the agent failed without saying why";
 }
 
 /**

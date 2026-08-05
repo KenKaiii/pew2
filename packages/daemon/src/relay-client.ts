@@ -156,7 +156,16 @@ export class RelayClient {
       );
       // The app may have been waiting on the relay long before this machine woke
       // up, so re-announce rather than assuming it saw the last one.
-      this.options.daemon.refreshProviders();
+      //
+      // Deliberately not awaited — `onopen` is synchronous and the connection is
+      // already usable without it. But the rejection still has to be caught:
+      // re-scanning providers touches the disk and spawns probes, and an
+      // unhandled rejection here takes down the whole daemon on a transient
+      // failure, at the exact moment the user is trying to reconnect.
+      void this.options.daemon.refreshProviders().catch(() => {
+        // The next refresh picks it up; losing one re-announce is not worth
+        // dropping the connection that just came up.
+      });
       this.startHeartbeat();
     };
 

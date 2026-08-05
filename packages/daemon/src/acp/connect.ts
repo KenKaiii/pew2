@@ -305,6 +305,11 @@ export function withTimeout<T>(
       },
       (error) => {
         clearTimeout(timer);
+        // Re-rejecting with the original reason, not a wrapped Error: ACP
+        // failures are JSON-RPC objects whose `data` field carries the only
+        // useful explanation, and `humanError` downstream reads it. Wrapping
+        // would throw that away to satisfy the rule.
+        // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
         reject(error);
       },
     );
@@ -799,8 +804,11 @@ export async function connectProvider(options: ConnectOptions): Promise<AcpSessi
         const detail = humanError(error);
         // Name the option only when the agent's own wording does not, so the
         // message stays one short sentence instead of saying it twice.
+        // `cause` keeps the agent's original error for anyone reading a stack
+        // trace, while the message stays the short readable one.
         throw new Error(
           detail.includes(configId) ? detail : `Could not set '${configId}': ${detail}`,
+          { cause: error },
         );
       }
     },
