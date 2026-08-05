@@ -287,3 +287,33 @@ test("a long description is cut to what the agent is, not what to worry about", 
   expect(text).toContain("needs GEMINI_API_KEY");
   expect(text).not.toContain("withdrew");
 });
+
+test("a turned-off agent is listed as a choice, not a fault", () => {
+  // It works fine; the user simply does not want it on their phone. Filing it
+  // under "not working" would read as a bug report about their own machine.
+  const lines = providerList(
+    [
+      agent({ id: "claude-code", name: "Claude Code" }),
+      agent({ id: "opencode", name: "OpenCode", disabled: true }),
+    ],
+    plain,
+  ).map(stripAnsi);
+  const text = lines.join("\n");
+
+  expect(text).toContain("Turned off");
+  expect(text).toContain("OpenCode");
+  expect(text).toContain("pew2 providers enable");
+  expect(text).not.toContain("Not working");
+  expect(text).not.toMatch(/error|fail/i);
+});
+
+test("a turned-off agent does not also appear as ready", () => {
+  // It is installed and working, so without filtering it would be counted in
+  // "Ready to use" as well — telling the user it is both on and off.
+  const lines = providerList(
+    [agent({ id: "opencode", name: "OpenCode", disabled: true })],
+    plain,
+  ).map(stripAnsi);
+
+  expect(lines.join("\n")).not.toContain("Ready to use");
+});

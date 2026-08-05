@@ -20,6 +20,7 @@ import { loadClaudeDisplayHistory } from "./acp/claude-history.js";
 import { readTranscript, writeTranscript } from "./transcript-cache.js";
 import { loadGgCoderDisplayHistory } from "./acp/ggcoder-history.js";
 import { SessionLog } from "./session/log.js";
+import { readDisabled } from "./providers/enabled.js";
 import { discardAttachments, storeAttachments } from "./attachments.js";
 import { folderName, resolveWorkspace } from "./workspace.js";
 import { readProbeCache, writeProbeCache } from "./probe-cache.js";
@@ -239,6 +240,10 @@ export class Daemon {
   }
 
   private warmProvider(providerId: string): Promise<void> {
+    // Nothing is warmed for an agent that is off. Without this the daemon would
+    // still boot a process for it in the background, which is most of what
+    // turning it off was meant to avoid.
+    if (!this.isEnabled(providerId)) return Promise.resolve();
     // Any warm process for this provider is enough to skip the boot; the
     // directory match is `takeSpare`'s business, not this one's.
     if (this.hasSpare(providerId)) {
@@ -663,8 +668,26 @@ export class Daemon {
   async refreshProviders(): Promise<{ errors: { source: string; message: string }[] }> {
     const { providers, errors } = await loadProviders();
     this.providers = providers;
+    // Re-read every refresh, so `pew2 providers disable` takes effect without
+    // restarting the daemon.
+    this.disabled = await readDisabled();
     this.announceProviders();
     return { errors };
+  }
+
+  /**
+   * Agents the user has turned off.
+   *
+   * Checked before announcing, probing or warming: a disabled agent must not
+   * appear in the drawer and must never be spawned. An installed agent nobody
+   * uses still costs a process every time the app connects, because the app
+   * asks each available agent what it supports.
+   */
+  private disabled = new Set<string>();
+
+  /** Whether an agent may be announced, probed, or spawned. */
+  private isEnabled(providerId: string): boolean {
+    return !this.disabled.has(providerId);
   }
 
   private announceProviders() {
@@ -675,6 +698,9 @@ export class Daemon {
         // Test fixtures are hidden unless explicitly asked for, so a demo or a
         // local run can still exercise the pipeline without any API keys.
         .filter((p) => !p.manifest.pew.experimental || this.includeExperimental)
+        // Turned off by the user. Filtered here rather than in the app, so the
+        // phone is never even told about an agent it should not offer.
+        .filter((p) => this.isEnabled(p.manifest.id))
         .map((p) => ({
           id: p.manifest.id,
           name: p.manifest.name,
@@ -902,6 +928,10 @@ export class Daemon {
     providerId: string,
     { refresh = false } = {},
   ): Promise<ProviderCapabilities> {
+    // A disabled agent answers as if it has nothing, rather than spawning to
+    // find out. The app should never ask \u2014 it is not announced \u2014 but a stale
+    // client or a direct CLI call must not be able to boot it either.
+    if (!this.isEnabled(providerId)) return EMPTY_CAPABILITIES;
     if (refresh) this.probes.delete(providerId);
     const cached = this.probes.get(providerId);
     if (cached) return cached;

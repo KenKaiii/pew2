@@ -48,6 +48,7 @@ import { loadPairing, setRelay } from "../pairing.js";
 import { cmdPair } from "./pair.js";
 import { agentSections, outroFor, providerList } from "./setup-view.js";
 import { rail, plural } from "./rail.js";
+import { setEnabled, readDisabled } from "../providers/enabled.js";
 import { PALETTE, colorLevel, glyphs, statusLine, styler, unicodeOk } from "./ui.js";
 // Imported rather than read from disk: this file ends up inside a compiled
 // binary, where there is no package.json next to it to read.
@@ -82,6 +83,7 @@ function summarise(description: string): string {
 
 async function cmdList(flags: Set<string>) {
   const { providers, errors } = await loadProviders();
+  const disabled = await readDisabled();
 
   if (flags.has("--json")) {
     console.log(
@@ -91,6 +93,7 @@ async function cmdList(flags: Set<string>) {
           name: p.manifest.name,
           version: p.manifest.version,
           available: isAvailable(p),
+          disabled: disabled.has(p.manifest.id),
           command: `${p.command} ${p.args.join(" ")}`.trim(),
           reason: isAvailable(p) ? undefined : unavailableReason(p),
         })),
@@ -125,6 +128,7 @@ async function cmdList(flags: Set<string>) {
     install: installById.get(p.manifest.id),
     missingEnv: p.missingEnv,
     notInstalled: p.commandMissing,
+    disabled: disabled.has(p.manifest.id),
   }));
 
   for (const line of providerList(agents, view)) console.log(line);
@@ -144,6 +148,52 @@ async function cmdList(flags: Set<string>) {
   }
 
   return errors.length > 0 ? 1 : 0;
+}
+
+/**
+ * Turn an agent on or off.
+ *
+ * Off means the phone is never told about it and the daemon never spawns it.
+ * The manifest stays on disk, so this is reversible and costs nothing to undo.
+ */
+async function cmdToggle(id: string | undefined, enabled: boolean): Promise<number> {
+  const style = styler(colorLevel());
+  const glyph = glyphs(unicodeOk());
+  const r = rail({ style, glyph });
+  const verb = enabled ? "enable" : "disable";
+
+  if (!id) {
+    console.error(`Which agent? Run 'pew2 providers ${verb} <id>'.`);
+    return 1;
+  }
+
+  const { providers } = await loadProviders();
+  const match = providers.find((p) => p.manifest.id === id);
+  if (!match) {
+    console.error(`No agent called '${id}'. Run 'pew2 providers list' to see them.`);
+    return 1;
+  }
+
+  await setEnabled([id], enabled);
+
+  for (const line of r.intro("pew2 agents", enabled ? "turning one on" : "turning one off")) {
+    console.log(line);
+  }
+  const mark = enabled ? style.hex(PALETTE.success, glyph.tick) : style.hex(PALETTE.faint, glyph.dot);
+  console.log(r.line(`${mark} ${style.bold(match.manifest.name)}`));
+  console.log(
+    r.line(
+      `  ${style.hex(PALETTE.faint, enabled ? "now offered on your phone" : "hidden, and never started")}`,
+    ),
+  );
+  for (const line of r.outro(
+    style.hex(PALETTE.faint, `Reverse it with ${style.bold(`pew2 providers ${enabled ? "disable" : "enable"} ${id}`)}.`),
+  )) {
+    console.log(line);
+  }
+  // The running daemon re-reads this on its next refresh, so a live phone
+  // updates without anyone restarting anything.
+  return 0;
 }
 
 async function cmdValidate() {
@@ -591,6 +641,8 @@ async function main() {
     console.log("  pew2 --version                   Which build this is");
     console.log("  pew2 providers add <id>          Scaffold a new manifest");
     console.log("  pew2 providers verify [id]       Spawn a provider and prove it speaks ACP");
+    console.log("  pew2 providers disable <id>      Hide an agent from the phone");
+    console.log("  pew2 providers enable <id>       Show it again");
     return group ? 1 : 0;
   }
 
@@ -603,6 +655,10 @@ async function main() {
       return cmdAdd(arg);
     case "verify":
       return cmdVerify(arg, flags);
+    case "enable":
+      return cmdToggle(arg, true);
+    case "disable":
+      return cmdToggle(arg, false);
     default:
       console.error(`Unknown command 'providers ${command ?? ""}'.`);
       return 1;

@@ -26,6 +26,14 @@ export type { RenderOptions };
 export interface AgentState {
   id: string;
   name: string;
+  /**
+   * Turned off by the user.
+   *
+   * Kept separate from every other state because it is the only one that is a
+   * choice rather than a condition: the agent works fine, it is simply not
+   * wanted. Grouping it under "not working" would read as a fault report.
+   */
+  disabled?: boolean;
   /** Where to get it, for the ones that are not here yet. */
   install?: string;
   /**
@@ -261,12 +269,16 @@ export function providerList(agents: AgentState[], options: RenderOptions = {}):
     }
   };
 
-  if (buckets.ready.length > 0) {
-    out.push(...r.step("Ready to use", plural(buckets.ready.length, "agent")));
-    rows(buckets.ready, s.hex(PALETTE.success, g.tick));
+  const off = agents.filter((a) => a.disabled).sort((a, b) => a.name.localeCompare(b.name));
+  const on = (list: AgentState[]) => list.filter((a) => !a.disabled);
+
+  const ready = on(buckets.ready);
+  if (ready.length > 0) {
+    out.push(...r.step("Ready to use", plural(ready.length, "agent")));
+    rows(ready, s.hex(PALETTE.success, g.tick));
   }
 
-  const half = [...buckets["needs-setup"], ...buckets["missing-key"]].sort((a, b) =>
+  const half = on([...buckets["needs-setup"], ...buckets["missing-key"]]).sort((a, b) =>
     a.name.localeCompare(b.name),
   );
   if (half.length > 0) {
@@ -283,9 +295,10 @@ export function providerList(agents: AgentState[], options: RenderOptions = {}):
     }
   }
 
-  if (buckets.broken.length > 0) {
+  const broken = on(buckets.broken);
+  if (broken.length > 0) {
     out.push(...r.step("Not working", "installed but would not start"));
-    for (const agent of buckets.broken) {
+    for (const agent of broken) {
       out.push(r.line(`${s.hex(PALETTE.danger, g.cross)} ${s.bold(agent.name)}`));
       const detail = agent.verify?.detail;
       if (detail) {
@@ -296,7 +309,22 @@ export function providerList(agents: AgentState[], options: RenderOptions = {}):
     }
   }
 
-  if (buckets["not-installed"].length > 0) {
+  if (off.length > 0) {
+    // Last, and phrased as a choice. These are working agents the user has
+    // chosen not to see on their phone, so the row says how to undo it rather
+    // than implying something is wrong with them.
+    out.push(...r.step("Turned off", plural(off.length, "agent")));
+    for (const agent of off) {
+      out.push(r.line(`${s.hex(PALETTE.faint, g.dot)} ${s.hex(PALETTE.faint, agent.name)}`));
+    }
+    out.push(
+      r.line(
+        `  ${s.hex(PALETTE.faint, "Show one again with")} ${s.bold("pew2 providers enable <id>")}`,
+      ),
+    );
+  }
+
+  if (on(buckets["not-installed"]).length > 0) {
     // Unlike the setup screen, these get a row each: the whole point of this
     // command is to answer "what else could I run", and a comma-separated list
     // cannot carry the install command that makes it actionable.
