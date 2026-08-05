@@ -340,19 +340,6 @@ function toWebStreams(child: ChildProcessWithoutNullStreams) {
 }
 
 /**
- * The role the app turns an ACP replay update into. Tool updates are deliberately
- * absent: the conversation renderer ignores them, so they cannot inflate the
- * message count shown beside a still-unopened session.
- */
-function replayMessageRole(payload: unknown): "user" | "agent" | "thought" | undefined {
-  const update = (payload as { update?: { sessionUpdate?: string } })?.update;
-  if (update?.sessionUpdate === "user_message_chunk") return "user";
-  if (update?.sessionUpdate === "agent_message_chunk") return "agent";
-  if (update?.sessionUpdate === "agent_thought_chunk") return "thought";
-  return undefined;
-}
-
-/**
  * The selector list after an update the agent sent unprompted, or undefined
  * when this notification does not carry one.
  *
@@ -739,34 +726,19 @@ export async function connectProvider(options: ConnectOptions): Promise<AcpSessi
       // loading 30 transcripts one-by-one over ACP just to count visible rows.
       await hydrateMessageCounts(provider.manifest.id, sessions);
 
-      // Other older agents get the protocol-only fallback. Nothing is broadcast
-      // and the phone still has not opened any of these sessions.
-      if (canLoadSession) {
-        for (const session of sessions) {
-          if (session.messageCount !== undefined) continue;
-          const previousHandler = updateHandlers.get(session.sessionId);
-          let count = 0;
-          let previousRole: ReturnType<typeof replayMessageRole>;
-          updateHandlers.set(session.sessionId, (payload) => {
-            const role = replayMessageRole(payload);
-            if (role && role !== previousRole) count += 1;
-            if (role) previousRole = role;
-          });
-          try {
-            await connection.agent.request("session/load", {
-              sessionId: session.sessionId,
-              cwd: session.cwd,
-              mcpServers: [],
-            });
-            session.messageCount = count;
-          } catch {
-            // One corrupt or raced transcript must not hide every healthy one.
-          } finally {
-            if (previousHandler) updateHandlers.set(session.sessionId, previousHandler);
-            else updateHandlers.delete(session.sessionId);
-          }
-        }
-      }
+      // No per-session counting pass beyond that.
+      //
+      // There used to be one: for agents without a local index, every session
+      // was opened with `session/load` purely to count the messages that came
+      // back. Each load is a full transcript over a pipe — about 1.7s on GitHub
+      // Copilot — so sixteen conversations took 28 seconds, and the drawer had
+      // nothing to show for the whole time. What it bought was a subtitle.
+      //
+      // No ACP client does this. Zed, PostHog's desktop agent, qwen-code and
+      // vscode-acp all return `session/list` as the agent gives it and page
+      // with a cursor; the count is simply absent when the agent does not
+      // supply one, which the app already renders as a plain title.
+
       return { sessions, projects, all };
     },
     async setConfigOption(configId: string, value: string | boolean) {

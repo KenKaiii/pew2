@@ -119,7 +119,7 @@ test("a session adopts the warm spare instead of spawning again", async () => {
   daemon.closeAll();
 }, 60_000);
 
-test("an unopened session crosses ACP, daemon state, and drawer formatting with its count", async () => {
+test("an unopened session crosses ACP, daemon state, and drawer formatting", async () => {
   const { Daemon } = await import("../index.js");
   const daemon = new Daemon({ id: "test", name: "test" }, true);
   await daemon.refreshProviders();
@@ -137,11 +137,14 @@ test("an unopened session crosses ACP, daemon state, and drawer formatting with 
 
     expect(unopened).toBeDefined();
     expect(unopened!.turns).toEqual([]);
-    // The folder name comes from `process.cwd()` by way of the echo agent, so
-    // hardcoding "pew2" made this pass only in a checkout that happened to be
-    // named that — it failed in a clone, a worktree, or CI with a different
-    // directory. The count is the part under test; the folder is incidental.
-    expect(formatHistoryMetadata(unopened!)).toBe(`6 messages · ${basename(process.cwd())}`);
+    // No message count. The daemon used to open every listed conversation with
+    // `session/load` purely to count what came back, which cost 28 seconds on a
+    // real agent with sixteen sessions and bought only this subtitle. No ACP
+    // client does that, so a count appears only when the agent supplies one.
+    //
+    // The folder comes from `process.cwd()` by way of the echo agent, so
+    // hardcoding "pew2" made this pass only in a checkout named that.
+    expect(formatHistoryMetadata(unopened!)).toBe(basename(process.cwd()));
   } finally {
     daemon.closeAll();
   }

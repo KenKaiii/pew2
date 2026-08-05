@@ -219,7 +219,7 @@ test("a warm spare is offered before the probe finishes listing history", async 
   }
 });
 
-test("a pre-count cache is refreshed instead of pinning incomplete rows", async () => {
+test("a cache without message counts is still served from disk", async () => {
   const env = await tempEnv();
   await writeProbeCache(
     "echo",
@@ -239,8 +239,10 @@ test("a pre-count cache is refreshed instead of pinning incomplete rows", async 
 
     const caps = await daemon.probeProvider("echo");
 
-    expect(caps.sessions[0]?.title).toBe("Unopened echo session");
-    expect(caps.sessions[0]?.messageCount).toBe(6);
+    // Served straight off disk, counts or not. Requiring a count here would
+    // have made the gate permanently false now that counts only appear when
+    // the agent itself supplies one — every drawer open would pay a spawn.
+    expect(caps.sessions[0]?.title).toBe("Missing its count");
     daemon.closeAll();
   } finally {
     if (home === undefined) delete process.env.PEW2_HOME;

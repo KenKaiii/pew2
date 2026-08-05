@@ -904,13 +904,13 @@ export class Daemon {
     // making the drawer wait on the agent's boot time.
     if (!refresh) {
       const disk = await readProbeCache(providerId);
-      const countsComplete =
-        disk &&
-        (!disk.canResume ||
-          disk.sessions.every((session) => session.messageCount !== undefined));
-      // Pre-count cache entries came from an older daemon. Reprobe immediately
-      // instead of pinning rows without counts in memory for this whole process.
-      if (disk && countsComplete) {
+      // Used whatever it holds. This used to insist every row carried a message
+      // count and reprobe otherwise \u2014 which was reasonable while counts came
+      // from opening each conversation, and became a trap the moment that
+      // stopped: a count most agents never supply would have made the gate
+      // permanently false, so the cache would never be used and every drawer
+      // open would pay a full spawn.
+      if (disk) {
         // Return disk history immediately while booting the matching provider.
         // The first tap can then adopt this process instead of starting cold.
         void this.warmProvider(providerId);
