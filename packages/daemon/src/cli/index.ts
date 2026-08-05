@@ -31,7 +31,7 @@ import {
   isAvailable,
   unavailableReason,
 } from "../providers/registry.js";
-import { detectProviders } from "../providers/detect.js";
+import { CATALOG, detectProviders } from "../providers/detect.js";
 import { fetchRegistry, syncRegistry } from "./registry-sync.js";
 import { verifyProvider } from "../providers/verify.js";
 import { doctor, type Problem } from "./doctor.js";
@@ -45,7 +45,7 @@ import {
 } from "./service.js";
 import { loadPairing, setRelay } from "../pairing.js";
 import { cmdPair } from "./pair.js";
-import { agentSections, outroFor, rail } from "./setup-view.js";
+import { agentSections, outroFor, providerList, rail } from "./setup-view.js";
 import { PALETTE, colorLevel, glyphs, statusLine, styler, unicodeOk } from "./ui.js";
 // Imported rather than read from disk: this file ends up inside a compiled
 // binary, where there is no package.json next to it to read.
@@ -65,40 +65,127 @@ const ok = (s: string) => `${GREEN}✓${RESET} ${s}`;
 const bad = (s: string) => `${RED}✗${RESET} ${s}`;
 const warn = (s: string) => `${YELLOW}!${RESET} ${s}`;
 
-async function cmdList() {
+/**
+ * One short line about an agent, from its manifest description.
+ *
+ * Manifests carry the full story — Gemini's runs to three lines about Google
+ * withdrawing OAuth — which is right in the file and wrong in a list. The first
+ * sentence is what the agent *is*; the rest is caveat, and caveats belong where
+ * they apply rather than against every row.
+ */
+function summarise(description: string): string {
+  const first = description.split(/(?<=\.)\s/)[0]!.trim();
+  return first.replace(/\.$/, "");
+}
+
+async function cmdList(flags: Set<string>) {
   const { providers, errors } = await loadProviders();
+
+  if (flags.has("--json")) {
+    console.log(
+      JSON.stringify(
+        providers.map((p) => ({
+          id: p.manifest.id,
+          name: p.manifest.name,
+          version: p.manifest.version,
+          available: isAvailable(p),
+          command: `${p.command} ${p.args.join(" ")}`.trim(),
+          reason: isAvailable(p) ? undefined : unavailableReason(p),
+        })),
+        null,
+        2,
+      ),
+    );
+    return errors.length > 0 ? 1 : 0;
+  }
+
+  const style = styler(colorLevel());
+  const glyph = glyphs(unicodeOk());
+  const view = { style, glyph };
+  const r = rail(view);
+
+  for (const line of r.intro("pew2 agents", "what this machine can run")) console.log(line);
+
   if (providers.length === 0 && errors.length === 0) {
-    console.log(`No providers found in:`);
-    console.log(`  ${userProvidersDir()}`);
-    console.log(`  ${defaultProvidersDir()}`);
-    console.log(`${DIM}Find installed agents with: pew2 detect${RESET}`);
+    for (const line of r.step("Nothing configured")) console.log(line);
+    console.log(r.line(`${style.hex(PALETTE.faint, "Run")} ${BOLD}pew2 setup${RESET}`));
+    for (const line of r.outro(style.hex(PALETTE.faint, "It will find what you have."))) {
+      console.log(line);
+    }
     return 0;
   }
 
-  for (const p of providers) {
-    const available = isAvailable(p);
-    const head = `${BOLD}${p.manifest.id}${RESET} ${DIM}${p.manifest.version}${RESET}`;
-    console.log(available ? ok(head) : warn(head));
-    console.log(`    ${p.manifest.description}`);
-    console.log(`    ${DIM}${p.command} ${p.args.join(" ")}${RESET}`);
-    if (!available) console.log(`    ${YELLOW}${unavailableReason(p)}${RESET}`);
+  const installById = new Map(CATALOG.map((c) => [c.manifest.id, c.install]));
+  const agents = providers.map((p) => ({
+    id: p.manifest.id,
+    name: p.manifest.name,
+    summary: summarise(p.manifest.description),
+    install: installById.get(p.manifest.id),
+    missingEnv: p.missingEnv,
+    notInstalled: p.commandMissing,
+  }));
+
+  for (const line of providerList(agents, view)) console.log(line);
+
+  if (errors.length > 0) {
+    for (const line of r.step("Manifests that will not load")) console.log(line);
+    for (const e of errors) console.log(r.line(style.hex(PALETTE.danger, e.message)));
   }
 
-  for (const e of errors) console.log(bad(e.message));
+  const ready = agents.filter((a) => !a.notInstalled && a.missingEnv.length === 0).length;
+  for (const line of r.outro(
+    ready > 0
+      ? `${style.bold(`${ready} ready.`)} ${style.hex(PALETTE.faint, "Run")} ${style.bold("pew2 setup")} ${style.hex(PALETTE.faint, "to check they start.")}`
+      : `${style.hex(PALETTE.faint, "Install one above, then run")} ${style.bold("pew2 setup")}`,
+  )) {
+    console.log(line);
+  }
+
   return errors.length > 0 ? 1 : 0;
 }
 
 async function cmdValidate() {
   const { providers, errors } = await loadProviders();
-  for (const p of providers) console.log(ok(`${p.manifest.id} ${DIM}(${p.source})${RESET}`));
-  for (const e of errors) console.log(bad(e.message));
+  const style = styler(colorLevel());
+  const glyph = glyphs(unicodeOk());
+  const r = rail({ style, glyph });
 
+  for (const line of r.intro("pew2 manifests", "checking every provider file")) console.log(line);
+
+  // Only the broken ones get a row. Thirteen identical ticks is not information,
+  // and it buries the one line that is — this command exists to answer "is
+  // anything wrong", so a clean run should be one line long.
   if (errors.length > 0) {
-    console.log(`\n${RED}${errors.length} manifest(s) invalid.${RESET}`);
+    for (const line of r.step("Will not load", plural(errors.length, "file"))) console.log(line);
+    for (const e of errors) {
+      console.log(r.line(`${style.hex(PALETTE.danger, glyph.cross)} ${style.bold(e.source)}`));
+      // Zod reports one field per line, and the message repeats the filename
+      // that is already the heading. Both lines have to go through the rail or
+      // the block breaks out of it entirely.
+      const detail = e.message.replace(/^Invalid provider manifest: \S+\n?/, "");
+      for (const part of detail.split("\n")) {
+        if (part.trim()) console.log(r.line(`  ${style.hex(PALETTE.faint, part.trim())}`));
+      }
+    }
+    for (const line of r.outro(
+      `${style.bold(`${plural(errors.length, "manifest")} to fix.`)} ${style.hex(PALETTE.faint, `${providers.length} loaded fine.`)}`,
+    )) {
+      console.log(line);
+    }
     return 1;
   }
-  console.log(`\n${GREEN}${providers.length} provider(s) valid.${RESET}`);
+
+  for (const line of r.outro(
+    `${style.hex(PALETTE.success, glyph.tick)} ${style.bold(`${plural(providers.length, "manifest")} valid.`)}`,
+  )) {
+    console.log(line);
+  }
   return 0;
+}
+
+/** Shared by the commands that count things, so plurals never drift. */
+function plural(n: number, word: string): string {
+  return `${n} ${word}${n === 1 ? "" : "s"}`;
 }
 
 /** Shared rendering: a problem list is the same shape everywhere it appears. */
@@ -558,7 +645,7 @@ async function main() {
 
   switch (command) {
     case "list":
-      return cmdList();
+      return cmdList(flags);
     case "validate":
       return cmdValidate();
     case "add":

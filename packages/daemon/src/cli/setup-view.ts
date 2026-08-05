@@ -24,6 +24,13 @@ export interface AgentState {
   /** Where to get it, for the ones that are not here yet. */
   install?: string;
   /**
+   * One short line about what this agent is.
+   *
+   * Shown by `pew2 providers list`, which is a catalogue. Setup does not use it:
+   * there the question is "does it work", and a description would bury that.
+   */
+  summary?: string;
+  /**
    * The executable this agent runs as.
    *
    * Only useful as a sign-in hint when it is the agent itself. Most manifests
@@ -324,5 +331,88 @@ function wrapDetail(text: string, width: number): string[] {
     // uncopyable and that is worse than a wrapped terminal line.
   }
   if (current) out.push(current);
+  return out;
+}
+
+/**
+ * `pew2 providers list`, in the same visual language as `pew2 setup`.
+ *
+ * A different job to the setup screen, though: this is the catalogue. Setup
+ * answers "am I ready", so it compresses the agents you do not have onto one
+ * line. This answers "what could I use", so every agent gets a row with what it
+ * is and how to get it.
+ *
+ * Same rail, same buckets, same rule about tone — an agent you have not
+ * installed is an option, not a problem — so the two commands read as one tool.
+ */
+export function providerList(agents: AgentState[], options: RenderOptions = {}): string[] {
+  const s = options.style ?? styler();
+  const g = options.glyph ?? glyphs();
+  const r = rail(options);
+  const buckets = group(agents);
+  const width = detailWidth(options);
+  const out: string[] = [];
+
+  const rows = (list: AgentState[], mark: string) => {
+    for (const agent of list) {
+      out.push(r.line(`${mark} ${s.bold(agent.name)}`));
+      if (agent.summary) {
+        for (const part of wrapDetail(agent.summary, width - 2)) {
+          out.push(r.line(`  ${s.hex(PALETTE.faint, part)}`));
+        }
+      }
+    }
+  };
+
+  if (buckets.ready.length > 0) {
+    out.push(...r.step("Ready to use", plural(buckets.ready.length, "agent")));
+    rows(buckets.ready, s.hex(PALETTE.success, g.tick));
+  }
+
+  const half = [...buckets["needs-setup"], ...buckets["missing-key"]].sort((a, b) =>
+    a.name.localeCompare(b.name),
+  );
+  if (half.length > 0) {
+    out.push(...r.step("Installed, not finished", "one step each"));
+    for (const agent of half) {
+      out.push(r.line(`${s.hex(PALETTE.warning, g.dot)} ${s.bold(agent.name)}`));
+      const note =
+        agent.missingEnv.length > 0
+          ? `needs ${agent.missingEnv.join(", ")}`
+          : (agent.verify?.detail ?? "needs signing in");
+      for (const part of wrapDetail(note, width - 2)) {
+        out.push(r.line(`  ${s.hex(PALETTE.faint, part)}`));
+      }
+    }
+  }
+
+  if (buckets.broken.length > 0) {
+    out.push(...r.step("Not working", "installed but would not start"));
+    for (const agent of buckets.broken) {
+      out.push(r.line(`${s.hex(PALETTE.danger, g.cross)} ${s.bold(agent.name)}`));
+      const detail = agent.verify?.detail;
+      if (detail) {
+        for (const part of wrapDetail(detail, width - 2)) {
+          out.push(r.line(`  ${s.hex(PALETTE.faint, part)}`));
+        }
+      }
+    }
+  }
+
+  if (buckets["not-installed"].length > 0) {
+    // Unlike the setup screen, these get a row each: the whole point of this
+    // command is to answer "what else could I run", and a comma-separated list
+    // cannot carry the install command that makes it actionable.
+    out.push(...r.step("Available to install", plural(buckets["not-installed"].length, "agent")));
+    for (const agent of buckets["not-installed"]) {
+      out.push(r.line(`${s.hex(PALETTE.faint, g.dot)} ${s.bold(agent.name)}`));
+      if (agent.install) {
+        for (const part of wrapDetail(agent.install, width - 2)) {
+          out.push(r.line(`  ${s.hex(PALETTE.faint, part)}`));
+        }
+      }
+    }
+  }
+
   return out;
 }

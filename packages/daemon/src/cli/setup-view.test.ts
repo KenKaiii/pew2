@@ -10,6 +10,7 @@
 import { expect, test } from "bun:test";
 import {
   agentSections,
+  providerList,
   bucketFor,
   group,
   needsSetup,
@@ -226,4 +227,60 @@ test("grouping is stable and alphabetical within a section", () => {
   ]);
 
   expect(buckets.ready.map((a) => a.name)).toEqual(["Alpha", "Mike", "Zulu"]);
+});
+
+test("the catalogue gives every absent agent its own row and install command", () => {
+  // Where this differs from the setup screen on purpose. Setup compresses the
+  // agents you do not have onto one line, because there the question is "am I
+  // ready". This command answers "what else could I run", and a comma-separated
+  // list cannot carry the command that makes it actionable.
+  const lines = providerList(
+    [
+      agent({ id: "codex", name: "Codex", notInstalled: true, install: "npm install -g @openai/codex" }),
+      agent({ id: "hermes", name: "Hermes", notInstalled: true, install: "pip install hermes-agent" }),
+    ],
+    plain,
+  ).map(stripAnsi);
+
+  const text = lines.join("\n");
+  expect(text).toContain("Available to install");
+  expect(text).toContain("npm install -g @openai/codex");
+  expect(text).toContain("pip install hermes-agent");
+  // Still not framed as a problem: no cross, no alarm words.
+  expect(text).not.toContain("✗");
+  expect(text).not.toMatch(/error|fail|cannot start/i);
+});
+
+test("the catalogue and the setup screen share one rail and one vocabulary", () => {
+  // Two commands that look like two different tools is the thing being fixed
+  // here, so the shared structure is worth pinning.
+  const agents = [agent({ id: "a", name: "Alpha" })];
+  const list = providerList(agents, plain).map(stripAnsi);
+  const setup = agentSections(agents, plain).map(stripAnsi);
+
+  expect(list.some((l) => l.startsWith("◇"))).toBe(true);
+  expect(list.every((l) => l.startsWith("│") || l.startsWith("◇"))).toBe(true);
+  // Same heading for the same state.
+  expect(list.join("\n")).toContain("Ready to use");
+  expect(setup.join("\n")).toContain("Ready to use");
+});
+
+test("a long description is cut to what the agent is, not what to worry about", () => {
+  // Gemini's manifest runs to three lines about Google withdrawing OAuth. That
+  // is right in the file and wrong against every row in a list.
+  const lines = providerList(
+    [
+      agent({
+        id: "gemini-cli",
+        name: "Gemini CLI",
+        summary: "Google's Gemini CLI",
+        missingEnv: ["GEMINI_API_KEY"],
+      }),
+    ],
+    plain,
+  ).map(stripAnsi);
+
+  const text = lines.join("\n");
+  expect(text).toContain("needs GEMINI_API_KEY");
+  expect(text).not.toContain("withdrew");
 });
