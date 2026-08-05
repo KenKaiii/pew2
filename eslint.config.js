@@ -48,7 +48,7 @@ export default tseslint.config(
   {
     languageOptions: {
       parserOptions: {
-        // Resolves each file against whichever of the four tsconfigs actually
+        // Resolves each file against whichever of the three tsconfigs actually
         // owns it — root, relay, or app — instead of maintaining a parallel
         // list here that would drift the first time one of them moves.
         projectService: true,
@@ -89,18 +89,19 @@ export default tseslint.config(
       // handler. Nothing here is a bug, in either group.
       "@typescript-eslint/require-await": "off",
 
-      // 58 hits, 51 in production. Both of these rules are correct only if the
-      // declared types are the whole truth, and here they are not: values cross
-      // a socket, a subprocess, and a JSON file on disk. `session-prefs.ts:91`
-      // is the pattern — `Object.entries(...)` on a record parsed from disk, so
+      // 58 hits, 51 in production. This rule is correct only if the declared
+      // types are the whole truth, and here they are not: values cross a
+      // socket, a subprocess, and a JSON file on disk. `session-prefs.ts:91` is
+      // the pattern — `Object.entries(...)` on a record parsed from disk, so
       // the element type is what the file is *supposed* to contain, and the
       // `?.` the rule calls redundant is what survives a truncated write. The
       // check the type system calls impossible is the one doing the work.
       "@typescript-eslint/no-unnecessary-condition": "off",
-      // Equally: `packages/app` does not set `noUncheckedIndexedAccess` while
-      // the root project does, so the same `arr[i]!` is "unnecessary" in one
-      // half of the repo and required in the other. Deleting them would break
-      // the moment the app's config catches up.
+
+      // The sibling rule, off for a related reason: `packages/app` does not set
+      // `noUncheckedIndexedAccess` while the root project does, so the same
+      // `arr[i]!` is "unnecessary" in one half of the repo and required in the
+      // other. Deleting them would break the moment the app's config catches up.
       "@typescript-eslint/no-unnecessary-type-assertion": "off",
 
       // An unused variable is usually a half-finished edit. Leading underscore
@@ -186,12 +187,10 @@ export default tseslint.config(
       // assignment is legitimately never read. In production code this rule
       // finds dead stores worth deleting; here it just asks for an uglier test.
       //
-      // This is the only rule tests need relaxed. `any`, the unsafe-* family
-      // and `no-unnecessary-condition` are all off repo-wide already, and
-      // `no-non-null-assertion` ships in `strictTypeChecked` rather than the
-      // `recommendedTypeChecked` this config extends — so it was never on to
-      // turn off, and saying otherwise here claimed a protection that did not
-      // exist.
+      // The only rule tests need relaxed. Everything else they would want —
+      // `any`, the unsafe-* family, `no-unnecessary-condition` — is already off
+      // repo-wide, so listing it again here would only look like protection
+      // that does not exist.
       "no-useless-assignment": "off",
     },
   },
