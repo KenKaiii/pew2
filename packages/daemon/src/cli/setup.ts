@@ -149,6 +149,7 @@ export async function setup(options: SetupOptions = {}): Promise<SetupResult> {
     return {
       id: provider.manifest.id,
       name: provider.manifest.name,
+      experimental: provider.manifest.pew.experimental,
       install: installById.get(provider.manifest.id),
       command: provider.command,
       missingEnv: provider.missingEnv,

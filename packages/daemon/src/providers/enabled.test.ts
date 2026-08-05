@@ -75,3 +75,18 @@ test("the list is written sorted, so the file does not churn", async () => {
   const raw = await Bun.file(join(e.PEW2_HOME!, "disabled.json")).text();
   expect(JSON.parse(raw).disabled).toEqual(["codex", "goose", "opencode"]);
 });
+
+test("an agent that is not installed is never recorded as a choice", async () => {
+  // The picker cannot select an agent that is not on this machine, so treating
+  // "not chosen" as "turned off" would write it down as disabled — and it would
+  // then stay hidden on the day the user finally installs it. That is exactly
+  // the trap this file avoids by storing what is off rather than what is on.
+  //
+  // This pins the contract `cmdSetup` relies on: only ids it passes in are
+  // stored, so the caller can filter and trust the result.
+  const e = await env();
+  await writeDisabled(["opencode"], e);
+
+  expect(await readDisabled(e)).toEqual(new Set(["opencode"]));
+  expect((await readDisabled(e)).has("codex")).toBe(false);
+});

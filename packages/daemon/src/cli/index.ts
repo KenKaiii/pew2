@@ -48,7 +48,8 @@ import { loadPairing, setRelay } from "../pairing.js";
 import { cmdPair } from "./pair.js";
 import { agentSections, outroFor, providerList } from "./setup-view.js";
 import { rail, plural } from "./rail.js";
-import { setEnabled, readDisabled } from "../providers/enabled.js";
+import { setEnabled, readDisabled, writeDisabled } from "../providers/enabled.js";
+import { pickAgents } from "./pick-agents.js";
 import { PALETTE, colorLevel, glyphs, statusLine, styler, unicodeOk } from "./ui.js";
 // Imported rather than read from disk: this file ends up inside a compiled
 // binary, where there is no package.json next to it to read.
@@ -236,6 +237,22 @@ async function cmdValidate() {
 }
 
 
+/** The one line the picker shows under an agent's name. */
+function pickerDetail(agent: {
+  notInstalled: boolean;
+  missingEnv: string[];
+  verify?: { status: string; detail?: string };
+  summary?: string;
+}): string | undefined {
+  // Whatever stands between this agent and being usable, since that is what
+  // decides whether ticking it is worth anything. Falls back to what the agent
+  // is, for the ones with nothing in the way.
+  if (agent.notInstalled) return "not installed on this computer";
+  if (agent.missingEnv.length > 0) return `needs ${agent.missingEnv.join(", ")}`;
+  if (agent.verify?.status === "failed") return agent.verify.detail ?? "would not start";
+  return agent.summary;
+}
+
 async function cmdSetup(flags: Set<string>) {
   const json = flags.has("--json");
   if (json) {
@@ -274,7 +291,54 @@ async function cmdSetup(flags: Set<string>) {
   });
   progress.stop();
 
-  for (const line of agentSections(result.agents, view)) console.log(line);
+  // Interactive: ask which agents to offer, instead of printing a list and
+  // leaving the user to discover `pew2 providers disable`. Every agent found on
+  // this machine gets spawned whenever the phone connects, so the answer here
+  // is what stops unused agents costing memory and cluttering the drawer.
+  const interactive = Boolean(process.stdin.isTTY && process.stdout.isTTY);
+  // Test fixtures are hidden from the phone, so offering them here would list an
+  // agent that never turns up.
+  const pickable = result.agents.filter((agent) => !agent.experimental);
+  if (interactive && pickable.length > 0) {
+    const disabled = await readDisabled();
+    const chosen = await pickAgents(
+      pickable.map((agent) => ({
+        id: agent.id,
+        name: agent.name,
+        selectable: !agent.notInstalled && agent.verify?.status !== "failed",
+        detail: pickerDetail(agent),
+      })),
+      { disabled },
+    );
+
+    // `undefined` means the user backed out, which is not the same as choosing
+    // none — the previous selection stands.
+    if (chosen) {
+      // Only agents that could actually be picked are recorded. An agent that
+      // is not installed was never selectable, so writing it down as "off"
+      // would silently disable it the day the user installs it \u2014 the exact
+      // trap this file avoids by storing what is off rather than what is on.
+      //
+      // Anything already off and still not installed keeps its entry, so a
+      // deliberate choice is not lost by running setup on a machine where the
+      // agent happens to be missing.
+      const offNow = new Set(
+        [...disabled].filter((id) => {
+          const agent = result.agents.find((a) => a.id === id);
+          return !agent || agent.notInstalled;
+        }),
+      );
+      // `pickable`, not every agent: a test fixture was never on the screen, so
+      // recording it as a choice the user made would be a lie in a file they
+      // can read.
+      for (const agent of pickable) {
+        if (!agent.notInstalled && !chosen.has(agent.id)) offNow.add(agent.id);
+      }
+      await writeDisabled(offNow);
+    }
+  } else {
+    for (const line of agentSections(result.agents, view)) console.log(line);
+  }
 
   // Only problems that are not about an individual agent: those already have
   // their own sections above, and repeating them turns one issue into two.

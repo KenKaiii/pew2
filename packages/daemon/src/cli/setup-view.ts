@@ -34,6 +34,14 @@ export interface AgentState {
    * wanted. Grouping it under "not working" would read as a fault report.
    */
   disabled?: boolean;
+  /**
+   * A test fixture rather than a real agent.
+   *
+   * The daemon never announces these to the phone, so any screen that offers a
+   * choice must leave them out \u2014 picking one would promise an agent that never
+   * appears.
+   */
+  experimental?: boolean;
   /** Where to get it, for the ones that are not here yet. */
   install?: string;
   /**
