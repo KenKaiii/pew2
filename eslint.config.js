@@ -13,8 +13,12 @@
  *     processes, where the symptom is an operation that silently never happens
  *   - an async function handed to something expecting a sync callback, where
  *     the rejection goes nowhere
- *   - a `catch` that swallows, a condition that is always true, a switch that
- *     stopped being exhaustive when someone added a variant
+ *   - an `await` on a value that was never a promise
+ *   - a switch that stopped being exhaustive when someone added a variant
+ *
+ * A lot is switched off below, and every one of those says why. That matters
+ * more than the list of what is on: a rule disabled without a reason is how a
+ * config stops being trustworthy.
  *
  * Formatting is deliberately not linted. If that ever matters, it is a
  * formatter's job, not this file's.
@@ -162,8 +166,6 @@ export default tseslint.config(
   },
 
   {
-    // Tests reach into internals, build deliberately malformed input, and
-    // assert on things the type system would otherwise forbid. That is the job.
     files: [
       "**/*.test.ts",
       "**/*.test.tsx",
@@ -172,18 +174,16 @@ export default tseslint.config(
       "packages/daemon/src/testing/**",
     ],
     rules: {
-      "@typescript-eslint/no-explicit-any": "off",
-      "@typescript-eslint/no-non-null-assertion": "off",
-      "@typescript-eslint/no-unsafe-assignment": "off",
-      "@typescript-eslint/no-unsafe-member-access": "off",
-      "@typescript-eslint/no-unsafe-argument": "off",
-      "@typescript-eslint/no-unsafe-call": "off",
-      // A test that builds an impossible state on purpose will trip this.
-      "@typescript-eslint/no-unnecessary-condition": "off",
-
       // Tests thread state through a sequence of steps, so the last step's
       // assignment is legitimately never read. In production code this rule
       // finds dead stores worth deleting; here it just asks for an uglier test.
+      //
+      // This is the only rule tests need relaxed. `any`, the unsafe-* family
+      // and `no-unnecessary-condition` are all off repo-wide already, and
+      // `no-non-null-assertion` ships in `strictTypeChecked` rather than the
+      // `recommendedTypeChecked` this config extends — so it was never on to
+      // turn off, and saying otherwise here claimed a protection that did not
+      // exist.
       "no-useless-assignment": "off",
     },
   },

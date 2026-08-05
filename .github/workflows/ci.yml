@@ -24,10 +24,10 @@ jobs:
       # each is a separate pass rather than one project.
       - run: npm run typecheck
 
-      # Type-aware rules only: floating promises, unhandled rejections, dead
-      # code. It carries almost no style rules, so a failure here is a bug
-      # rather than a formatting opinion. Warnings do not fail the build — the
-      # React dependency-array ones need the app running to judge.
+      # Type-aware rules only: floating promises, promises passed where a sync
+      # callback was expected, dead code. Almost no style rules, so a failure
+      # here is a bug rather than a formatting opinion. Warnings do not fail the
+      # build — the React dependency-array ones need the app running to judge.
       - run: npm run lint
 
       # Exercises the ACP pipeline end to end via providers/echo.json, which

@@ -28,13 +28,16 @@ function phone() {
 }
 
 /** Enough of a Daemon for the client to drive. */
-function fakeDaemon() {
+function fakeDaemon({ refreshFails = false } = {}) {
   const calls: string[] = [];
   return {
     calls,
     daemon: {
       refreshProviders: async () => {
         calls.push("refreshProviders");
+        // Re-scanning providers reads the disk and spawns probe processes, so
+        // it can genuinely fail on a machine that just woke up.
+        if (refreshFails) throw new Error("EMFILE: too many open files");
         return { providers: [], errors: [] };
       },
     } as unknown as Daemon,
@@ -72,9 +75,12 @@ class FakeSocket {
   }
 }
 
-function client(overrides: Partial<RelayClientOptions> = {}) {
+function client(
+  overrides: Partial<RelayClientOptions> = {},
+  daemonOptions: { refreshFails?: boolean } = {},
+) {
   FakeSocket.instances = [];
-  const { daemon, calls } = fakeDaemon();
+  const { daemon, calls } = fakeDaemon(daemonOptions);
   const statuses: string[] = [];
   const relay = new RelayClient({
     daemon,
@@ -119,6 +125,42 @@ test("announces itself and re-announces providers on connect", () => {
   expect(calls).toContain("refreshProviders");
   expect(statuses).toEqual(["connecting", "online"]);
   relay.stop();
+});
+
+test("a failed provider re-announce does not bring down the connection", async () => {
+  // `refreshProviders` is fired without being awaited, because the connection
+  // is usable before it finishes. That makes an unhandled rejection here fatal
+  // to the whole daemon — both Bun and Node exit on one by default — and it
+  // would land at the exact moment the user is trying to reconnect, which is
+  // the worst possible time to lose the process.
+  //
+  // The rejection hook is what actually guards this. The status and `online`
+  // assertions below would pass with or without the `.catch`, since the
+  // rejection happens after `onopen` has already returned.
+  const rejections: unknown[] = [];
+  const onRejection = (error: unknown) => rejections.push(error);
+  process.on("unhandledRejection", onRejection);
+
+  try {
+    const { relay, statuses, calls } = client({}, { refreshFails: true });
+
+    relay.start();
+    FakeSocket.instances[0]!.open();
+
+    // Let the rejected promise settle, then give Node a turn to notice an
+    // unhandled one.
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(calls).toContain("refreshProviders");
+    expect(rejections).toEqual([]);
+    // The connection is up and stays up: losing one re-announce is recoverable,
+    // losing the socket is not.
+    expect(statuses).toEqual(["connecting", "online"]);
+    expect(relay.online).toBe(true);
+    relay.stop();
+  } finally {
+    process.off("unhandledRejection", onRejection);
+  }
 });
 
 test("reconnects after the socket drops", async () => {
