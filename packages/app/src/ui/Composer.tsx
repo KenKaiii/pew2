@@ -156,9 +156,12 @@ function ComposerView({
   );
 
   const sendIn = useRef(new Animated.Value(0)).current;
-  // While listening, the mic *is* the control the user needs back, so send does
-  // not slide over it even once words have landed in the draft.
-  const sendTarget = (canSend || busy) && !dictation?.listening ? 1 : 0;
+  // Send slides over the mic as soon as there is something to send — including
+  // while still dictating. Tapping it (below) stops the recogniser first, so
+  // "speak, then send" is one tap: no separate stop, no hunting for the mic
+  // again. The mic only holds the slot while listening with an empty draft,
+  // where it is still the control the user needs back.
+  const sendTarget = canSend || busy ? 1 : 0;
   // The text rides its own native transform rather than the surrounding layout,
   // so its duration is fixed no matter what else is animating in the same commit.
   const textDrop = useRef(new Animated.Value(expanded ? 0 : TEXT_DROP)).current;
@@ -364,6 +367,11 @@ function ComposerView({
                       onStop?.();
                       return;
                     }
+                    // Sending while dictating: release the recogniser first, or
+                    // the mic stays open (orange indicator, ducked audio) after
+                    // the message is gone. The words are already in the draft —
+                    // interim results landed them — so cancel, not stop.
+                    if (dictation?.listening) dictation.cancel();
                     haptics.sent();
                     onSend();
                   }}
