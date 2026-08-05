@@ -166,8 +166,22 @@ export function width(text: string): number {
   return [...stripAnsi(text)].length;
 }
 
-export function terminalWidth(stream: { columns?: number } = process.stdout): number {
-  return stream.columns && stream.columns > 0 ? stream.columns : 80;
+/**
+ * How wide the output may be.
+ *
+ * `stream.columns` is only set when stdout is a terminal, so piping into `less`
+ * or a file loses it. `COLUMNS` is the conventional way to say how wide the
+ * result should be anyway, and honouring it is what makes the narrow layout
+ * testable without allocating a pty.
+ */
+export function terminalWidth(
+  stream: { columns?: number } = process.stdout,
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  if (stream.columns && stream.columns > 0) return stream.columns;
+  const declared = Number(env.COLUMNS);
+  if (Number.isFinite(declared) && declared > 0) return declared;
+  return 80;
 }
 
 /** Pad a styled string to `target` cells, ignoring escapes. */
@@ -304,12 +318,19 @@ export function statusLine(
     intervalMs?: number;
     /** Leading spaces, so the live line sits in the same column as the rest. */
     indent?: number;
+    /**
+     * Literal prefix for the live line, used instead of `indent`.
+     *
+     * The rail is a coloured glyph, not whitespace, so a screen drawn on it
+     * cannot line its spinner up with a count of spaces.
+     */
+    prefix?: string;
   } = {},
 ): StatusLine {
   const stream = options.stream ?? process.stdout;
   const frames = options.frames ?? glyphs().spinner;
   const interval = options.intervalMs ?? 80;
-  const pad = " ".repeat(options.indent ?? 0);
+  const pad = options.prefix ?? " ".repeat(options.indent ?? 0);
   const style = styler();
   let text = label;
   let frame = 0;

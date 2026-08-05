@@ -49,7 +49,6 @@ export interface Problem {
   id:
     | "no-providers"
     | "manifest-invalid"
-    | "provider-unavailable"
     | "provider-missing-env"
     | "daemon-unreachable"
     | "not-paired"
@@ -157,23 +156,23 @@ export async function doctor(options: DoctorOptions = {}): Promise<DoctorReport>
   for (const provider of providers) {
     if (isAvailable(provider)) continue;
 
-    if (provider.commandMissing) {
-      problems.push({
-        id: "provider-unavailable",
-        severity: "warning",
-        provider: provider.manifest.id,
-        detail: `'${provider.command}' not on PATH. ${provider.manifest.name} cannot start.`,
-        fix: `Install ${provider.manifest.name}, or delete ${provider.source}`,
-      });
-      continue;
-    }
+    // An agent that is not on this machine is not a problem, and this is the
+    // one place that decides it. pew2 ships thirteen manifests and nobody
+    // installs thirteen agents, so treating absence as a finding meant a normal
+    // laptop reported eight warnings and advised deleting the manifests that
+    // make those agents installable later. The catalogue of what you could add
+    // is `pew2 providers list`; this command is only about what is broken.
+    if (provider.commandMissing) continue;
 
     problems.push({
       id: "provider-missing-env",
       severity: "warning",
       provider: provider.manifest.id,
       detail: `${provider.manifest.name} needs ${provider.missingEnv.join(", ")}.`,
-      fix: `Set ${provider.missingEnv.map((n) => `${n}=…`).join(" and ")} where the daemon runs`,
+      // No ellipsis character here: `fix` is rendered on screens that fall back
+      // to ASCII, and it is also the field an agent reads to decide what to run.
+      // A placeholder glyph is unhelpful in both places.
+      fix: `Set ${provider.missingEnv.join(" and ")} in the environment where the daemon runs`,
     });
   }
 

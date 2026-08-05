@@ -32,6 +32,7 @@ import {
   terminalWidth,
   unicodeOk,
 } from "./ui.js";
+import { rail } from "./rail.js";
 import {
   hintLine,
   pairedLine,
@@ -241,13 +242,14 @@ export async function cmdPair(flags: Set<string>): Promise<number> {
   for (const line of renderPair(view, qr, render)) console.log(line);
 
   if (!options.wait || !daemonRunning) {
-    if (!daemonRunning) {
-      console.log("");
-      console.log(
-        `  ${style.hex(PALETTE.danger, glyph.cross)} ${style.dim("start the daemon before scanning:")} ${style.bold("pew2 service install")}`,
-      );
-    }
-    console.log("");
+    // Closes the rail. Without an outro, `--no-wait` and every piped run ended
+    // on a dangling pipe: the screen just stopped. The daemon-down warning went
+    // out on a hand-indented line too, which put the single most important line
+    // on this screen outside the rail everything else hangs off.
+    const closing = daemonRunning
+      ? style.dim("Scan the code above when you are ready.")
+      : `${style.hex(PALETTE.danger, glyph.cross)} ${style.bold("Start the daemon before scanning:")} ${style.bold("pew2 service install")}`;
+    for (const line of rail(render).outro(closing)) console.log(line);
     return reach === "unreachable" ? 1 : 0;
   }
 
@@ -266,10 +268,15 @@ async function waitInteractively(
   const interactive = Boolean(process.stdin.isTTY && process.stdout.isTTY);
 
   for (const line of hintLine(interactive, render)) console.log(line);
-  console.log("");
 
   const controller = new AbortController();
-  const spinner = statusLine(waitingLabel(view, render), { frames: glyph.spinner, indent: 2 });
+  const r = rail(render);
+  // The live line hangs off the rail like every other line on this screen, so
+  // the spinner does not appear to float outside the flow while it waits.
+  const spinner = statusLine(waitingLabel(view, render), {
+    frames: glyph.spinner,
+    prefix: r.line(""),
+  });
 
   const stopKeys = onKeypress(
     (pressed) => {
@@ -297,15 +304,19 @@ async function waitInteractively(
 
   if (result) {
     spinner.stop(pairedLine(deviceLabel(result.deviceId), result.elapsedMs, render));
-    console.log(
-      `  ${style.dim(view.reach === "anywhere" ? `${glyph.dot} it will reconnect from any network while the daemon runs` : `${glyph.dot} it will reconnect whenever it is on this Wi-Fi`)}`,
-    );
-    console.log("");
+    for (const line of r.outro(
+      style.dim(
+        view.reach === "anywhere"
+          ? "It will reconnect from any network while the daemon runs."
+          : "It will reconnect whenever it is on this Wi-Fi.",
+      ),
+    )) {
+      console.log(line);
+    }
     return 0;
   }
 
   spinner.stop();
   for (const line of timeoutLines(render)) console.log(line);
-  console.log("");
   return 0;
 }

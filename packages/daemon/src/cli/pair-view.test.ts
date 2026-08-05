@@ -79,8 +79,12 @@ test("the pairing URL is printed on one unbroken line", () => {
   const urlLine = rendered.map(stripAnsi).find((line) => line.includes("wss://"));
 
   expect(urlLine).toBeDefined();
-  expect(urlLine!.trim()).toBe(view().url);
-  expect(new URL(urlLine!.trim()).searchParams.get("pairing")).toBe("a".repeat(48));
+  // The line hangs off the rail now, so the pipe and its padding come off
+  // before comparing. What this guards is that nothing was inserted *into* the
+  // URL, which is still exactly as true with a prefix as without one.
+  const url = urlLine!.replace(/^[│|]\s*/, "");
+  expect(url).toBe(view().url);
+  expect(new URL(url).searchParams.get("pairing")).toBe("a".repeat(48));
 });
 
 test("a stopped daemon is called out with the command that fixes it", () => {
@@ -111,7 +115,8 @@ test("centring never pushes a wide block off the left edge", () => {
   expect(centerIndent(50, 80)).toBe(15);
   // A QR wider than the window is left-aligned rather than negatively indented.
   expect(centerIndent(90, 80)).toBe(0);
-  expect(centerIndent(78, 80)).toBe(2);
+  // The floor is the rail gutter — pipe plus two spaces — not bare indentation.
+  expect(centerIndent(78, 80)).toBe(3);
 });
 
 test("the paired line names the device and how long it took", () => {
@@ -158,4 +163,30 @@ test("token age reads as a human would say it", () => {
   expect(relativeAge("2026-01-09T23:00:00Z", now)).toBe("1 hour ago");
   expect(relativeAge("2026-01-05T00:00:00Z", now)).toBe("5 days ago");
   expect(relativeAge("nonsense", now)).toBe("unknown age");
+});
+
+test("a QR that barely fits is never pushed into a wrap by the rail", () => {
+  // A wrapped QR cannot be scanned, and the rail is three columns wide, so a
+  // code that fit exactly before the rail existed must not now overflow. When
+  // there is no room for both, the code wins and the rail breaks for it.
+  const row = "\x1b[107m" + "▀".repeat(49) + "\x1b[0m";
+  const qr = [row, row].join("\n");
+
+  for (const columns of [49, 51, 52, 60]) {
+    const lines = renderPair(view(), qr, { ...plain, columns });
+    const qrLines = lines.filter((l) => l.includes("▀"));
+    expect(qrLines.length).toBe(2);
+    for (const line of qrLines) {
+      expect(width(stripAnsi(line)), `${columns} cols`).toBeLessThanOrEqual(columns);
+    }
+  }
+});
+
+test("a QR too wide for the window is left alone rather than indented", () => {
+  const row = "\x1b[107m" + "▀".repeat(70) + "\x1b[0m";
+  const lines = renderPair(view(), row, { ...plain, columns: 40 });
+  const qrLine = lines.find((l) => l.includes("▀"))!;
+
+  // No rail prefix and no padding: every cell of the window belongs to the code.
+  expect(qrLine.startsWith("\x1b[107m")).toBe(true);
 });

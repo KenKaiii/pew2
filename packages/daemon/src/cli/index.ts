@@ -34,6 +34,8 @@ import {
 import { CATALOG, detectProviders } from "../providers/detect.js";
 import { fetchRegistry, syncRegistry } from "./registry-sync.js";
 import { verifyProvider } from "../providers/verify.js";
+import { doctorView } from "./doctor-view.js";
+import { registryView } from "./registry-view.js";
 import { doctor, type Problem } from "./doctor.js";
 import { setup } from "./setup.js";
 import {
@@ -221,7 +223,14 @@ async function cmdSetup(flags: Set<string>) {
   // One live line rather than a paragraph per stage. Verification spawns each
   // agent for real, which takes seconds, and a static screen for that long reads
   // as a hang — but a wall of "verifying x..." lines reads as noise.
-  const progress = statusLine("Checking your computer", { frames: glyph.spinner, indent: 0 });
+  //
+  // Prefixed with the rail, not flush left: when stdout is not a terminal each
+  // update is written as its own line, and those lines were landing outside the
+  // rail the rest of the screen is drawn on — visible in a piped log or CI.
+  const progress = statusLine("Checking your computer", {
+    frames: glyph.spinner,
+    prefix: r.line(""),
+  });
   const result = await setup({
     verify: !flags.has("--skip-verify"),
     onProgress: (stage, note) => {
@@ -407,19 +416,7 @@ async function cmdDoctor(flags: Set<string>) {
     return report.ok ? 0 : 1;
   }
 
-  for (const provider of report.providers) {
-    console.log(provider.available ? ok(provider.id) : warn(`${provider.id} ${DIM}${provider.reason}${RESET}`));
-  }
-  console.log(
-    report.daemon.reachable
-      ? ok(`daemon ${DIM}${report.daemon.url}${RESET}`)
-      : warn(`daemon ${DIM}not running${RESET}`),
-  );
-
-  if (report.problems.length > 0) console.log("");
-  printProblems(report.problems);
-
-  console.log(report.ok ? `\n${GREEN}All good.${RESET}` : `\n${RED}${report.problems.filter((p) => p.severity === "error").length} blocking problem(s).${RESET}`);
+  for (const line of doctorView(report)) console.log(line);
   return report.ok ? 0 : 1;
 }
 
@@ -570,37 +567,8 @@ async function cmdRegistry(command: string | undefined, flags: Set<string>) {
     return 0;
   }
 
-  console.log(`${BOLD}ACP registry${RESET} ${DIM}v${result.registryVersion}${RESET}\n`);
+  for (const line of registryView(result, { dryRun })) console.log(line);
 
-  for (const id of result.written) {
-    console.log(ok(`${id}${dryRun ? ` ${DIM}(would add)${RESET}` : ""}`));
-  }
-  for (const id of result.conflicts) {
-    // Deliberately not phrased as "you edited this": the file may equally have
-    // come from `pew2 detect`, and the point is only that pew2 did not write it
-    // and so will not silently replace it.
-    console.log(warn(`${id} ${DIM}already has a manifest, left alone — --force to replace${RESET}`));
-  }
-
-  // The skip reasons are the useful part when an agent someone expected is
-  // absent, but listing 20 of them buries the result. Summarise, and only name
-  // the ones that genuinely cannot run here — an agent we already ship under
-  // another name is not a problem to go looking for.
-  const unavailable = result.skipped.filter((s) => s.kind === "unsupported");
-  const bundled = result.skipped.length - unavailable.length;
-
-  console.log(
-    `\n${result.written.length} ${dryRun ? "to add" : "added"}, ${result.unchanged.length} unchanged` +
-      `${result.conflicts.length > 0 ? `, ${result.conflicts.length} left alone` : ""}.`,
-  );
-  if (bundled > 0) console.log(`${DIM}${bundled} already ship with pew2.${RESET}`);
-  if (unavailable.length > 0) {
-    console.log(`${DIM}${unavailable.length} unavailable here: ${unavailable.map((s) => s.id).join(", ")}${RESET}`);
-  }
-  if (result.written.length > 0 && !dryRun) {
-    console.log(`${DIM}Written to ${result.targetDir}${RESET}`);
-    console.log(`\nNext: ${BOLD}pew2 providers list${RESET}`);
-  }
   return 0;
 }
 

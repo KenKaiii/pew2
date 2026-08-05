@@ -15,7 +15,17 @@
  * Rendering is separated from doing so the whole screen can be tested without
  * spawning a single agent. Every function takes plain data and returns lines.
  */
-import { PALETTE, styler, glyphs, terminalWidth, type Glyphs, type Style } from "./ui.js";
+import { PALETTE, styler, glyphs } from "./ui.js";
+import {
+  rail,
+  plural,
+  wrapDetail,
+  detailWidth,
+  type RenderOptions,
+} from "./rail.js";
+
+export type { RenderOptions };
+export { rail };
 
 /** What we know about one agent after looking at the machine. */
 export interface AgentState {
@@ -98,75 +108,6 @@ export function group(agents: AgentState[]): Record<Bucket, AgentState[]> {
   for (const agent of agents) out[bucketFor(agent)].push(agent);
   for (const list of Object.values(out)) list.sort((a, b) => a.name.localeCompare(b.name));
   return out;
-}
-
-export interface RenderOptions {
-  style?: Style;
-  glyph?: Glyphs;
-  /** Terminal width. Defaults to the real one, or 80 when it is not a terminal. */
-  columns?: number;
-}
-
-/**
- * Room for a wrapped detail line.
- *
- * Subtracts the rail prefix and the two-space hang, then clamps: a very narrow
- * terminal should still wrap somewhere sensible rather than one word per line,
- * and a very wide one should not stretch prose to 200 characters.
- */
-function detailWidth(options: RenderOptions): number {
-  const columns = options.columns ?? terminalWidth();
-  return Math.max(32, Math.min(96, columns - 6));
-}
-
-/**
- * The vertical rail.
- *
- * Borrowed from the visual language `@clack/prompts` popularised, because it
- * solves the actual problem: it makes a sequence of steps read as one connected
- * flow rather than as unrelated blocks of text scrolling past. Implemented here
- * rather than taken as a dependency, since this ships inside a compiled binary
- * and `ui.ts` already degrades colour and glyphs correctly for terminals that
- * cannot render either.
- */
-interface Rail {
-  /** Opens the flow. */
-  intro: (title: string, subtitle?: string) => string[];
-  /** A section heading hanging off the rail. */
-  step: (title: string, note?: string) => string[];
-  /** A line inside the current section. */
-  line: (text: string) => string;
-  /** An empty rail segment, for breathing room. */
-  bar: () => string;
-  /** Closes the flow. */
-  outro: (text: string) => string[];
-}
-
-export function rail(options: RenderOptions = {}): Rail {
-  const s = options.style ?? styler();
-  const g = options.glyph ?? glyphs();
-  const unicode = g.unicode;
-
-  const pipe = s.hex(PALETTE.faint, unicode ? "│" : "|");
-  const open = s.hex(PALETTE.accent, unicode ? "◆" : "*");
-  const dot = s.hex(PALETTE.faint, unicode ? "◇" : "o");
-  const end = s.hex(PALETTE.accent, unicode ? "└" : "`");
-
-  return {
-    intro: (title, subtitle) => [
-      "",
-      `${open}  ${s.bold(title)}`,
-      ...(subtitle ? [`${pipe}  ${s.hex(PALETTE.faint, subtitle)}`] : []),
-    ],
-    step: (title, note) => [
-      pipe,
-      `${dot}  ${s.bold(title)}${note ? s.hex(PALETTE.faint, `  ${note}`) : ""}`,
-      pipe,
-    ],
-    line: (text) => `${pipe}  ${text}`,
-    bar: () => pipe,
-    outro: (text) => [pipe, `${end}  ${text}`, ""],
-  };
 }
 
 /**
@@ -293,45 +234,6 @@ export function outroFor(
   return r.outro(
     `${s.bold(`${plural(count, "agent")} ready.`)} ${s.hex(PALETTE.faint, "That is all you need — run")} ${s.bold("pew2 pair")} ${s.hex(PALETTE.faint, "to connect your phone.")}`,
   );
-}
-
-function plural(n: number, word: string): string {
-  return `${n} ${word}${n === 1 ? "" : "s"}`;
-}
-
-/** Agents report multi-line stack traces; only the first line is readable here. */
-/**
- * An agent's message, wrapped rather than cut.
- *
- * These messages are the instruction — "Configuration value not found:
- * GOOSE_PROVIDER" names the exact thing to set, and it sits at the *end* of the
- * sentence. Truncating removes the only part worth reading and leaves an
- * ellipsis where the answer was.
- *
- * Only the first line of a multi-line error is kept: agents sometimes attach a
- * stack, and that belongs in `pew2 providers verify`, not on a summary screen.
- */
-function wrapDetail(text: string, width: number): string[] {
-  const line = text.split("\n")[0]!.trim();
-  if (line.length <= width) return [line];
-
-  const out: string[] = [];
-  let current = "";
-  for (const word of line.split(/\s+/)) {
-    if (!current) {
-      current = word;
-    } else if (current.length + 1 + word.length <= width) {
-      current += ` ${word}`;
-    } else {
-      out.push(current);
-      current = word;
-    }
-    // A single unbroken token longer than the line — a path, a URL — is left
-    // whole and allowed to overflow, because breaking it makes it
-    // uncopyable and that is worse than a wrapped terminal line.
-  }
-  if (current) out.push(current);
-  return out;
 }
 
 /**

@@ -19,7 +19,10 @@ import {
 } from "./setup-view.js";
 import { glyphs, stripAnsi, styler } from "./ui.js";
 
-const plain = { style: styler(0), glyph: glyphs(true) };
+// Width is pinned rather than inherited: `terminalWidth()` falls back to
+// $COLUMNS, which most shells export, so a fixture that omits it wraps to
+// whatever window the suite happened to be run from.
+const plain = { style: styler(0), glyph: glyphs(true), columns: 80 };
 
 function agent(overrides: Partial<AgentState> = {}): AgentState {
   return { id: "x", name: "X", missingEnv: [], notInstalled: false, ...overrides };
