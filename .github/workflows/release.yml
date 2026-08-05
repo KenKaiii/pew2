@@ -64,17 +64,18 @@ jobs:
         if: matrix.target == 'bun-linux-x64'
         run: |
           # The manifests are compiled into the binary rather than read from
-          # disk, and a build that lost them reports zero agents — which on a
+          # disk, and a build that lost them reports zero agents - which on a
           # user's machine is indistinguishable from "you have nothing
           # installed". Catch that here rather than in a bug report.
           #
-          # Counts distinct known ids in the output rather than parsing the
-          # layout, so it also fails on a *wrong* set and not just an empty one.
-          expected=$(bun -e 'import { BUNDLED_MANIFESTS } from "./packages/daemon/src/providers/bundled.ts"; console.log(BUNDLED_MANIFESTS.map(m => m.id).join("|"))')
-          found=$(./${{ matrix.asset }} providers list | grep -oE "$expected" | sort -u | wc -l)
-          # `printf '%s'` emits no trailing newline, so `wc -l` counts one fewer
-          # line than there are ids. Counting separators and adding one is exact.
-          total=$(( $(printf '%s' "$expected" | tr -cd '|' | wc -c) + 1 ))
+          # Uses --json, not the human output: the screen is a designed surface
+          # that gets reworded, and an earlier version of this check broke
+          # simply because the list started showing display names instead of
+          # ids. A release must not fail over a copy change.
+          found=$(./${{ matrix.asset }} providers list --json | bun -e \
+            'const d = await Bun.stdin.json(); console.log(d.length)')
+          total=$(bun -e \
+            'import { BUNDLED_MANIFESTS } from "./packages/daemon/src/providers/bundled.ts"; console.log(BUNDLED_MANIFESTS.length)')
           echo "providers found: $found of $total"
           if [ "$found" -ne "$total" ]; then
             echo "::error::The compiled binary reports $found of $total providers."
