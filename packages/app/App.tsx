@@ -356,6 +356,18 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
   // A named id that no longer exists — an agent uninstalled since it was
   // remembered — must not leave the composer pointing at nothing, so the first
   // available agent still backs it up.
+  // Why the composer has nothing to talk to.
+  //
+  // "No agents available" was the fallback for every reason `active` was unset,
+  // including the ordinary gap between connecting and the provider list landing
+  // — so a working setup flashed what reads as a hard failure. And when it was
+  // the true cause, it still named neither the reason nor the fix: the agents
+  // are chosen in `pew2 setup`, and nothing on screen said so.
+  const emptyReason = (providerCount: number): string =>
+    providerCount === 0
+      ? "Getting the list of agents..."
+      : "No agents are turned on. Run pew2 setup on your computer to choose some.";
+
   const active: Provider | undefined =
     daemon.providers.find((p) => p.id === daemon.effectiveProviderId) ??
     daemon.providers.find((p) => p.available);
@@ -1000,7 +1012,7 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
                     ? "Connecting to your machine..."
                     : active
                       ? greeting
-                      : "No agents available on this machine."}
+                      : emptyReason(daemon.providers.length)}
               </Text>
             </Pressable>
           </Reanimated.View>
