@@ -219,17 +219,33 @@ function signinHint(agent: AgentState): string {
  *
  * Says the one thing the user came for: can I use this now, and what do I do
  * next. Never a count of problems.
+ *
+ * The count is of agents the phone will actually be offered, not of agents that
+ * work. Those are different numbers the moment someone deselects one in the
+ * picker, and printing the second under a picker that just said the first read
+ * as the tool ignoring the choice — "2 agents on your phone" directly above
+ * "4 agents ready".
  */
 export function outroFor(
   agents: AgentState[],
   ready: boolean,
   options: RenderOptions = {},
+  disabled: ReadonlySet<string> = new Set(),
 ): string[] {
   const s = options.style ?? styler();
   const r = rail(options);
-  const count = group(agents).ready.length;
+  const usable = group(agents).ready;
+  const count = usable.filter((agent) => !disabled.has(agent.id)).length;
 
   if (count === 0) {
+    // Having none selected is a choice, not an empty machine. Telling someone
+    // who just deselected everything to go and install an agent would be
+    // answering a question they did not ask.
+    if (usable.length > 0) {
+      return r.outro(
+        `${s.bold("No agents selected.")} ${s.hex(PALETTE.faint, "Run")} ${s.bold("pew2 setup")} ${s.hex(PALETTE.faint, "again to choose the ones your phone can use.")}`,
+      );
+    }
     return r.outro(
       `${s.bold("No agents yet.")} ${s.hex(PALETTE.faint, "Install one from the list above, then run")} ${s.bold("pew2 setup")} ${s.hex(PALETTE.faint, "again.")}`,
     );

@@ -304,8 +304,12 @@ async function cmdSetup(flags: Set<string>) {
   // Test fixtures are hidden from the phone, so offering them here would list an
   // agent that never turns up.
   const pickable = result.agents.filter((agent) => !agent.experimental);
+  // What the closing line counts. Starts as whatever was already off, so a
+  // non-interactive run still reports the selection rather than every agent
+  // that happens to work on this machine.
+  let offNow = await readDisabled();
   if (interactive && pickable.length > 0) {
-    const disabled = await readDisabled();
+    const disabled = offNow;
     const chosen = await pickAgents(
       pickable.map((agent) => ({
         id: agent.id,
@@ -327,7 +331,7 @@ async function cmdSetup(flags: Set<string>) {
       // Anything already off and still not installed keeps its entry, so a
       // deliberate choice is not lost by running setup on a machine where the
       // agent happens to be missing.
-      const offNow = new Set(
+      const next = new Set(
         [...disabled].filter((id) => {
           const agent = result.agents.find((a) => a.id === id);
           return !agent || agent.notInstalled;
@@ -337,9 +341,10 @@ async function cmdSetup(flags: Set<string>) {
       // recording it as a choice the user made would be a lie in a file they
       // can read.
       for (const agent of pickable) {
-        if (!agent.notInstalled && !chosen.has(agent.id)) offNow.add(agent.id);
+        if (!agent.notInstalled && !chosen.has(agent.id)) next.add(agent.id);
       }
-      await writeDisabled(offNow);
+      await writeDisabled(next);
+      offNow = next;
     }
   } else {
     for (const line of agentSections(result.agents, view)) console.log(line);
@@ -360,7 +365,7 @@ async function cmdSetup(flags: Set<string>) {
     }
   }
 
-  for (const line of outroFor(result.agents, result.ok, view)) console.log(line);
+  for (const line of outroFor(result.agents, result.ok, view, offNow)) console.log(line);
 
   // Exit code still reflects reality for anything scripting this, even though
   // the screen no longer shouts about it.

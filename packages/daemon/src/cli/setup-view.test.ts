@@ -317,3 +317,31 @@ test("a turned-off agent does not also appear as ready", () => {
 
   expect(lines.join("\n")).not.toContain("Ready to use");
 });
+
+test("the closing count is what the phone gets, not what works", () => {
+  // Deselecting agents in the picker used to change nothing here: the outro
+  // counted every agent that worked, so a run where two of four were chosen
+  // printed "2 agents on your phone." and then "4 agents ready." two lines
+  // apart, which reads as the picker having been ignored.
+  const four = [
+    agent({ id: "a", name: "Claude Code" }),
+    agent({ id: "b", name: "Gemini CLI" }),
+    agent({ id: "c", name: "GG Coder" }),
+    agent({ id: "d", name: "OpenCode" }),
+  ];
+  const out = stripAnsi(outroFor(four, true, plain, new Set(["b", "d"])).join(" "));
+  expect(out).toContain("2 agents ready");
+  expect(out).not.toContain("4 agents");
+
+  // Nothing disabled still counts everything that works.
+  expect(stripAnsi(outroFor(four, true, plain).join(" "))).toContain("4 agents ready");
+});
+
+test("deselecting everything is a choice, not an empty machine", () => {
+  // Telling someone who just turned every agent off to go and install one would
+  // answer a question they did not ask.
+  const one = [agent({ id: "a", name: "Claude Code" })];
+  const none = stripAnsi(outroFor(one, true, plain, new Set(["a"])).join(" "));
+  expect(none).toContain("No agents selected");
+  expect(none).not.toContain("Install one");
+});

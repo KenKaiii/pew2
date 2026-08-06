@@ -33,6 +33,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { theme } from "./src/theme";
 import { useDaemon, type Provider, type TurnFinished } from "./src/useDaemon";
 import { currentTool } from "./src/activity";
+import { dockHeightFor, recordDockHeight, type DockHeights } from "./src/dockHeight";
 import { finishedNotice } from "./src/notificationPolicy";
 import {
   ensureNotificationPermission,
@@ -330,7 +331,18 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
   // Measured so the thread's top inset always matches the real nav height.
   const [navHeight, setNavHeight] = useState(0);
   // The thread's bottom inset and frosted zone track the dock's measured height.
-  const [dockHeight, setDockHeight] = useState(0);
+  //
+  // Two heights, not one, because the dock is a different size while you type:
+  // the context row is not in it. Measuring a single height meant every keyboard
+  // open paid a round trip — the row unmounts, the platform lays the dock out,
+  // `onLayout` reports, React re-renders, and only then does the transcript take
+  // up the new inset. The keyboard itself is already up by then, so the thread
+  // visibly re-seated a few frames after it, which is the lag.
+  //
+  // Keyed by that state, the second open onwards is instant: the height for the
+  // state being entered is already known, so it lands in the same commit as
+  // `typing` rather than after a measurement.
+  const [dockHeights, setDockHeights] = useState<DockHeights>({ typing: 0, resting: 0 });
   const insets = useSafeAreaInsets();
   const keyboard = useKeyboardLift(insets.bottom);
   const scroller = useRef<ChatThreadRef>(null);
@@ -397,7 +409,13 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
   // Mirrors `styles.dock`: the composer at rest, plus that view's own padding.
   const restingDockHeight =
     theme.size.composerCollapsed + theme.space(2) + (insets.bottom + theme.space(2));
-  const threadBottom = (dockHeight || restingDockHeight) + theme.space(2);
+  // The height for the state on screen now. Falls back to the other state's
+  // measurement before this one has ever been measured — which is only the very
+  // first keyboard open of a launch — and to the analytic resting height before
+  // either has. Both are closer than a zero, which would put the last message
+  // hard against the composer for a frame.
+  const dockHeight = dockHeightFor(dockHeights, typing, restingDockHeight);
+  const threadBottom = dockHeight + theme.space(2);
   // Only until the answer itself starts arriving. The indicator occupies exactly
   // one body line at the same offset as the agent's first line, so text replacing
   // it lands where it was and the transcript never shifts — whereas an indicator
@@ -1050,7 +1068,13 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
               // same gap above either boundary without re-laying out.
               { paddingBottom: insets.bottom + theme.space(2) },
             ]}
-            onLayout={(event) => setDockHeight(event.nativeEvent.layout.height)}
+            onLayout={(event) => {
+              // Recorded against the state it was measured in, and only when it
+              // actually changed: an unconditional set would re-render on every
+              // layout pass the dock does, including the ones the keyboard's own
+              // animation causes.
+              setDockHeights((prev) => recordDockHeight(prev, typing, event.nativeEvent.layout.height));
+            }}
           >
           {/* The dock keeps the composer even while an approval is pending:
               the request is its own blocking sheet now, so swapping this out
