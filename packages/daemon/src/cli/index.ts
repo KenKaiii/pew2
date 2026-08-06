@@ -286,7 +286,11 @@ async function cmdSetup(flags: Set<string>) {
     verify: !flags.has("--skip-verify"),
     onProgress: (stage, note) => {
       if (stage === "detect") progress.update("Looking for agents");
-      if (stage === "verify") progress.update(`Starting ${note}`);
+      // "Checking", not "Starting". It does start the agent, but saying so
+      // made people reasonably ask whether setup was launching things behind
+      // their back \u2014 and the answer they want is what it is for, not how it
+      // works.
+      if (stage === "verify") progress.update(`Checking ${note}`);
       if (stage === "doctor") progress.update("Checking everything works");
     },
   });

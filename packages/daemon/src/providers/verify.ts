@@ -89,7 +89,15 @@ export async function verifyProvider(
         // Auto-approve during verification so the round trip can complete.
         onPermissionRequest: ({ requestId }) => handle?.answerPermission(requestId, "allow"),
       });
-      await handle.prompt("Hello from pew2 verify.");
+      // No prompt. Reaching this line already proves everything the check is
+      // for: the process started, spoke ACP, agreed a protocol version and
+      // opened a session.
+      //
+      // It used to send "Hello from pew2 verify" as well, which turned a health
+      // check into a real model call on the user's account for every installed
+      // agent, every time they ran setup \u2014 billed, rate-limited, and leaving a
+      // junk conversation in each agent's history that then showed up in the
+      // app's own session list.
       return handle.sessionId;
     })();
 
