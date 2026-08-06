@@ -79,22 +79,33 @@ test("suggestions are ordered by recency, because that is how projects are chose
   // was run by hand and failed on CI with `api` first.
   const older = new Date("2026-01-01T00:00:00Z");
   const newer = new Date("2026-06-01T00:00:00Z");
-  const names = (found: Awaited<ReturnType<typeof discoverRepos>>) =>
-    found.map((entry) => entry.path.split("/").pop());
 
-  // Asserted both ways round, because one order or the other must disagree with
-  // whatever order the scan happened to find them in. Checking a single
-  // arrangement cannot tell "sorted by recency" apart from "listed as found",
-  // which is exactly the hole that let the flake through.
+  /**
+   * The two repos this test set times on, in the order they were returned.
+   *
+   * Filtered rather than compared whole: the fixture also holds a deeply nested
+   * repo, and whether the scan reaches it is a depth question this test has no
+   * opinion about. Asserting the entire list would fail on a change to that
+   * limit while saying nothing about ordering.
+   */
+  const order = async (roots: string[]) =>
+    (await discoverRepos({ roots }))
+      .map((entry) => entry.path.split("/").pop())
+      .filter((name) => name === "api" || name === "web");
+
+  // Asserted both ways round, because one arrangement or the other must
+  // disagree with whatever order the scan happened to find them in. A single
+  // arrangement cannot tell "sorted by recency" apart from "listed as found" —
+  // exactly the hole that let this flake through.
   const web = await fixture();
   await utimes(join(web.home, "code/api"), older, older);
   await utimes(join(web.home, "code/web"), newer, newer);
-  expect(names(await discoverRepos({ roots: web.roots }))).toEqual(["web", "api"]);
+  expect(await order(web.roots)).toEqual(["web", "api"]);
 
   const api = await fixture();
   await utimes(join(api.home, "code/api"), newer, newer);
   await utimes(join(api.home, "code/web"), older, older);
-  expect(names(await discoverRepos({ roots: api.roots }))).toEqual(["api", "web"]);
+  expect(await order(api.roots)).toEqual(["api", "web"]);
 });
 
 test("browsing lists directories only, and marks the ones that are repositories", async () => {
