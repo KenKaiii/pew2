@@ -229,26 +229,38 @@ export class Daemon {
   /**
    * How long a conversation may sit untouched before its agent is closed.
    *
-   * Longer than a spare's fifteen minutes, because this process holds something
-   * a spare does not: a loaded conversation. Closing it is cheap but not free —
-   * the next prompt pays a resume — so the window is generous enough that going
-   * for lunch and coming back finds the agent still there.
+   * The same fifteen minutes as a warm spare, and for the same reason: what is
+   * being held is a process, and the conversation itself is on disk. Reopening
+   * one measures ~1.1s — and the thread paints from cache first, so that second
+   * is spent behind a screen the user is already reading.
+   *
+   * This started at an hour, which was too timid to be worth much: an agent is
+   * 90-370MB, and a morning's work leaves several of them parked long before an
+   * hour is up. Comparable tools are tighter still — openclaw evicts at ten
+   * minutes, and paperclip, which speaks the same ACP protocol, tears the
+   * process down after every single run.
    *
    * Nothing bounded these at all before. Every conversation opened held its
    * agent until the daemon died, so an afternoon of testing accumulated eleven
    * GG Coder processes and 2.2GB for conversations nobody had touched in hours.
    */
-  private static readonly SESSION_TTL_MS = 60 * 60 * 1000;
-  /** How often the reaper looks. Coarse: this is about hours, not seconds. */
-  private static readonly REAP_INTERVAL_MS = 5 * 60 * 1000;
+  private static readonly SESSION_TTL_MS = 15 * 60 * 1000;
+  /**
+   * How often the reaper looks.
+   *
+   * Two minutes, so the sweep is a rounding error on the window rather than a
+   * silent extension of it: a five-minute tick would make a fifteen-minute TTL
+   * mean twenty in the worst case.
+   */
+  private static readonly REAP_INTERVAL_MS = 2 * 60 * 1000;
   private reaper?: NodeJS.Timeout;
   /**
    * How many conversations may hold an agent process at once.
    *
    * The time limit alone does not bound memory, it only bounds *lingering*.
    * Someone working through a morning — a task here, a new one in another
-   * project, a third to check something — opens conversations far faster than a
-   * one-hour clock retires them, and ten live agents is roughly two gigabytes.
+   * project, a third to check something — opens conversations faster than any
+   * idle clock retires them, and ten live agents is roughly two gigabytes.
    *
    * Four, because that is about as many conversations as a person actually has
    * in play at once, and closing one is cheap: the transcript is on disk and the

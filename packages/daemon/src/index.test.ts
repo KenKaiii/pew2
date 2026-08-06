@@ -521,8 +521,11 @@ test("a conversation used recently is left alone", () => {
   const { daemon } = daemonWithCollector();
   const fresh = plantIdleSession(daemon, "fresh", { lastUsedAt: 60 * 60 * 1000 });
 
-  // Ten minutes later: well inside the window.
-  expect(daemon.reapIdleSessions(60 * 60 * 1000 + 10 * 60 * 1000)).toEqual([]);
+  // Two minutes later. Deliberately well short of the window rather than just
+  // inside it: this asserts that recent use is protected, not where the
+  // boundary happens to sit, so tightening the TTL again does not turn a real
+  // regression into a passing test or vice versa.
+  expect(daemon.reapIdleSessions(60 * 60 * 1000 + 2 * 60 * 1000)).toEqual([]);
   expect(fresh.wasClosed()).toBe(false);
 });
 
@@ -628,4 +631,21 @@ test("the cap never closes the conversation being opened, or a running turn", ()
   // taken exactly it.
   expect(busy.wasClosed()).toBe(false);
   expect((daemon as any).sessions.has("s4")).toBe(true);
+});
+
+test("the idle window is fifteen minutes, not an afternoon", () => {
+  // Pins the value, which nothing else does: every other reaper test uses a
+  // two-hour clock and would pass just as happily with the hour this started at.
+  //
+  // The number is a real tradeoff, so it should fail loudly when changed rather
+  // than drift. An agent is 90-370MB; reopening a conversation measures ~1.1s
+  // and paints from cache first, so the second is spent behind a screen the user
+  // is already reading. Comparable tools are tighter still — openclaw evicts at
+  // ten minutes, paperclip after every run.
+  const { daemon } = daemonWithCollector();
+  plantIdleSession(daemon, "just-inside", { lastUsedAt: 0 });
+  // A minute short of the window: still theirs.
+  expect(daemon.reapIdleSessions(14 * 60 * 1000)).toEqual([]);
+  // A minute past it: gone.
+  expect(daemon.reapIdleSessions(16 * 60 * 1000)).toEqual(["just-inside"]);
 });
