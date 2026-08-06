@@ -225,6 +225,11 @@ function signinHint(agent: AgentState): string {
  * picker, and printing the second under a picker that just said the first read
  * as the tool ignoring the choice — "2 agents on your phone" directly above
  * "4 agents ready".
+ *
+ * Test fixtures are excluded for the same reason they are kept out of the
+ * picker and off the wire: the phone never sees them. Counting one would be a
+ * number the user cannot act on, since an agent the picker never offered is
+ * also one they can never turn off.
  */
 export function outroFor(
   agents: AgentState[],
@@ -234,7 +239,7 @@ export function outroFor(
 ): string[] {
   const s = options.style ?? styler();
   const r = rail(options);
-  const usable = group(agents).ready;
+  const usable = group(agents).ready.filter((agent) => !agent.experimental);
   const count = usable.filter((agent) => !disabled.has(agent.id)).length;
 
   if (count === 0) {

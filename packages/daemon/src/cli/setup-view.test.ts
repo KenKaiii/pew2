@@ -345,3 +345,17 @@ test("deselecting everything is a choice, not an empty machine", () => {
   expect(none).toContain("No agents selected");
   expect(none).not.toContain("Install one");
 });
+
+test("a test fixture is not counted, since the phone never gets one", () => {
+  // The picker hides experimental agents, so one counted here could never be
+  // turned off: the closing line would claim an agent the user cannot act on,
+  // and turning every real agent off would still report one ready.
+  const withFixture = [
+    agent({ id: "a", name: "Claude Code" }),
+    agent({ id: "echo", name: "Echo (test)", experimental: true }),
+  ];
+  expect(stripAnsi(outroFor(withFixture, true, plain).join(" "))).toContain("1 agent ready");
+
+  const allOff = stripAnsi(outroFor(withFixture, true, plain, new Set(["a"])).join(" "));
+  expect(allOff).toContain("No agents selected");
+});
