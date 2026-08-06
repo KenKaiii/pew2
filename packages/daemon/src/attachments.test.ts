@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, readFile, readdir } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
@@ -124,5 +124,23 @@ describe("storeAttachments", () => {
   test("discarding a session that never had attachments is not an error", async () => {
     const root = await mkdtemp(join(tmpdir(), "pew2-test-"));
     await discardAttachments("never", root);
+  });
+
+  test("what lands on disk is readable only by its owner", async () => {
+    // These live in a shared temp directory, at a path derived from a session
+    // id, and `image.fetch` allows that directory as a root. At the default
+    // 0755/0644 a photo someone sent to their own machine was readable by every
+    // other account on it.
+    const root = await mkdtemp(join(tmpdir(), "pew2-test-"));
+    const stored = await storeAttachments(
+      "sess-1",
+      [{ name: "shot.png", mimeType: "image/png", data: b64("png") }],
+      root,
+    );
+
+    const file = await stat(stored[0]!.path);
+    const dir = await stat(attachmentDir("sess-1", root));
+    expect(file.mode & 0o077).toBe(0);
+    expect(dir.mode & 0o077).toBe(0);
   });
 });

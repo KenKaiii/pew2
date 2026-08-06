@@ -36,10 +36,24 @@ const PROOF_SKEW_MS = 120_000;
 /**
  * How many senders one channel tracks replay state for.
  *
- * Far above any real pairing — a person's phones and laptops — and low enough
- * that a stream of invented device ids cannot exhaust memory.
+ * Far above any real pairing — a person's phones and laptops. Only a device that
+ * has proved it holds the key ever occupies a slot, so this is no longer a
+ * defence against invented names; it bounds the state a *legitimate* pairing can
+ * accumulate over a long-lived relay channel.
  */
 const MAX_TRACKED_SENDERS = 64;
+
+/**
+ * The sender label used when the transport has exactly one peer.
+ *
+ * A point-to-point socket needs no partition: whoever is on the other end was
+ * established by the transport itself, and the app never receives a proof from
+ * the daemon to partition on anyway. It is therefore usable from construction —
+ * but only until some device proves itself, at which point this channel is
+ * demonstrably multiplexed and the unlabelled bucket is dropped for good. That
+ * is what keeps the default from becoming a way around the verified set.
+ */
+const SOLE_SENDER = "";
 
 /** What a `hello` proof carries, once opened. */
 interface ProofBody {
@@ -48,27 +62,61 @@ interface ProofBody {
   deviceId: string;
 }
 
+/** Per-sender replay state. Presence in the map *is* the verified flag. */
+interface SenderState {
+  window: ReplayWindow;
+}
+
 export class SecureChannel {
   private readonly sendKey: Uint8Array;
   private readonly receiveKey: Uint8Array;
   /**
-   * One replay window per sender, not one per channel.
+   * One replay window per sender, not one per channel — and only for senders
+   * that have proved they hold the key.
    *
    * The relay multiplexes every paired device onto the daemon's single socket,
    * so one shared window would treat a second phone's first frame as a replay of
    * the first phone's — and that phone would simply never work, silently. The
-   * key is whatever the transport can say about who sent a frame; on a
-   * point-to-point socket there is only one sender and the default is used.
+   * key is whatever the transport says about who sent a frame; on a
+   * point-to-point socket there is only one sender and {@link SOLE_SENDER} is
+   * used.
    *
-   * Bounded, because the key is attacker-controlled: over the relay it comes
-   * from the sender's own `deviceId`, so an unbounded map would grow one entry
-   * per made-up name until the daemon ran out of memory. Eviction is
-   * least-recently-used, which costs an attacker nothing to trigger and costs a
-   * real device nothing either — losing a window only resets replay protection
-   * for a device that has stopped sending, and every frame still needs a valid
-   * tag to be read at all.
+   * Membership is the verified flag, which is the whole point. That label is
+   * attacker-chosen over the relay (`?deviceId=…`), and when an unknown label
+   * silently minted a fresh window, any captured frame replayed under a new name
+   * — including a `session.permission` that re-approved a tool call the user
+   * approved once. Entries are created only by {@link acceptHandshake}, which
+   * needs a valid proof, so an attacker without the key can neither open a
+   * window nor grow this map into an eviction.
+   *
+   * Seeded with {@link SOLE_SENDER} for point-to-point transports, which is
+   * removed the moment a real device is admitted.
    */
-  private readonly seen = new Map<string, ReplayWindow>();
+  private readonly senders = new Map<string, SenderState>([
+    [SOLE_SENDER, { window: new ReplayWindow() }],
+  ]);
+
+  /**
+   * The newest proof timestamp accepted from each device.
+   *
+   * Survives {@link acceptHandshake} deliberately: the handshake resets replay
+   * state, so without a separate monotonic clock a proof captured inside
+   * {@link PROOF_SKEW_MS} could be replayed to wipe a live device's window.
+   */
+  private readonly lastProofAt = new Map<string, number>();
+
+  /**
+   * Devices whose proof has verified but whose handshake has not been accepted
+   * yet.
+   *
+   * Verification and acceptance are two calls because the transports have work
+   * to do between them, and a reset that any caller could reach on its own is
+   * exactly the bug this class had: a cleartext `hello` naming a real device
+   * wiped that device's window before anything was checked. Consuming a token
+   * minted only by {@link verifyProof} makes the ordering structural instead of
+   * conventional.
+   */
+  private readonly proven = new Set<string>();
   private counter = 0;
 
   constructor(
@@ -102,36 +150,27 @@ export class SecureChannel {
   // `unknown` anyway, so writing it out only implies a distinction the type
   // system will not enforce. Undefined still means "rejected" — the doc above
   // is the contract, and the tests are what hold it.
-  open(envelope: unknown, from = ""): unknown {
+  open(envelope: unknown, from = SOLE_SENDER): unknown {
+    // `from` is *not* authenticated — it is whatever the transport claims about
+    // the sender — so it selects among windows that already exist rather than
+    // creating one. An unknown label is a sender that never proved it holds the
+    // key, and its frames are refused outright: that is what stops a captured
+    // frame being replayed under an invented device id, and what stops invented
+    // ids evicting a real device's window.
+    const sender = this.senders.get(from);
+    if (!sender) return undefined;
+
     const message = openEnvelope(this.receiveKey, envelope);
     if (message === undefined) return undefined;
 
-    // Checked only after the tag verifies, so an unauthenticated frame can never
-    // advance a window and lock out the real peer.
-    //
-    // `from` partitions the windows and is *not* authenticated — it is whatever
-    // the transport claims about the sender. That is sound because it cannot
-    // grant anything: a wrong value at worst puts a frame in the wrong window,
-    // and only ever admits frames that already carry a valid tag. A relay that
-    // lied about it could cause replays within one pairing, which is strictly
-    // less than the disruption it can cause by simply dropping messages.
-    let window = this.seen.get(from);
-    if (window) {
-      // Re-inserting moves it to the end of the Map's iteration order, so the
-      // device evicted below is always the one idle longest.
-      this.seen.delete(from);
-    } else {
-      window = new ReplayWindow();
-    }
-    this.seen.set(from, window);
+    // Touched only after the tag verifies, so an unauthenticated frame can
+    // neither advance a window nor reorder eviction. Re-inserting moves this
+    // sender to the end of the Map's iteration order, so the entry evicted in
+    // `acceptHandshake` is always the one idle longest.
+    this.senders.delete(from);
+    this.senders.set(from, sender);
 
-    while (this.seen.size > MAX_TRACKED_SENDERS) {
-      const oldest = this.seen.keys().next().value;
-      if (oldest === undefined) break;
-      this.seen.delete(oldest);
-    }
-
-    if (!window.accept((envelope as Envelope).ctr)) return undefined;
+    if (!sender.window.accept((envelope as Envelope).ctr)) return undefined;
     return message;
   }
 
@@ -150,16 +189,42 @@ export class SecureChannel {
   /**
    * Check a peer's proof.
    *
-   * The timestamp bounds replay to a couple of minutes rather than forever. That
-   * is deliberate and sufficient: the proof is not the security boundary, the
-   * per-message AEAD is. Replaying a captured proof buys an authenticated socket
-   * on which the attacker still cannot send a single readable command, because
-   * every subsequent frame must be sealed with a key they do not have. The proof
-   * exists so the daemon can hang up early rather than serve a peer that can
-   * never talk.
+   * The timestamp bounds replay to a couple of minutes rather than forever, and
+   * the per-device clock below bounds it to *once*. That matters more than it
+   * used to: a proof is now what admits a sender and resets its replay window,
+   * so a proof replayed inside the skew window would wipe a live device's
+   * counters and reopen everything captured from it.
+   *
+   * Opened with the raw primitive rather than {@link open}, because a `hello` is
+   * by definition a new connection whose counters restart at zero — consulting
+   * the previous connection's window would reject the one frame that is allowed
+   * to clear it. Authenticity is not weakened by that: it comes from the AEAD
+   * tag, which cannot be produced without the key.
    */
+  verifyProof(envelope: unknown, deviceId: string, now = Date.now()): boolean {
+    const body = openEnvelope(this.receiveKey, envelope);
+    if (typeof body !== "object" || body === null) return false;
+    const proof = body as Partial<ProofBody>;
+    if (proof.t !== "proof" || typeof proof.at !== "number" || !Number.isFinite(proof.at)) {
+      return false;
+    }
+    if (Math.abs(now - proof.at) > PROOF_SKEW_MS) return false;
+    // Bound to the identity the transport routed under, so a proof captured from
+    // one device cannot be presented by another.
+    if (proof.deviceId !== deviceId) return false;
+
+    const last = this.lastProofAt.get(deviceId);
+    if (last !== undefined && proof.at <= last) return false;
+
+    this.lastProofAt.delete(deviceId);
+    this.lastProofAt.set(deviceId, proof.at);
+    this.trim(this.lastProofAt);
+    this.proven.add(deviceId);
+    return true;
+  }
+
   /**
-   * Forget what has been seen from a sender, so its counters may restart at 0.
+   * Admit a device that has just proved itself, and let its counters restart.
    *
    * A peer opens a new socket with a new channel, and counters are per-channel:
    * they begin again at zero every time. On the LAN that is invisible, because
@@ -169,30 +234,35 @@ export class SecureChannel {
    * the next one's first frame as a replay — permanently, until the daemon was
    * restarted.
    *
-   * Called when a peer says `hello`, which is by definition the start of a new
-   * connection. Safe because a `hello` carries a proof whose timestamp is only
-   * valid for a couple of minutes, so this cannot be driven by an old captured
-   * frame; and because an attacker who could replay it still cannot seal a
-   * single readable command afterwards.
+   * Returns false when {@link verifyProof} has not just accepted a proof for
+   * this device, which is what keeps the reset out of reach of an unproven
+   * `hello`.
    */
-  resetSender(from: string): void {
-    this.seen.delete(from);
+  acceptHandshake(deviceId: string): boolean {
+    if (!this.proven.delete(deviceId)) return false;
+    // This channel carries identified devices, so the unlabelled bucket is not
+    // what it is for. Dropping it means a frame that arrives with no sender — a
+    // relay that omitted the stamp, or a transport that forgot to pass it on —
+    // is refused rather than landing in a window nobody proved.
+    if (deviceId !== SOLE_SENDER) this.senders.delete(SOLE_SENDER);
+    this.senders.delete(deviceId);
+    this.senders.set(deviceId, { window: new ReplayWindow() });
+    this.trim(this.senders);
+    return true;
   }
 
-  verifyProof(envelope: unknown, deviceId: string, now = Date.now()): boolean {
-    // Partitioned by the device it claims to be, so two phones handshaking over
-    // one relay socket do not invalidate each other's proofs.
-    const body = this.open(envelope, deviceId);
-    if (typeof body !== "object" || body === null) return false;
-    const proof = body as Partial<ProofBody>;
-    return (
-      proof.t === "proof" &&
-      typeof proof.at === "number" &&
-      Math.abs(now - proof.at) <= PROOF_SKEW_MS &&
-      // Bound to the identity the transport routed under, so a proof captured
-      // from one device cannot be presented by another.
-      proof.deviceId === deviceId
-    );
+  /**
+   * Drop the least recently used entries past the cap.
+   *
+   * Only key holders can create entries, so this is a bound on a legitimate
+   * pairing rather than a defence. An evicted device simply says `hello` again.
+   */
+  private trim(entries: Map<string, unknown>): void {
+    while (entries.size > MAX_TRACKED_SENDERS) {
+      const oldest = entries.keys().next().value;
+      if (oldest === undefined) break;
+      entries.delete(oldest);
+    }
   }
 }
 

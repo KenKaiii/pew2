@@ -18,9 +18,10 @@
  * to, and nothing here leaves the machine. Deleting the directory costs a
  * slower first open and nothing else.
  */
-import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { userProvidersDir } from "./providers/registry.js";
+import { writeFileAtomic } from "./atomic-file.js";
 
 /** One replayed update, stored exactly as the agent sent it. */
 export interface CachedTranscript {
@@ -105,12 +106,13 @@ export async function writeTranscript(
     updates: updates.slice(-MAX_UPDATES),
   };
   try {
-    await mkdir(dirname(path), { recursive: true });
+    // Owner-only, like the pairing file. A transcript is the whole conversation
+    // — prompts, output, file paths — and the default mode leaves it readable by
+    // every account on the machine.
+    await mkdir(dirname(path), { recursive: true, mode: 0o700 });
     // Written beside and renamed: a daemon killed mid-write would otherwise
     // leave a truncated file that reads as a real but corrupt transcript.
-    const temp = `${path}.${process.pid}.tmp`;
-    await writeFile(temp, JSON.stringify(body), "utf8");
-    await rename(temp, path);
+    await writeFileAtomic(path, JSON.stringify(body));
     await prune(dirname(path));
   } catch {
     // Best effort. A cache that cannot be written costs a slow open, and the

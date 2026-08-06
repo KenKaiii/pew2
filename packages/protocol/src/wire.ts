@@ -322,7 +322,15 @@ export const Workspaces = z.object({
 /** App -> daemon. Start a new session with a provider. */
 export const StartSession = z.object({
   t: z.literal("session.start"),
-  requestId: z.string(),
+  /**
+   * Echoed back on `session.started`, so a client can tell the session it asked
+   * for from one another device started.
+   *
+   * Optional because the app does not send one: it adopts the next session for
+   * the provider it is showing. Required here, this schema would reject every
+   * real `session.start` the moment the daemon began validating against it.
+   */
+  requestId: z.string().optional(),
   providerId: z.string(),
   cwd: z.string().optional(),
 });
@@ -367,6 +375,20 @@ export const Prompt = z.object({
 export const Cancel = z.object({
   t: z.literal("session.cancel"),
   sessionId: z.string(),
+});
+
+/**
+ * App -> daemon. Change a selector on a live session.
+ *
+ * The counterpart to {@link SetProviderConfig}, which is the same choice made
+ * before any session exists. Both halves of that pair have to be described, or
+ * validating inbound messages refuses every model switch made mid-conversation.
+ */
+export const SetSessionConfig = z.object({
+  t: z.literal("session.config"),
+  sessionId: z.string(),
+  configId: z.string(),
+  value: z.union([z.string(), z.boolean()]),
 });
 
 /** App -> daemon. Answer an outstanding permission request. */
@@ -545,6 +567,7 @@ export const ClientMessage = z.discriminatedUnion("t", [
   ProviderCapabilitiesRequest,
   ProviderSessionsRequest,
   SetProviderConfig,
+  SetSessionConfig,
   StartSession,
   ResumeSession,
   Prompt,
@@ -572,6 +595,7 @@ export const ServerMessage = z.discriminatedUnion("t", [
 ]);
 
 export type SetProviderConfig = z.output<typeof SetProviderConfig>;
+export type SetSessionConfig = z.output<typeof SetSessionConfig>;
 export type Hello = z.output<typeof Hello>;
 export type Envelope = z.output<typeof Envelope>;
 export type ProviderAnnounce = z.output<typeof ProviderAnnounce>;

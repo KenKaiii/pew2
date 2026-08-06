@@ -138,13 +138,18 @@ export async function storeAttachments(
   if (limit) throw new Error(limit);
 
   const dir = attachmentDir(sessionId, root);
-  await mkdir(dir, { recursive: true });
+  // Owner-only. The default lands at 0755/0644 in a shared temp directory, under
+  // a path anyone can work out from a session id — so every other local account
+  // could read the photos and screenshots someone sent to their own machine.
+  // `image.fetch` allows this directory as a root as well, which made them
+  // reachable over the wire rather than only on the box.
+  await mkdir(dir, { recursive: true, mode: 0o700 });
 
   const stored: StoredAttachment[] = [];
   for (const [index, attachment] of attachments.entries()) {
     const path = join(dir, attachmentFileName(attachment.name, index));
     const bytes = Buffer.from(attachment.data, "base64");
-    await writeFile(path, bytes);
+    await writeFile(path, bytes, { mode: 0o600 });
     stored.push({
       name: attachment.name,
       mimeType: attachment.mimeType,

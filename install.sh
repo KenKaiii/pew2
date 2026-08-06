@@ -86,11 +86,13 @@ trap 'rm -rf "$tmp"' EXIT INT TERM
 if command -v curl >/dev/null 2>&1; then
   curl --fail --location --progress-bar --output "$tmp/pew2" "$url" \
     || die "Download failed." "Check your connection, or grab it from github.com/${REPO}/releases"
-  curl -fsSL "$url.sha256" -o "$tmp/pew2.sha256" 2>/dev/null || true
+  curl -fsSL "$url.sha256" -o "$tmp/pew2.sha256" \
+    || die "Could not fetch the checksum for that download." "Every release publishes one, so this is a broken release or something sitting between you and GitHub. Not installing it."
 elif command -v wget >/dev/null 2>&1; then
   wget --show-progress -qO "$tmp/pew2" "$url" \
     || die "Download failed." "Check your connection, or grab it from github.com/${REPO}/releases"
-  wget -qO "$tmp/pew2.sha256" "$url.sha256" 2>/dev/null || true
+  wget -qO "$tmp/pew2.sha256" "$url.sha256" \
+    || die "Could not fetch the checksum for that download." "Every release publishes one, so this is a broken release or something sitting between you and GitHub. Not installing it."
 else
   die "Need curl or wget." "Install one and run this again."
 fi
@@ -103,21 +105,28 @@ bar
 
 # --- verify -----------------------------------------------------------------
 
-# Best effort: not every platform ships the same checksum tool, and refusing to
-# install because `sha256sum` is missing would be worse than the check itself.
-if [ -s "$tmp/pew2.sha256" ]; then
-  expected=$(awk '{print $1}' "$tmp/pew2.sha256")
-  actual=""
-  if command -v sha256sum >/dev/null 2>&1; then
-    actual=$(sha256sum "$tmp/pew2" | awk '{print $1}')
-  elif command -v shasum >/dev/null 2>&1; then
-    actual=$(shasum -a 256 "$tmp/pew2" | awk '{print $1}')
-  fi
-  if [ -n "$actual" ] && [ "$actual" != "$expected" ]; then
-    die "That download does not match its checksum." "Not installing it. Try again, and report it if it keeps happening."
-  fi
-  [ -n "$actual" ] && line "${GREEN}${TICK}${R} Checksum verified"
+# Required, not best effort. Every release publishes a `.sha256` beside its
+# binary, so a missing one is not a quirk of some platform — it is exactly the
+# condition this check exists to catch. Skipping the check when the file was
+# absent meant whoever served the binary could turn the check off by serving one
+# file less.
+[ -s "$tmp/pew2.sha256" ] || die "That download came without a checksum." "Not installing it. Report it at github.com/${REPO}/issues"
+
+expected=$(awk '{print $1}' "$tmp/pew2.sha256")
+actual=""
+if command -v sha256sum >/dev/null 2>&1; then
+  actual=$(sha256sum "$tmp/pew2" | awk '{print $1}')
+elif command -v shasum >/dev/null 2>&1; then
+  actual=$(shasum -a 256 "$tmp/pew2" | awk '{print $1}')
+elif command -v openssl >/dev/null 2>&1; then
+  actual=$(openssl dgst -sha256 "$tmp/pew2" | awk '{print $NF}')
 fi
+
+# Three ways to compute it, because a machine with none of them is rare and a
+# machine that installs an unverified binary is worse.
+[ -n "$actual" ] || die "No way to check this download's checksum here." "Install coreutils, perl or openssl and run this again."
+[ "$actual" = "$expected" ] || die "That download does not match its checksum." "Not installing it. Try again, and report it if it keeps happening."
+line "${GREEN}${TICK}${R} Checksum verified"
 
 # --- install ----------------------------------------------------------------
 

@@ -16,9 +16,10 @@
  * Kept in its own file: `config-prefs.json` is a small hand-editable map of
  * provider defaults, and this grows an entry per conversation.
  */
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { userProvidersDir } from "./providers/registry.js";
+import { writeFileAtomic } from "./atomic-file.js";
 import type { ConfigPrefs } from "./config-prefs.js";
 
 /** Newest conversations kept; older records are dropped on write. */
@@ -65,7 +66,9 @@ export async function readSessionPrefs(
  * Merge choices into one conversation's record.
  *
  * Read-modify-write of the whole file, like `config-prefs.json`: every session
- * shares it, and picking a mode must not forget the model.
+ * shares it, and picking a mode must not forget the model. Written atomically
+ * for the same reason — a file half-written when the machine slept reads as
+ * corrupt, and every conversation's settings go with it.
  */
 export async function writeSessionPrefs(
   providerId: string,
@@ -92,6 +95,6 @@ export async function writeSessionPrefs(
           .slice(0, MAX_SESSIONS)
       : entries;
 
-  await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, JSON.stringify(Object.fromEntries(kept), null, 2), "utf8");
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  await writeFileAtomic(path, JSON.stringify(Object.fromEntries(kept), null, 2));
 }

@@ -3,6 +3,12 @@
     "name": "pew2",
     "slug": "pew2",
     "version": "1.0.0",
+    "//scheme": "Claims the `pew2://` URL scheme so this app has a stable identity to be opened by. Nothing routes an incoming link yet — pairing is camera-only, and the link it carries is a `ws://` URL, not this scheme — so today this only makes the app addressable rather than adding a way in. That ordering is deliberate: a link that paired on arrival would let any app that can open a URL point this phone at someone else's daemon, so the handler needs a confirmation step designed before it exists, and the scheme has to be registered in a build before any of that can ship.",
+    "scheme": "pew2",
+    "//runtimeVersion": "Which native binary an over-the-air update may load. `appVersion` ties it to the version above, so an update built against changed native code can never be handed to a build that cannot run it — the failure being a launch loop on a phone with no way back. Actually publishing updates needs `updates.url` from `eas init`, which requires an account this repository does not carry; until then this ships the client without a source.",
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",

@@ -12,7 +12,13 @@
  * must not trap an agent in a loop it cannot escape.
  */
 import { loadProviders, isAvailable, unavailableReason, providerDirs } from "../providers/registry.js";
-import { lanAddresses, pairingFromToken, pairingPath, pairingUrl } from "../pairing.js";
+import {
+  lanAddresses,
+  MIN_TOKEN_LENGTH,
+  pairingFromToken,
+  pairingPath,
+  pairingUrl,
+} from "../pairing.js";
 import { serviceStatus } from "./service.js";
 import { readFile } from "node:fs/promises";
 
@@ -30,7 +36,17 @@ export interface StoredPairing {
  * and an absent token is not a problem — starting the daemon mints it.
  */
 async function readPairing(env: NodeJS.ProcessEnv): Promise<StoredPairing | undefined> {
-  if (env.PEW2_TOKEN) return { ...pairingFromToken(env.PEW2_TOKEN), relay: env.PEW2_RELAY };
+  if (env.PEW2_TOKEN) {
+    try {
+      return { ...pairingFromToken(env.PEW2_TOKEN), relay: env.PEW2_RELAY };
+    } catch {
+      // A `PEW2_TOKEN` below the entropy floor. `doctor` is the command someone
+      // runs *because* something is wrong, so it reports that as a problem
+      // rather than throwing the same error the daemon already refused to start
+      // with — a diagnosis that crashes tells them less than the failure did.
+      return env.PEW2_RELAY ? { relay: env.PEW2_RELAY } : undefined;
+    }
+  }
   try {
     const parsed = JSON.parse(await readFile(pairingPath(env), "utf8")) as StoredPairing;
     return {
@@ -190,11 +206,18 @@ export async function doctor(options: DoctorOptions = {}): Promise<DoctorReport>
   // Starting the daemon mints a token, so an unreachable daemon already implies
   // this and repeating it would give an agent two fixes for one cause.
   if (reachable && !(await (options.pairing ?? readPairing)(env))?.token) {
+    // `PEW2_TOKEN` wins over anything on disk, so when it is set and unusable,
+    // "run pew2 pair" is advice that cannot work — the minted token would be
+    // ignored in favour of the env var that caused this.
+    const weakEnvToken =
+      env.PEW2_TOKEN !== undefined && env.PEW2_TOKEN.length < MIN_TOKEN_LENGTH;
     problems.push({
       id: "not-paired",
       severity: "error",
-      detail: "No pairing token.",
-      fix: "pew2 pair",
+      detail: weakEnvToken
+        ? `PEW2_TOKEN is ${env.PEW2_TOKEN?.length} characters; it is the encryption key's only entropy and must be at least ${MIN_TOKEN_LENGTH}.`
+        : "No pairing token.",
+      fix: weakEnvToken ? "export PEW2_TOKEN=$(openssl rand -hex 32)" : "pew2 pair",
     });
   }
 

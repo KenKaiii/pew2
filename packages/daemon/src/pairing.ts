@@ -45,6 +45,18 @@ export interface Pairing {
   relay?: string;
 }
 
+/**
+ * The shortest secret a pairing may be built from.
+ *
+ * A minted pairing is 32 bytes of real entropy and never comes near this floor.
+ * It exists for `PEW2_TOKEN`, where a human types the value — and where the
+ * derivation is a single HKDF pass with no salt and no stretching, so the key
+ * inherits exactly the entropy of what it is given. `PEW2_TOKEN=pew2-staging`
+ * is a root key someone can brute-force offline against the public room id, and
+ * from there read and write every message on that pairing.
+ */
+export const MIN_TOKEN_LENGTH = 32;
+
 /** `~/.pew2/pairing.json`, or `$PEW2_HOME/pairing.json` when overridden. */
 export function pairingPath(env: NodeJS.ProcessEnv = process.env): string {
   return join(dirname(userProvidersDir(env)), "pairing.json");
@@ -70,8 +82,20 @@ export function generatePairing(): { token: string; key: string } {
  * home directory. Hashing it into a key keeps that path working end to end
  * rather than leaving those runs unencrypted — which would mean the tests
  * exercised a different protocol than production uses.
+ *
+ * Refuses a short secret rather than deriving a weak key from it. Checked here,
+ * at the derivation, so every caller is covered by one rule — the stored path
+ * has enforced this floor all along, and this was the way around it.
  */
 export function pairingFromToken(token: string): { token: string; key: string } {
+  if (token.length < MIN_TOKEN_LENGTH) {
+    throw new Error(
+      `PEW2_TOKEN must be at least ${MIN_TOKEN_LENGTH} characters: it is the only ` +
+        `entropy behind this pairing's encryption key, so a short one can be ` +
+        `brute-forced offline against the room id the relay already knows. ` +
+        `Generate one with: openssl rand -hex 32`,
+    );
+  }
   const key = e2e.deriveKeyFromSecret(token);
   return { token: e2e.roomId(key), key: e2e.toHex(key) };
 }
@@ -89,6 +113,8 @@ export async function loadPairing(env: NodeJS.ProcessEnv = process.env): Promise
   if (env.PEW2_TOKEN) {
     // Derived, not stored: the same input always yields the same pairing, so a
     // fixed PEW2_TOKEN keeps working across restarts exactly as it did before.
+    // Throws on a short one — loudly, at startup, rather than running with an
+    // encryption key that can be guessed.
     const derived = pairingFromToken(env.PEW2_TOKEN);
     return { ...derived, createdAt: new Date(0).toISOString(), relay: env.PEW2_RELAY };
   }
@@ -103,7 +129,7 @@ export async function loadPairing(env: NodeJS.ProcessEnv = process.env): Promise
     // remove.
     if (
       typeof parsed.token === "string" &&
-      parsed.token.length >= 32 &&
+      parsed.token.length >= MIN_TOKEN_LENGTH &&
       typeof parsed.key === "string" &&
       parsed.key.length === 64
     ) {

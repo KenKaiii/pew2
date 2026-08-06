@@ -69,6 +69,8 @@ import { withLayoutX, type PillX } from "./src/ui/pillAnchor";
 import { PairingScreen } from "./src/ui/PairingScreen";
 import { LaunchScreen } from "./src/ui/LaunchScreen";
 import { clearPairing, loadPairing, savePairing, type Pairing } from "./src/pairing";
+import { clearCrash, readCrash } from "./src/crashLog";
+import * as Clipboard from "expo-clipboard";
 import {
   useFonts,
   BitcountPropSingle_400Regular,
@@ -82,6 +84,28 @@ export default function App() {
     BitcountPropSingle_600SemiBold,
     BitcountPropSingle_700Bold,
   });
+
+  // What killed the app last time, if anything did.
+  //
+  // A crash outside a render has no boundary to catch it: the process ends, the
+  // app relaunches looking perfectly healthy, and the only account anyone can
+  // give is "it closed itself". The record is written on the way down and read
+  // here, on the way back up — on this device only, because a stack trace from
+  // this app routinely contains prompts and file paths.
+  useEffect(() => {
+    const crash = readCrash();
+    if (!crash) return;
+    clearCrash();
+    const detail = `${crash.at}\n${crash.message}${crash.stack ? `\n\n${crash.stack}` : ""}`;
+    Alert.alert(
+      "pew2 closed unexpectedly",
+      `${crash.message}\n\nThis was not sent anywhere. Copy it if you want to report it.`,
+      [
+        { text: "Copy details", onPress: () => void Clipboard.setStringAsync(detail) },
+        { text: "Dismiss", style: "cancel" },
+      ],
+    );
+  }, []);
 
   // Hold on the canvas colour rather than rendering with the fallback face:
   // the two have different metrics, so titles would visibly reflow the moment

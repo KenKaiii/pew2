@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readdir, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readConfigPrefs, writeConfigPref } from "./config-prefs.js";
@@ -76,4 +76,21 @@ test("a corrupt file is a miss, so a session still starts", async () => {
   expect(await readConfigPrefs("claude-code", env)).toEqual({
     __acp_model: "opus",
   });
+});
+
+test("the file is written whole, and readable only by its owner", async () => {
+  // Two things at once, because they share a cause: this is a document rewritten
+  // from scratch on every change, so a `writeFile` interrupted between truncate
+  // and fill loses every provider's settings rather than one, and the process
+  // umask decides who else on the machine gets to read the result.
+  const env = await tempEnv();
+  await writeConfigPref("claude-code", "__acp_model", "opus", env);
+
+  const path = join(env.PEW2_HOME!, "config-prefs.json");
+  expect((await stat(path)).mode & 0o077).toBe(0);
+
+  // Nothing left behind: a temp file that survives is a file the next reader
+  // may find instead of the real one.
+  const stray = (await readdir(env.PEW2_HOME!)).filter((name) => name.endsWith(".tmp"));
+  expect(stray).toEqual([]);
 });

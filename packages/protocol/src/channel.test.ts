@@ -18,6 +18,22 @@ function pair() {
   return { daemon: new SecureChannel(ROOT, "daemon"), app: new SecureChannel(ROOT, "app") };
 }
 
+/**
+ * What every transport does before a named device may send anything.
+ *
+ * `at` is explicit because proofs are monotonic per device: two handshakes
+ * landing in the same millisecond are indistinguishable from a replayed one.
+ */
+function handshake(
+  daemon: SecureChannel,
+  app: SecureChannel,
+  deviceId: string,
+  at = Date.now(),
+): boolean {
+  if (!daemon.verifyProof(app.proof(deviceId, at), deviceId, at)) return false;
+  return daemon.acceptHandshake(deviceId);
+}
+
 test("each side reads what the other sends", () => {
   const { daemon, app } = pair();
 
@@ -93,6 +109,9 @@ test("two devices on one multiplexed socket do not cancel each other out", () =>
   const phoneA = new SecureChannel(ROOT, "app");
   const phoneB = new SecureChannel(ROOT, "app");
 
+  handshake(daemon, phoneA, "phone-a");
+  handshake(daemon, phoneB, "phone-b");
+
   expect(daemon.open(phoneA.seal({ t: "a0" }), "phone-a")).toEqual({ t: "a0" });
   expect(daemon.open(phoneA.seal({ t: "a1" }), "phone-a")).toEqual({ t: "a1" });
   expect(daemon.open(phoneB.seal({ t: "b0" }), "phone-b")).toEqual({ t: "b0" });
@@ -115,31 +134,108 @@ test("two devices can each prove themselves over one socket", () => {
   expect(daemon.verifyProof(phoneB.proof("phone-b"), "phone-b")).toBe(true);
 });
 
-test("a flood of invented senders cannot exhaust memory", () => {
+test("a sender that has not proved itself is refused outright", () => {
   // The partition key comes from the sender's own claimed device id, so it is
-  // attacker-controlled over the relay. An unbounded map would grow one entry
-  // per made-up name until the daemon fell over — a denial of service needing
-  // no key, only the room id.
+  // attacker-controlled over the relay. When an unknown name minted a fresh
+  // window, a flood of invented ones grew the map without a key — and worse,
+  // every one of them started with replay protection disabled.
   const daemon = new SecureChannel(ROOT, "daemon");
   const app = new SecureChannel(ROOT, "app");
 
   for (let i = 0; i < 5_000; i++) {
-    expect(daemon.open(app.seal({ t: "noise", i }), `invented-${i}`)).toEqual({ t: "noise", i });
+    expect(daemon.open(app.seal({ t: "noise", i }), `invented-${i}`)).toBeUndefined();
   }
 
-  // Still bounded, and still working for a real device afterwards.
-  expect(daemon.open(app.seal({ t: "real" }), "phone-a")).toEqual({ t: "real" });
+  // A device that does prove itself still works, and is still replay-protected.
+  expect(handshake(daemon, app, "phone-a")).toBe(true);
   const repeat = app.seal({ t: "again" });
   expect(daemon.open(repeat, "phone-a")).toEqual({ t: "again" });
   expect(daemon.open(repeat, "phone-a")).toBeUndefined();
 });
 
+test("a captured frame cannot be replayed under a different device id", () => {
+  // The attack the verified set exists for. The frame is genuine and its tag is
+  // valid — it was sealed by the real phone — so the only thing standing between
+  // an eavesdropper and re-approving a tool call is refusing to open a window
+  // for a name that never proved anything.
+  const daemon = new SecureChannel(ROOT, "daemon");
+  const phone = new SecureChannel(ROOT, "app");
+  expect(handshake(daemon, phone, "phone-1")).toBe(true);
+
+  const approval = phone.seal({ t: "session.permission", optionId: "allow" });
+  expect(daemon.open(approval, "phone-1")).toEqual({
+    t: "session.permission",
+    optionId: "allow",
+  });
+
+  // Captured off the wire and re-presented as a brand new device.
+  expect(daemon.open(approval, "evil-1")).toBeUndefined();
+  // And as the sole-sender label a point-to-point transport would use.
+  expect(daemon.open(approval)).toBeUndefined();
+});
+
+test("an unproven hello cannot disturb an established device's window", () => {
+  // The second path to the same replay: a cleartext `hello` naming a real device
+  // used to clear that device's window before its proof was checked, so anyone
+  // who knew the room id could reopen everything captured from it.
+  const daemon = new SecureChannel(ROOT, "daemon");
+  const phone = new SecureChannel(ROOT, "app");
+  expect(handshake(daemon, phone, "phone-1")).toBe(true);
+
+  const approval = phone.seal({ t: "session.permission", optionId: "allow" });
+  expect(daemon.open(approval, "phone-1")).toEqual({
+    t: "session.permission",
+    optionId: "allow",
+  });
+
+  // An attacker without the key: a proof from a different pairing, and a blob
+  // that is not a proof at all.
+  const stranger = new SecureChannel(OTHER, "app");
+  expect(daemon.verifyProof(stranger.proof("phone-1"), "phone-1")).toBe(false);
+  expect(daemon.verifyProof({ t: "e", ctr: 0, n: "AA", ct: "AA" }, "phone-1")).toBe(false);
+  // Reset is not separately reachable: without a proof there is nothing to accept.
+  expect(daemon.acceptHandshake("phone-1")).toBe(false);
+
+  expect(daemon.open(approval, "phone-1")).toBeUndefined();
+});
+
+test("a captured proof cannot be replayed inside the skew window", () => {
+  // The proof is what resets a device's replay window, so a proof that can be
+  // played twice is a replay window that can be reopened at will — and the
+  // couple of minutes the timestamp allows is plenty of time to do it.
+  const daemon = new SecureChannel(ROOT, "daemon");
+  const phone = new SecureChannel(ROOT, "app");
+  const at = Date.now();
+
+  const captured = phone.proof("phone-1", at);
+  expect(daemon.verifyProof(captured, "phone-1", at)).toBe(true);
+  expect(daemon.acceptHandshake("phone-1")).toBe(true);
+
+  const approval = phone.seal({ t: "session.permission", optionId: "allow" });
+  expect(daemon.open(approval, "phone-1")).toEqual({
+    t: "session.permission",
+    optionId: "allow",
+  });
+
+  // Well inside PROOF_SKEW_MS, and refused anyway: the accepted timestamp only
+  // moves forwards.
+  expect(daemon.verifyProof(captured, "phone-1", at + 30_000)).toBe(false);
+  expect(daemon.acceptHandshake("phone-1")).toBe(false);
+  expect(daemon.open(approval, "phone-1")).toBeUndefined();
+
+  // A genuinely new proof from the real phone still reconnects it.
+  expect(handshake(daemon, phone, "phone-1", at + 1)).toBe(true);
+});
+
 test("an active device keeps its replay window while idle ones are evicted", () => {
   // Eviction is least-recently-used, so the device actually talking is the last
-  // to lose protection — not the first.
+  // to lose protection — not the first. Every entry now costs a valid proof, so
+  // this bounds a real pairing rather than an attacker.
   const daemon = new SecureChannel(ROOT, "daemon");
   const app = new SecureChannel(ROOT, "app");
+  const at = Date.now();
 
+  expect(handshake(daemon, app, "phone-busy", at)).toBe(true);
   const busy = app.seal({ t: "first" });
   expect(daemon.open(busy, "phone-busy")).toEqual({ t: "first" });
 
@@ -147,6 +243,7 @@ test("an active device keeps its replay window while idle ones are evicted", () 
   // test passes with the eviction logic deleted.
   let firstOfFlood: ReturnType<typeof app.seal> | undefined;
   for (let i = 0; i < 500; i++) {
+    expect(handshake(daemon, app, `other-${i}`, at)).toBe(true);
     const frame = app.seal({ t: "noise", i });
     if (i === 0) firstOfFlood = frame;
     daemon.open(frame, `other-${i}`);
@@ -157,15 +254,10 @@ test("an active device keeps its replay window while idle ones are evicted", () 
   // Its window survived: the original frame is still recognised as a replay.
   expect(daemon.open(busy, "phone-busy")).toBeUndefined();
 
-  // And an idle one did not. The very first frame of the flood is replayed here:
-  // with its window evicted it is accepted a second time, which is exactly the
-  // trade being made — the alternative is unbounded memory — and it grants
-  // nothing on its own, because every frame still needs a valid tag.
-  //
-  // Replaying the *same* frame is what makes this discriminating. A freshly
-  // sealed one carries a higher counter and would be accepted whether or not
-  // the window still existed.
-  expect(daemon.open(firstOfFlood, "other-0")).toEqual({ t: "noise", i: 0 });
+  // The idle ones were dropped entirely, so their frames are refused rather
+  // than admitted into a fresh window — eviction now costs a re-handshake, not
+  // replay protection.
+  expect(daemon.open(firstOfFlood, "other-0")).toBeUndefined();
 });
 
 test("session headers survive the round trip", () => {
@@ -207,8 +299,8 @@ test("a stale or future-dated proof is refused", () => {
   const at = Date.now();
 
   expect(daemon.verifyProof(app.proof("phone-1", at), "phone-1", at + 10_000)).toBe(true);
-  expect(daemon.verifyProof(app.proof("phone-1", at), "phone-1", at + 600_000)).toBe(false);
-  expect(daemon.verifyProof(app.proof("phone-1", at), "phone-1", at - 600_000)).toBe(false);
+  expect(daemon.verifyProof(app.proof("phone-1", at + 1), "phone-1", at + 600_000)).toBe(false);
+  expect(daemon.verifyProof(app.proof("phone-1", at + 1), "phone-1", at - 600_000)).toBe(false);
 });
 
 test("a malformed or absent proof is refused rather than thrown", () => {
@@ -237,29 +329,31 @@ test("a peer that reconnects is not mistaken for a replay", () => {
   // already arrived. A daemon restart was the only cure.
   const key = new Uint8Array(32).fill(7);
   const daemon = new SecureChannel(key, "daemon");
+  const at = Date.now();
 
   const first = new SecureChannel(key, "app");
-  expect(daemon.verifyProof(first.proof("phone"), "phone")).toBe(true);
+  expect(handshake(daemon, first, "phone", at)).toBe(true);
   expect(daemon.open(first.seal({ t: "ping" }), "phone")).toEqual({ t: "ping" });
 
   // The phone drops and comes back with a brand new channel, counting from 0.
   const second = new SecureChannel(key, "app");
-  daemon.resetSender("phone");
-  expect(daemon.verifyProof(second.proof("phone"), "phone")).toBe(true);
+  expect(handshake(daemon, second, "phone", at + 1)).toBe(true);
   expect(daemon.open(second.seal({ t: "ping" }), "phone")).toEqual({ t: "ping" });
 });
 
-test("resetting one device does not reopen replay for another", () => {
+test("one device's handshake does not reopen replay for another", () => {
   // Two phones share the relay's single channel. One reconnecting must not
   // clear the other's protection.
   const key = new Uint8Array(32).fill(9);
   const daemon = new SecureChannel(key, "daemon");
   const other = new SecureChannel(key, "app");
+  const phone = new SecureChannel(key, "app");
 
+  expect(handshake(daemon, other, "other")).toBe(true);
   const frame = other.seal({ t: "ping" });
   expect(daemon.open(frame, "other")).toEqual({ t: "ping" });
 
-  daemon.resetSender("phone");
+  expect(handshake(daemon, phone, "phone")).toBe(true);
   // Still refused: the replayed frame belongs to a sender that never reset.
   expect(daemon.open(frame, "other")).toBeUndefined();
 });
@@ -271,6 +365,7 @@ test("replay is still refused within one connection", () => {
   const key = new Uint8Array(32).fill(3);
   const daemon = new SecureChannel(key, "daemon");
   const app = new SecureChannel(key, "app");
+  expect(handshake(daemon, app, "phone")).toBe(true);
 
   const frame = app.seal({ t: "ping" });
   expect(daemon.open(frame, "phone")).toEqual({ t: "ping" });

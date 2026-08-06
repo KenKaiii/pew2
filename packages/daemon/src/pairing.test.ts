@@ -13,6 +13,7 @@ import { join } from "node:path";
 import {
   generatePairing,
   loadPairing,
+  pairingFromToken,
   pairingPath,
   pairingUrl,
   renderQr,
@@ -22,6 +23,15 @@ import {
   qrCode,
 } from "./pairing.js";
 import { doctor } from "./cli/doctor.js";
+
+/**
+ * A stand-in for the value a container would set.
+ *
+ * Long enough to clear the entropy floor, because that floor is now enforced —
+ * the previous 17-character one was exactly the kind of value that made the
+ * derived key guessable.
+ */
+const FIXED = "fixed-test-secret-fixed-test-secret";
 
 async function sandbox() {
   const home = await mkdtemp(join(tmpdir(), "pew2-pairing-"));
@@ -116,7 +126,7 @@ test("an explicit PEW2_TOKEN still yields a usable, stable pairing", async () =>
   // Tests and containers run this way. Deriving a key rather than skipping
   // encryption keeps those runs on the same protocol as production, so the
   // encrypted path is the one actually exercised.
-  const env = { PEW2_TOKEN: "fixed-test-secret" } as NodeJS.ProcessEnv;
+  const env = { PEW2_TOKEN: FIXED } as NodeJS.ProcessEnv;
 
   const first = await loadPairing(env);
   const second = await loadPairing(env);
@@ -125,7 +135,7 @@ test("an explicit PEW2_TOKEN still yields a usable, stable pairing", async () =>
   expect(second.token).toBe(first.token);
   expect(second.key).toBe(first.key);
   // Derived, not echoed: the room id must not be the raw secret.
-  expect(first.token).not.toBe("fixed-test-secret");
+  expect(first.token).not.toBe(FIXED);
 });
 
 test("the key travels in the fragment, which is never sent to a server", async () => {
@@ -365,4 +375,17 @@ test("without a relay, doctor warns that it is local-network only", async () => 
   expect(report.problems.filter((p) => p.severity === "error").map((p) => p.id)).not.toContain(
     "local-only",
   );
+});
+
+test("a short PEW2_TOKEN is refused instead of quietly becoming a weak key", async () => {
+  // The derivation is one HKDF pass with no salt and no stretching, so the root
+  // key inherits exactly the entropy of this string. `PEW2_TOKEN=pew2-staging`
+  // is a key that can be brute-forced offline against the room id the relay is
+  // given — and the room id is public by design.
+  const env = { PEW2_TOKEN: "pew2-staging" } as NodeJS.ProcessEnv;
+
+  expect(loadPairing(env)).rejects.toThrow(/at least 32 characters/);
+  // Named requirement, and a way to satisfy it: this fires at startup, where
+  // "invalid token" alone would send someone looking in the wrong place.
+  expect(() => pairingFromToken("short")).toThrow(/openssl rand -hex 32/);
 });

@@ -94,3 +94,77 @@ test("what seal produces passes both validators, in both directions", () => {
     expect(ServerMessage.safeParse(sealed).success).toBe(true);
   }
 });
+
+test("every message the app actually sends is accepted", () => {
+  // This union became the daemon's real gate: `handler.ts` parses inbound
+  // messages through it and answers anything that fails without running it. A
+  // schema stricter than the app is therefore not a validation nicety, it is a
+  // feature that stops working — so the shapes below are copied from the calls
+  // in `useDaemon.ts` rather than from the schemas they are checking.
+  const messages: unknown[] = [
+    { t: "provider.capabilities", providerId: "claude-code" },
+    { t: "provider.sessions", providerId: "claude-code", cwd: "/Users/someone/api" },
+    { t: "provider.config", providerId: "claude-code", configId: "model", value: "opus" },
+    { t: "session.config", sessionId: "s1", configId: "model", value: "opus" },
+    { t: "session.config", sessionId: "s1", configId: "thinking", value: true },
+    { t: "session.permission", sessionId: "s1", requestId: "r1", optionId: "allow" },
+    { t: "session.prompt", sessionId: "s1", text: "hi", attachments: [] },
+    // The app omits `requestId` on start: it adopts the next session for the
+    // provider it is showing rather than matching one back.
+    { t: "session.start", providerId: "claude-code" },
+    { t: "session.start", providerId: "claude-code", cwd: "/Users/someone/api" },
+    { t: "session.resume", providerId: "claude-code", agentSessionId: "a1" },
+    { t: "session.resume", providerId: "claude-code", agentSessionId: "a1", cwd: "/x" },
+    { t: "session.cancel", sessionId: "s1" },
+    { t: "image.fetch", requestId: "u", uri: "u", sessionId: "s1" },
+    { t: "workspaces", requestId: "r1" },
+    { t: "workspaces", requestId: "r1", path: "/Users/someone" },
+    { t: "workspace.status", sessionId: "s1", providerId: "claude-code" },
+  ];
+
+  for (const message of messages) {
+    const parsed = ClientMessage.safeParse(message);
+    expect({ t: (message as { t: string }).t, ok: parsed.success }).toEqual({
+      t: (message as { t: string }).t,
+      ok: true,
+    });
+  }
+});
+
+test("a prompt keeps its attachments and defaults them when absent", () => {
+  // The one field carrying bytes to disk. If validation dropped or reshaped it,
+  // a prompt that says "look at the screenshot" would arrive without one.
+  const withImage = ClientMessage.parse({
+    t: "session.prompt",
+    sessionId: "s1",
+    text: "what is this",
+    attachments: [{ name: "shot.png", mimeType: "image/png", data: "AAAA" }],
+  });
+  expect(withImage).toMatchObject({
+    attachments: [{ name: "shot.png", mimeType: "image/png", data: "AAAA" }],
+  });
+
+  // Older apps send none at all, and the handler reads the field unconditionally.
+  expect(ClientMessage.parse({ t: "session.prompt", sessionId: "s1", text: "hi" })).toMatchObject(
+    { attachments: [] },
+  );
+});
+
+test("a message missing what the daemon will use is refused", () => {
+  // The point of parsing at the boundary: these used to reach a case that
+  // re-checked them by hand, and anything the hand-written check forgot became
+  // an undefined threaded into a spawn.
+  for (const bad of [
+    { t: "session.prompt", sessionId: "s1" },
+    { t: "session.resume", providerId: "claude-code" },
+    { t: "provider.sessions", providerId: "claude-code" },
+    { t: "session.permission", sessionId: "s1", requestId: "r1" },
+    { t: "image.fetch", requestId: "r1" },
+    { t: "session.config", sessionId: "s1", configId: "model" },
+  ]) {
+    expect({ t: bad.t, ok: ClientMessage.safeParse(bad).success }).toEqual({
+      t: bad.t,
+      ok: false,
+    });
+  }
+});

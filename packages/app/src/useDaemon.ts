@@ -386,6 +386,33 @@ export interface TurnFinished {
  */
 const NOTICE_BUFFER = 2000;
 
+/**
+ * The most turns one conversation keeps in memory.
+ *
+ * Every other store in the system is bounded — the daemon's session log at 10k,
+ * its transcript cache at 400 — and the phone, which has the least memory of
+ * anything involved, was the one place that grew without limit. A long agent run
+ * emits thousands of chunks, and they are held twice: once as the open
+ * transcript and once inside the drawer entry it mirrors into.
+ *
+ * Matched to the transcript cache on purpose. That is what a reopened
+ * conversation paints from, so a session kept in memory and the same session
+ * reopened show the same amount of history rather than differing by how long
+ * the app happened to be running.
+ */
+const MAX_TURNS = 400;
+
+/**
+ * Keep the newest turns, dropping from the front.
+ *
+ * The front is what a scrolled-to-bottom chat view is least likely to be
+ * looking at, and it is also what the daemon has already written to its own
+ * transcript — so nothing is lost that reopening the conversation cannot show.
+ */
+function capTurns(turns: Turn[]): Turn[] {
+  return turns.length > MAX_TURNS ? turns.slice(turns.length - MAX_TURNS) : turns;
+}
+
 interface DaemonOptions {
   /** Called once per finished turn, for any session — not just the open one. */
   onTurnFinished?: (turn: TurnFinished) => void;
@@ -1216,13 +1243,17 @@ export function useDaemon(
                 // collide across sessions and produce duplicate React keys.
                 turns.push(turnFromChunk(`${message.sessionId}:${message.seq}`, chunk));
               }
+              // Bounded here rather than at each branch above: this is the one
+              // place a turn is added, and it runs for every chunk of every
+              // streamed answer.
+              const capped = capTurns(turns);
               // Mirror into history so the sidebar can reopen this later, and
               // title the session from its first user message.
               const sessions = prev.sessions.map((session) =>
                 session.id === message.sessionId
                   ? {
                       ...session,
-                      turns,
+                      turns: capped,
                       title:
                         session.title === "New conversation" && chunk.role === "user"
                           ? chunk.text.trim().slice(0, 60)
@@ -1231,7 +1262,7 @@ export function useDaemon(
                   : session,
               );
 
-              return { ...base, turns, sessions, busy: chunk.role !== "system" };
+              return { ...base, turns: capped, sessions, busy: chunk.role !== "system" };
             }
 
             case "error": {
@@ -1269,7 +1300,7 @@ export function useDaemon(
                 ...prev,
                 busy: false,
                 loadingSession: false,
-                turns: [
+                turns: capTurns([
                   ...prev.turns,
                   // Date.now() collides when two errors land in the same
                   // millisecond; the length keeps it unique within the thread.
@@ -1278,7 +1309,7 @@ export function useDaemon(
                     role: "system",
                     text: message.message,
                   },
-                ],
+                ]),
               };
             }
 
@@ -1396,7 +1427,7 @@ export function useDaemon(
           ...s,
           busy: true,
           loadingSession: false,
-          turns: [...s.turns, turn],
+          turns: capTurns([...s.turns, turn]),
           // The clock starts when the prompt leaves the phone, not when the
           // agent first speaks: booting the agent is part of the wait.
           activity: beginActivity(started),
@@ -1435,7 +1466,7 @@ export function useDaemon(
         const turn = localTurn(localSeq.current++, text, attachmentImages(attachments));
         const visible = sessionId === sessionRef.current;
         setState((s) => {
-          const turns = visible ? [...s.turns, turn] : s.turns;
+          const turns = visible ? capTurns([...s.turns, turn]) : s.turns;
           return {
             ...s,
             busy: visible ? true : s.busy,
@@ -1448,7 +1479,7 @@ export function useDaemon(
               session.id === sessionId
                 ? {
                     ...session,
-                    turns: [...session.turns, turn],
+                    turns: capTurns([...session.turns, turn]),
                     // Marked working here, not on the first streamed chunk:
                     // an agent can think for a long time before it says
                     // anything, and the drawer should show that as work.

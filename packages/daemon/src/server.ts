@@ -67,6 +67,14 @@ interface Client {
   channel: SecureChannel;
   /** True once a valid `hello` proof has arrived. */
   authenticated: boolean;
+  /**
+   * The device this socket proved itself as.
+   *
+   * Kept so inbound frames are opened under the sender the channel verified,
+   * rather than the unlabelled default — which is the shape of the bug the
+   * relay transport had.
+   */
+  deviceId?: string;
 }
 
 const clients = new Map<ServerWebSocket<unknown>, Client>();
@@ -213,6 +221,11 @@ const server = Bun.serve({
         }
 
         client.authenticated = true;
+        client.deviceId = deviceId;
+        // Admits this device on the channel and lets its counters start from
+        // zero. Same call as the relay transport makes, so one rule covers both:
+        // a sealed frame is only read from a sender that proved it holds the key.
+        client.channel.acceptHandshake(deviceId);
         // Confirmed first, and not behind the provider scan.
         //
         // `refreshProviders` reads every manifest off disk, which is slow on a
@@ -235,8 +248,10 @@ const server = Bun.serve({
       // Anything else must be a sealed frame from an authenticated peer. An
       // unauthenticated socket is ignored entirely rather than answered, so it
       // learns nothing from what it does or does not get back.
-      if (!client.authenticated) return;
-      const message = client.channel.open(frame);
+      if (!client.authenticated || !client.deviceId) return;
+      // The device this socket actually proved itself as — not the default, which
+      // would open a window nothing was verified against.
+      const message = client.channel.open(frame, client.deviceId);
       if (message === undefined) return;
 
       // Shared with the relay transport, so a message type can never work on

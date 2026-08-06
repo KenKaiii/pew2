@@ -10,7 +10,14 @@ import "./src/cryptoPolyfill";
 
 import { registerRootComponent } from 'expo';
 
+import { installCrashHandler } from './src/crashLog';
 import App from './App';
+
+// Before anything renders, so a crash during startup is still recorded. Startup
+// is where the unexplained ones happen — a native module missing, a stored value
+// that no longer parses — and it is the one window `ErrorBoundary` cannot cover,
+// because nothing is mounted yet to catch anything.
+installCrashHandler();
 
 // registerRootComponent calls AppRegistry.registerComponent('main', () => App);
 // It also ensures that whether you load the app in Expo Go or in a native build,

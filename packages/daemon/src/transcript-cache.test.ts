@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { mkdtemp, readdir } from "node:fs/promises";
+import { mkdtemp, readdir, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readTranscript, writeTranscript } from "./transcript-cache.js";
@@ -113,4 +113,16 @@ test("the cache does not grow one file per conversation forever", async () => {
 
   // The newest survive: those are the ones that get reopened.
   expect(await readTranscript("opencode", "ses_209", e)).toBeDefined();
+});
+
+test("a cached transcript is readable only by its owner", async () => {
+  // The cache holds the whole conversation — prompts, output, file paths — and
+  // the default mode leaves it readable by every account on the machine. The
+  // pairing file has always been written 0600; this is the same secret.
+  const e = await env();
+  await writeTranscript("opencode", "ses_mode", [update("hello")], e);
+
+  const dir = join(e.PEW2_HOME!, "cache", "transcripts", "opencode");
+  expect((await stat(join(dir, "ses_mode.json"))).mode & 0o077).toBe(0);
+  expect((await stat(dir)).mode & 0o077).toBe(0);
 });

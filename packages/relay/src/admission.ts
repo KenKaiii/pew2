@@ -5,15 +5,17 @@
  * runtime: the rules here are the relay's entire access control, and "it
  * deployed and seemed fine" is not a way to check them.
  *
- * The relay cannot authenticate anybody. The pairing token is a bearer secret
- * and there is no end-to-end encryption yet, so none of this pretends to stop
- * someone who has the token. What it does is narrow the blast radius of the
- * things that are cheap to get wrong:
+ * The relay cannot authenticate anybody, and is not meant to. Traffic is sealed
+ * end to end; what the relay is given is the room id, which is derived one way
+ * from the root key and is not the key. So these rules assume the party opening
+ * a socket may be someone who learned a room id and nothing else, and they
+ * narrow what such a party can do:
  *
  *   - a token that could never have been minted by `pew2` never names a room
  *   - a retired token cannot leave a device sitting in an empty room, looking
  *     connected to a machine that will never answer
  *   - one leaked token cannot pile up unbounded sockets
+ *   - a stranger cannot take a working daemon's place in the room
  */
 
 /**
@@ -22,9 +24,9 @@
  * typed by hand. Generate with `crypto.randomUUID()` twice, or 32 random hex
  * chars — never a human-chosen string.
  *
- * This is a floor, not authentication. Before shipping to real users this must
- * be paired with end-to-end encryption, so that a leaked token exposes only
- * ciphertext the relay itself cannot read.
+ * This is a floor, not authentication. What keeps a leaked room id from being a
+ * leaked conversation is the end-to-end encryption above it: everything the
+ * relay carries is ciphertext it cannot read.
  */
 export const MIN_PAIRING_TOKEN_LENGTH = 32;
 
@@ -66,16 +68,39 @@ export function isPairingToken(token: string | null): token is string {
 }
 
 /**
+ * How long an attached daemon may be silent before it is treated as gone.
+ *
+ * Measured from the hibernation auto-response, which is the only thing the relay
+ * learns about a socket without waking up. Three missed keepalives at the
+ * daemon's 25s interval, plus room for a slow network: comfortably above the
+ * interval, or a healthy machine on a bad connection becomes evictable.
+ *
+ * The cost of the upper bound is reconnect latency. A laptop that changes
+ * network leaves a socket the runtime has not yet noticed, and its own retry is
+ * refused until that socket looks dead — so a blip can take this long to heal
+ * rather than the second it used to. That is the trade for a room that a
+ * stranger holding only the room id cannot take from the machine that lives in
+ * it, and the daemon retries throughout with a 30s ceiling.
+ *
+ * Shared with the room's idle sweep, which must not tolerate more silence than
+ * this.
+ */
+export const DAEMON_STALE_MS = 90_000;
+
+/**
  * Decide whether a connection may join a room.
  *
  * `daemons` and `total` describe the room as it is right now, counted from the
- * sockets the object still holds.
+ * sockets the object still holds. `daemonLastSeen` is when the attached daemon
+ * last showed signs of life, in epoch milliseconds, or null when there is none.
  */
 export function admit(input: {
   role: string | null;
   deviceId: string | null;
   daemons: number;
   total: number;
+  daemonLastSeen?: number | null;
+  now?: number;
 }): Admission {
   const role = input.role;
   const deviceId = input.deviceId;
@@ -91,15 +116,32 @@ export function admit(input: {
   }
 
   if (role === "daemon") {
-    // One desktop per pairing, and the newest connection is the live one.
+    // One desktop per pairing, and eviction is decided by liveness rather than
+    // by arrival order.
     //
-    // Deliberately *not* "first claim wins". A dropped socket stays attached
-    // until the runtime notices, and the daemon reconnects within a second of a
-    // network blip — so refusing the newcomer would lock a machine out of its
-    // own room behind exponential backoff every time a laptop changed network.
-    // Evicting instead makes reconnection reliable, and costs little that
-    // matters: anyone able to open this socket already holds the token, and the
-    // real daemon reconnects and takes the room straight back.
+    // Not "first claim wins": a dropped socket stays attached until the runtime
+    // notices, and the daemon reconnects within a second of a network blip, so
+    // refusing the newcomer outright would lock a machine out of its own room
+    // behind exponential backoff every time a laptop changed network.
+    //
+    // Not "newest wins" either, which is what this used to do. Nobody opening
+    // this socket has proved anything — the room id is derived from the root key
+    // and is not the key — so a stranger who learned it could evict the real
+    // daemon over and over. They pay no backoff and the evicted daemon does, so
+    // they win that race every time and keep winning it: not eavesdropping,
+    // which the encryption prevents, but a permanent outage with no visible
+    // cause and nothing the user can do about it.
+    //
+    // Silence is the one thing the relay can judge without a key. A daemon still
+    // answering keepalives keeps its place; one that has gone quiet is past
+    // saving anyway, and evicting it is what makes reconnection reliable.
+    if (input.daemons > 0) {
+      const lastSeen = input.daemonLastSeen;
+      const now = input.now ?? Date.now();
+      if (lastSeen != null && now - lastSeen <= DAEMON_STALE_MS) {
+        return { ok: false, status: 409, reason: "a live daemon is already connected" };
+      }
+    }
     return { ok: true, role, deviceId, evictDaemons: input.daemons > 0 };
   }
 

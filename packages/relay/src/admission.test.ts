@@ -9,6 +9,7 @@
 import { expect, test } from "bun:test";
 import {
   admit,
+  DAEMON_STALE_MS,
   isPairingToken,
   MAX_SOCKETS_PER_ROOM,
   MIN_PAIRING_TOKEN_LENGTH,
@@ -51,24 +52,95 @@ test("a device is refused when no daemon is there to answer it", () => {
   });
 });
 
-test("a reconnecting daemon replaces the old socket instead of being locked out", () => {
+test("a reconnecting daemon replaces a socket that has stopped answering", () => {
   // The failure this avoids is self-inflicted and certain: a dropped socket
   // stays attached until the runtime notices, and the daemon retries within a
   // second of a network blip. "First claim wins" would shut a machine out of
   // its own room behind exponential backoff every time a laptop changed
   // network.
-  expect(admit({ role: "daemon", deviceId: "mac", daemons: 0, total: 0 })).toEqual({
+  const now = Date.now();
+
+  expect(admit({ role: "daemon", deviceId: "mac", daemons: 0, total: 0, now })).toEqual({
     ok: true,
     role: "daemon",
     deviceId: "mac",
     evictDaemons: false,
   });
-  expect(admit({ role: "daemon", deviceId: "mac", daemons: 1, total: 3 })).toEqual({
-    ok: true,
-    role: "daemon",
-    deviceId: "mac",
-    evictDaemons: true,
+
+  // Silent for well past the keepalive budget: nothing is on the other end.
+  expect(
+    admit({
+      role: "daemon",
+      deviceId: "mac",
+      daemons: 1,
+      total: 3,
+      daemonLastSeen: now - DAEMON_STALE_MS - 1,
+      now,
+    }),
+  ).toEqual({ ok: true, role: "daemon", deviceId: "mac", evictDaemons: true });
+
+  // A room whose daemon predates keepalives, or that has never reported one, is
+  // treated as unknown rather than live — the old behaviour, so an upgrade does
+  // not strand a machine.
+  expect(admit({ role: "daemon", deviceId: "mac", daemons: 1, total: 3, now }).ok).toBe(true);
+});
+
+test("a daemon that is still answering cannot be pushed out of its own room", () => {
+  // Nobody opening this socket has proved anything: the room id is derived from
+  // the root key and is not the key. Under "newest wins", someone who learned it
+  // could evict the real daemon on repeat — they pay no backoff and the daemon
+  // does, so they win every race and the machine never gets back in. The user
+  // sees a laptop that is plainly running and plainly unreachable.
+  const now = Date.now();
+
+  expect(
+    admit({
+      role: "daemon",
+      deviceId: "impostor",
+      daemons: 1,
+      total: 2,
+      daemonLastSeen: now - 5_000,
+      now,
+    }),
+  ).toEqual({
+    ok: false,
+    status: 409,
+    reason: "a live daemon is already connected",
   });
+
+  // Right up to the boundary, and over it.
+  expect(
+    admit({
+      role: "daemon",
+      deviceId: "impostor",
+      daemons: 1,
+      total: 2,
+      daemonLastSeen: now - DAEMON_STALE_MS,
+      now,
+    }).ok,
+  ).toBe(false);
+  expect(
+    admit({
+      role: "daemon",
+      deviceId: "mac",
+      daemons: 1,
+      total: 2,
+      daemonLastSeen: now - DAEMON_STALE_MS - 1,
+      now,
+    }).ok,
+  ).toBe(true);
+
+  // Apps are unaffected: they never contend for the daemon slot.
+  expect(
+    admit({
+      role: "app",
+      deviceId: "phone",
+      daemons: 1,
+      total: 2,
+      daemonLastSeen: now - 5_000,
+      now,
+    }).ok,
+  ).toBe(true);
 });
 
 test("one room cannot accumulate unbounded sockets", () => {

@@ -12,9 +12,10 @@
  * Kept out of the probe cache deliberately: that file is the agent's answer and
  * is overwritten wholesale by the next probe, while this is the user's.
  */
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { userProvidersDir } from "./providers/registry.js";
+import { writeFileAtomic } from "./atomic-file.js";
 
 /** Config id to chosen value, for one provider. */
 export type ConfigPrefs = Record<string, string | boolean>;
@@ -47,7 +48,9 @@ export async function readConfigPrefs(
  * Merge one choice into the stored set.
  *
  * Read-modify-write of the whole file, since every provider shares it and a
- * blind overwrite would drop the others.
+ * blind overwrite would drop the others — which is why the write itself has to
+ * be atomic. A truncated file reads as "nothing was ever chosen", so a crash at
+ * the wrong moment loses every provider's settings rather than one.
  */
 export async function writeConfigPref(
   providerId: string,
@@ -58,6 +61,6 @@ export async function writeConfigPref(
   const path = prefsPath(env);
   const all = await readAll(env);
   all[providerId] = { ...all[providerId], [configId]: value };
-  await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, JSON.stringify(all, null, 2), "utf8");
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  await writeFileAtomic(path, JSON.stringify(all, null, 2));
 }

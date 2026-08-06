@@ -29,26 +29,25 @@ export interface HandlerContext {
   cwd?: string;
 }
 
-/** The fields any client message may carry. Validated per case, not up front. */
-interface ClientMessage {
-  t?: string;
-  providerId?: string;
-  cwd?: string;
-  sessionId?: string;
-  text?: string;
-  requestId?: string;
-  optionId?: string;
-  configId?: string;
-  /** Directory to browse, for `workspaces`. Distinct from `cwd`, which names
-   *  where a session runs rather than what is being looked at. */
-  path?: string;
-  value?: string | boolean;
-  agentSessionId?: string;
-  refresh?: boolean;
-  uri?: string;
-  attachments?: unknown;
-  role?: string;
-  deviceId?: string;
+/**
+ * A project directory named by a client, or a flat refusal.
+ *
+ * `cwd` decides where an agent process is spawned, with the full privileges of
+ * the user running the daemon, and it becomes the containment root every later
+ * `image.fetch` for that session is checked against. Taken at face value it was
+ * both: `{"t":"session.start","cwd":"/"}` started an agent at the filesystem
+ * root, and made the whole disk readable through the image path afterwards.
+ *
+ * So the same rule `workspace.status` already applies holds here: the only paths
+ * accepted from a client are ones this daemon itself published, either as a
+ * project with history or as a directory just offered while browsing. The
+ * refusal deliberately says nothing about whether the path exists — answering
+ * that for an arbitrary string is a filesystem oracle in its own right.
+ */
+function namedProject(daemon: Daemon, providerId: string, cwd: string): string {
+  const known = daemon.knownProject(providerId, cwd);
+  if (!known) throw new Error("unknown project");
+  return known;
 }
 
 /**
@@ -70,13 +69,34 @@ export async function handleMessage(raw: string, ctx: HandlerContext): Promise<v
   // state into the filesystem root or fails trying. Resolve to somewhere real.
   const cwd = resolveWorkspace(ctx.cwd);
 
-  let message: ClientMessage;
+  let parsed: unknown;
   try {
-    message = JSON.parse(raw);
+    parsed = JSON.parse(raw);
   } catch {
     reply(errorMessage("bad_json", "Message was not valid JSON"));
     return;
   }
+
+  // Validated once, at the boundary, against the schemas the protocol package
+  // already publishes — rather than each case re-checking a hand-written
+  // interface of optional fields that claimed nothing and enforced nothing.
+  // Every field below is therefore the type it says it is, and the containment
+  // rules further down are checking a string that is definitely a string.
+  const result = wire.ClientMessage.safeParse(parsed);
+  if (!result.success) {
+    // Told apart from a malformed type on purpose: an app newer than this daemon
+    // sends things it has never heard of, and that is "you are out of date",
+    // not "your message was wrong".
+    const t = (parsed as { t?: unknown } | null)?.t;
+    const known = wire.ClientMessage.options.some((option) => option.shape.t.value === t);
+    reply(
+      known
+        ? errorMessage("bad_message", result.error.issues[0]?.message ?? "Message was not valid")
+        : errorMessage("unknown_message", `Unknown message type '${String(t)}'`),
+    );
+    return;
+  }
+  const message = result.data;
 
   try {
     switch (message.t) {
@@ -110,7 +130,6 @@ export async function handleMessage(raw: string, ctx: HandlerContext): Promise<v
         // What does this app offer right now, and what has it already been used
         // for? Both come from the agent itself, so the reply reflects the
         // installed version rather than anything baked into pew2.
-        if (!message.providerId) throw new Error("providerId required");
         const providerId = message.providerId;
         const capabilities = await daemon.probeProvider(providerId, {
           refresh: message.refresh === true,
@@ -123,11 +142,8 @@ export async function handleMessage(raw: string, ctx: HandlerContext): Promise<v
         // One project's conversations. Answered as a `reply` rather than a
         // broadcast: it is a menu choice on one phone, not a change to the
         // session log every client shares.
-        if (!message.providerId || !message.cwd) {
-          throw new Error("providerId and cwd required");
-        }
         const providerId = message.providerId;
-        const projectCwd = message.cwd;
+        const projectCwd = namedProject(daemon, providerId, message.cwd);
         const sessions = await daemon.sessionsForProject(providerId, projectCwd);
         reply({
           t: "provider.sessions",
@@ -144,13 +160,25 @@ export async function handleMessage(raw: string, ctx: HandlerContext): Promise<v
       case "session.resume": {
         // Reopen a conversation the agent already had on disk, including ones
         // this app never started.
-        if (!message.providerId || !message.agentSessionId) {
-          throw new Error("providerId and agentSessionId required");
-        }
+        //
+        // An unrecognised `cwd` falls back rather than refusing, which is the
+        // one place that difference matters. This message is how the app
+        // recovers a conversation after the daemon restarts, and it is sent on
+        // the `providers` announcement — before the probe that fills the project
+        // history has finished, so a perfectly genuine path the app is echoing
+        // back from its own cache is not yet recognisable. Refusing there would
+        // break reopening a session every time the daemon was updated. The
+        // containment is unchanged either way: the client's string is used only
+        // when this daemon published it, and otherwise never reaches a spawn.
+        const named = message.cwd
+          ? daemon.knownProject(message.providerId, message.cwd)
+          : undefined;
+        const workspace =
+          named ?? (await daemon.lastWorkspace(message.providerId)) ?? cwd;
         const pending = daemon.beginResumeSession(
           message.providerId,
           message.agentSessionId,
-          message.cwd ?? cwd,
+          workspace,
         );
         broadcast({
           t: "session.started",
@@ -185,12 +213,12 @@ export async function handleMessage(raw: string, ctx: HandlerContext): Promise<v
       }
 
       case "session.start": {
-        if (!message.providerId) throw new Error("providerId required");
         // The agent's own most recent project when the app named none: a phone
         // has no file picker, and defaulting to the home directory gives the
         // agent no project to work in and no project commands to offer.
-        const workspace =
-          message.cwd ?? (await daemon.lastWorkspace(message.providerId)) ?? cwd;
+        const workspace = message.cwd
+          ? namedProject(daemon, message.providerId, message.cwd)
+          : ((await daemon.lastWorkspace(message.providerId)) ?? cwd);
         const sessionId = await daemon.startSession(message.providerId, workspace);
         broadcast({
           t: "session.started",
@@ -215,15 +243,10 @@ export async function handleMessage(raw: string, ctx: HandlerContext): Promise<v
       }
 
       case "session.prompt": {
-        if (!message.sessionId || message.text === undefined) {
-          throw new Error("sessionId and text required");
-        }
-        // The one field here that is neither a scalar nor optional-by-default:
-        // it becomes bytes on this disk, so its shape is parsed rather than
-        // trusted. `storeAttachments` then re-checks the size limits.
-        const attachments = wire.PromptAttachment.array()
-          .default([])
-          .parse(message.attachments ?? []);
+        // Shapes are guaranteed by the schema at the top of this function;
+        // `storeAttachments` still re-checks the size limits, because those are
+        // about what this disk will hold rather than what the message says.
+        const attachments = message.attachments;
         // Deliberately not awaited: a turn can run for minutes, and the client
         // is driven by streamed events rather than this reply.
         const sessionId = message.sessionId;
@@ -248,7 +271,6 @@ export async function handleMessage(raw: string, ctx: HandlerContext): Promise<v
       }
 
       case "session.cancel": {
-        if (!message.sessionId) throw new Error("sessionId required");
         await daemon.cancel(message.sessionId);
         break;
       }
@@ -258,9 +280,6 @@ export async function handleMessage(raw: string, ctx: HandlerContext): Promise<v
       // choice so the session this prompt creates opens with it already set,
       // instead of the change being dropped on the floor.
       case "provider.config": {
-        if (!message.providerId || !message.configId || message.value === undefined) {
-          throw new Error("providerId, configId and value required");
-        }
         await daemon.rememberConfigOption(
           message.providerId,
           message.configId,
@@ -270,9 +289,6 @@ export async function handleMessage(raw: string, ctx: HandlerContext): Promise<v
       }
 
       case "session.config": {
-        if (!message.sessionId || !message.configId || message.value === undefined) {
-          throw new Error("sessionId, configId and value required");
-        }
         broadcast({
           t: "session.config",
           sessionId: message.sessionId,
@@ -289,9 +305,6 @@ export async function handleMessage(raw: string, ctx: HandlerContext): Promise<v
         // Only this machine can read the path the agent named. Replied to the
         // asking client rather than broadcast: it is bytes for one viewport,
         // and it never enters the session log that every client replays.
-        if (!message.uri || !message.requestId) {
-          throw new Error("requestId and uri required");
-        }
         const uri = message.uri;
         const requestId = message.requestId;
         // The root comes from the session the daemon started, never from the
@@ -355,8 +368,6 @@ export async function handleMessage(raw: string, ctx: HandlerContext): Promise<v
         // Without this an agent with no history cannot be started at all: its
         // project list is folded from its own past sessions, so a newly
         // installed agent offers nothing to pick.
-        if (!message.requestId) throw new Error("requestId required");
-
         if (!message.path) {
           // Opening view: the good guesses. Walking down from home on a
           // touchscreen is the thing this exists to avoid.
@@ -396,19 +407,16 @@ export async function handleMessage(raw: string, ctx: HandlerContext): Promise<v
       }
 
       case "session.permission": {
-        if (!message.sessionId || !message.requestId || !message.optionId) {
-          throw new Error("sessionId, requestId and optionId required");
-        }
         daemon.answerPermission(message.sessionId, message.requestId, message.optionId);
         break;
       }
 
       default:
-        // Its own code, not `command_failed`: an app newer than this daemon
-        // asks for things it does not have yet (the workspace bar being the
-        // first), and the client has to tell "you are out of date" apart from
-        // "your prompt failed" — the latter belongs in the transcript, this
-        // does not.
+        // Reached only by a sealed envelope, which is a transport concern and has
+        // already been opened long before anything arrives here. A type this
+        // daemon has never heard of — an app newer than it — is answered at the
+        // schema above, where "you are out of date" can be said as its own code
+        // rather than as `command_failed`, which the client puts in a transcript.
         reply(errorMessage("unknown_message", `Unknown message type '${message.t}'`));
         return;
     }

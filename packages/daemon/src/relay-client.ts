@@ -60,6 +60,20 @@ const MAX_BACKOFF_MS = 30_000;
  */
 const HEARTBEAT_MS = 25_000;
 
+/**
+ * The keepalive, in cleartext and byte-for-byte fixed.
+ *
+ * The relay answers this exact string from the Durable Object's hibernation
+ * auto-response, so it never wakes the object at all — see `KEEPALIVE_REQUEST`
+ * in `packages/relay/src/index.ts`, which must match this character for
+ * character. Sealed it could not be: every frame carries a fresh nonce, so no
+ * two pings look alike and the runtime would wake for every one of them.
+ *
+ * Nothing is given away by sending it in the open. It carries no content, and
+ * the relay can already see the timing of every frame that passes through it.
+ */
+export const KEEPALIVE_FRAME = '{"t":"ping"}';
+
 export class RelayClient {
   private socket: WebSocket | null = null;
   /**
@@ -221,14 +235,19 @@ export class RelayClient {
           return;
         }
         // A `hello` is a new socket, and the peer's counters restart at zero
-        // with it. This one channel is shared by every device on the relay and
-        // outlives all of them, so without clearing the window first its memory
-        // of the last connection rejects this one's first frame as a replay —
-        // which stranded the app on "getting the list of agents" and left
-        // `pew2 pair` waiting for a phone that had already arrived.
+        // with it, so the window this channel remembers from the last connection
+        // has to be cleared or that first frame reads as a replay — which
+        // stranded the app on "getting the list of agents" and left `pew2 pair`
+        // waiting for a phone that had already arrived.
+        //
+        // The proof comes first, and the clearing is only reachable through it.
+        // The other order let a cleartext `hello` naming any device wipe that
+        // device's replay protection without holding the key at all: whoever
+        // knew the relay room id could then replay a captured `session.permission`
+        // and re-approve a tool call the user approved once.
         if (!deviceId) return;
-        this.channel.resetSender(deviceId);
         if (!this.channel.verifyProof(hello.proof, deviceId)) return;
+        this.channel.acceptHandshake(deviceId);
 
         // The app may have been waiting here long before this machine woke up,
         // so re-announce rather than assume it saw the last list.
@@ -252,8 +271,14 @@ export class RelayClient {
 
       // Partitioned by the sender the relay names, so several phones sharing
       // this one socket do not invalidate each other's counters.
+      //
+      // Required, not defaulted: the relay stamps every sealed frame with the
+      // sending socket's device id, so a frame without one did not come through
+      // the path this channel's replay windows describe. Falling back to the
+      // unlabelled sender would put it in a window no device ever proved.
       const sender = (frame as { from?: unknown }).from;
-      const message = this.channel.open(frame, typeof sender === "string" ? sender : "");
+      if (typeof sender !== "string" || sender === "") return;
+      const message = this.channel.open(frame, sender);
       if (message === undefined) return;
 
       void handleMessage(JSON.stringify(message), {
@@ -291,7 +316,14 @@ export class RelayClient {
 
   private startHeartbeat() {
     this.clearHeartbeat();
-    this.heartbeat = setInterval(() => this.send({ t: "ping" }), HEARTBEAT_MS);
+    this.heartbeat = setInterval(() => {
+      if (this.socket?.readyState !== WebSocket.OPEN) return;
+      try {
+        this.socket.send(KEEPALIVE_FRAME);
+      } catch {
+        // The socket is already gone; `close` fires and reconnection takes over.
+      }
+    }, HEARTBEAT_MS);
     // Do not hold the process open for the sake of a keepalive.
     this.heartbeat.unref?.();
   }

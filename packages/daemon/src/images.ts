@@ -12,7 +12,8 @@
  * the user already exposed by running a session there. Everything here is pure
  * apart from the two injected fs calls, so the containment rules are testable.
  */
-import { readFile, realpath, stat } from "node:fs/promises";
+import { open, realpath } from "node:fs/promises";
+import { constants } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { isAbsolute, resolve, sep, extname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -164,13 +165,45 @@ export interface LoadedImage {
   mimeType: string;
 }
 
-export interface ImageFs {
-  realpath: (path: string) => Promise<string>;
-  stat: (path: string) => Promise<{ size: number; isFile: () => boolean }>;
-  readFile: (path: string) => Promise<Buffer>;
+/**
+ * A file already open, so nothing about it can be swapped underneath.
+ *
+ * Size and kind are read from the descriptor rather than the path, which is
+ * what makes the checks below apply to the bytes actually returned.
+ */
+export interface ImageFile {
+  size: number;
+  isFile: () => boolean;
+  read: () => Promise<Buffer>;
+  close: () => Promise<void>;
 }
 
-const nodeFs: ImageFs = { realpath, stat, readFile };
+export interface ImageFs {
+  realpath: (path: string) => Promise<string>;
+  /** Open for reading, refusing a final component that is a symlink. */
+  open: (path: string) => Promise<ImageFile>;
+}
+
+/**
+ * The real filesystem. Exported so the descriptor-based read can be tested
+ * against an actual symlink rather than a stub that reimplements it.
+ */
+export const nodeImageFs: ImageFs = {
+  realpath,
+  open: async (path) => {
+    // O_NOFOLLOW: between the containment check and this call, the checked path
+    // can be replaced with a link pointing anywhere. `realpath` proved the name
+    // resolved inside an allowed root a moment ago, not that it still does.
+    const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const info = await handle.stat();
+    return {
+      size: info.size,
+      isFile: () => info.isFile(),
+      read: () => handle.readFile(),
+      close: () => handle.close(),
+    };
+  },
+};
 
 /**
  * Read one image and inline it, or explain why not.
@@ -183,7 +216,7 @@ export async function loadImage(
   uri: string,
   options: { cwd: string; env?: NodeJS.ProcessEnv; fs?: ImageFs; home?: string },
 ): Promise<LoadedImage> {
-  const fs = options.fs ?? nodeFs;
+  const fs = options.fs ?? nodeImageFs;
   const path = toLocalPath(uri, options.cwd, options.home);
   if (!path) throw new Error(`'${uri}' is not a file on this machine`);
 
@@ -215,14 +248,35 @@ export async function loadImage(
     throw new Error(`'${uri}' is outside this session's project directory`);
   }
 
-  const info = await fs.stat(real);
-  if (!info.isFile()) throw new Error(`'${uri}' is not a file`);
-  if (info.size > MAX_IMAGE_BYTES) {
-    throw new Error(
-      `'${uri}' is ${Math.round(info.size / 1024 / 1024)}MB, too large to send to the app`,
-    );
+  // Opened once, and measured and read through that one descriptor.
+  //
+  // Resolving, then stat-ing, then reading re-resolved the name three times, and
+  // an attacker who could write anywhere in the path only had to win the gap
+  // between the check and the read — the size limit and the containment check
+  // then described a different file from the one whose bytes were sent. What is
+  // still resolved by name is the directories above it, which Node offers no way
+  // to hold open; that needs write access to a directory inside an allowed root,
+  // which is a far narrower position than replacing a file.
+  let file: ImageFile;
+  try {
+    file = await fs.open(real);
+  } catch {
+    throw new Error(`'${uri}' was not found`);
   }
 
-  const bytes = await fs.readFile(real);
-  return { mimeType, dataUri: `data:${mimeType};base64,${bytes.toString("base64")}` };
+  try {
+    if (!file.isFile()) throw new Error(`'${uri}' is not a file`);
+    if (file.size > MAX_IMAGE_BYTES) {
+      throw new Error(
+        `'${uri}' is ${Math.round(file.size / 1024 / 1024)}MB, too large to send to the app`,
+      );
+    }
+
+    const bytes = await file.read();
+    return { mimeType, dataUri: `data:${mimeType};base64,${bytes.toString("base64")}` };
+  } finally {
+    // Left open, this leaks a descriptor per picture viewed — and the app fetches
+    // one per image in a conversation.
+    await file.close().catch(() => {});
+  }
 }

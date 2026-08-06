@@ -233,6 +233,16 @@ test("relayed messages reach the daemon handler", async () => {
   // own code so a newer app can tell "this daemon is older than me" apart from
   // a real failure and keep it out of the transcript.
   const app = phone();
+  // Sealed frames are only read from a device that has proved it holds the key,
+  // so the handshake is part of getting a message to the handler at all.
+  socket.receive({
+    t: "hello",
+    wire: WIRE_VERSION,
+    role: "app",
+    deviceId: "Kens-iPhone",
+    proof: app.proof("Kens-iPhone"),
+  });
+  await new Promise((r) => setTimeout(r, 20));
   socket.receive({ ...app.seal({ t: "nonsense" }), from: "Kens-iPhone" });
   await new Promise((r) => setTimeout(r, 20));
 

@@ -1,8 +1,14 @@
 import { expect, test } from "bun:test";
-import { mkdtemp, mkdir, writeFile, symlink } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, writeFile, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { historyImages, imageMimeType, loadImage, toLocalPath } from "./images";
+import {
+  historyImages,
+  imageMimeType,
+  loadImage,
+  nodeImageFs,
+  toLocalPath,
+} from "./images";
 
 const PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
@@ -41,6 +47,21 @@ test("an image in the session's project is inlined", async () => {
   expect(image.dataUri).toBe(`data:image/png;base64,${PNG.toString("base64")}`);
 });
 
+/**
+ * A file already open, standing in for one that need not exist here.
+ *
+ * `loadImage` reads size and kind from the descriptor rather than the path, so a
+ * stub has to answer as one.
+ */
+function openStub(size: number) {
+  return {
+    size,
+    isFile: () => true,
+    read: async () => PNG,
+    close: async () => {},
+  };
+}
+
 test("a path outside the project is refused", async () => {
   const root = await project();
   // A real, readable image that simply belongs to another directory — the token
@@ -61,8 +82,7 @@ test("a symlink is judged by where it points, not how it is spelled", async () =
   const fs = {
     realpath: async (path: string) =>
       path.endsWith("link.png") ? "/Users/someone-else/private/photo.png" : path,
-    stat: async () => ({ size: PNG.length, isFile: () => true }),
-    readFile: async () => PNG,
+    open: async () => openStub(PNG.length),
   };
   await expect(loadImage("link.png", { cwd: root, env: {}, fs })).rejects.toThrow(
     /outside this session's project/,
@@ -90,8 +110,7 @@ test("a picture too large to send says so instead of stalling the socket", async
   const root = await project();
   const fs = {
     realpath: async (path: string) => path,
-    stat: async () => ({ size: 40 * 1024 * 1024, isFile: () => true }),
-    readFile: async () => PNG,
+    open: async () => openStub(40 * 1024 * 1024),
   };
   await expect(loadImage("out/plot.png", { cwd: root, fs })).rejects.toThrow(/too large/);
 });
@@ -115,4 +134,34 @@ test("stored history keeps its pictures, whatever API shape they were saved in",
   ]);
 
   expect(historyImages("plain string content")).toEqual([]);
+});
+
+test("a file swapped for a symlink after the check is not followed", async () => {
+  // The window between resolving a path and reading it. The name passed every
+  // check as a real file inside the project; by the time the bytes are read it
+  // points at something else entirely, and re-resolving on each call meant the
+  // size limit and the containment check described a file that was no longer
+  // the one being sent.
+  const root = await project();
+  const target = join(root, "out", "plot.png");
+  await writeFile(target, PNG);
+
+  // Exactly what an attacker with write access to that directory does.
+  await rm(target);
+  await symlink("/etc/passwd", target);
+
+  // The check is stubbed to answer as it did a moment earlier: a plain file,
+  // inside the project. Everything after it is the real filesystem.
+  const fs = { realpath: async (path: string) => path, open: nodeImageFs.open };
+  await expect(loadImage("out/plot.png", { cwd: root, env: {}, fs })).rejects.toThrow(
+    /was not found/,
+  );
+
+  // And a genuine file at that path still reads, so this refuses the swap rather
+  // than refusing everything.
+  await rm(target);
+  await writeFile(target, PNG);
+  expect((await loadImage("out/plot.png", { cwd: root, env: {}, fs })).mimeType).toBe(
+    "image/png",
+  );
 });
