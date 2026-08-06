@@ -242,6 +242,21 @@ export class Daemon {
   /** How often the reaper looks. Coarse: this is about hours, not seconds. */
   private static readonly REAP_INTERVAL_MS = 5 * 60 * 1000;
   private reaper?: NodeJS.Timeout;
+  /**
+   * How many conversations may hold an agent process at once.
+   *
+   * The time limit alone does not bound memory, it only bounds *lingering*.
+   * Someone working through a morning — a task here, a new one in another
+   * project, a third to check something — opens conversations far faster than a
+   * one-hour clock retires them, and ten live agents is roughly two gigabytes.
+   *
+   * Four, because that is about as many conversations as a person actually has
+   * in play at once, and closing one is cheap: the transcript is on disk and the
+   * agent keeps its own history, so returning to it resumes. The cost of being
+   * wrong is a few seconds of reconnect on an old conversation; the cost of no
+   * cap is the machine.
+   */
+  private static readonly MAX_LIVE_SESSIONS = 4;
 
   /**
    * Boot a provider in the background, refresh its cache, and push the result.
@@ -750,6 +765,41 @@ export class Daemon {
     return reaped;
   }
 
+  /**
+   * Close the least recently used conversations until only `MAX_LIVE_SESSIONS`
+   * hold an agent. Called as a new one opens, so the ceiling is enforced at the
+   * moment memory would actually grow rather than up to five minutes later.
+   *
+   * Least recently *used*, not oldest: a conversation started this morning and
+   * still being worked in outranks one opened ten minutes ago and abandoned.
+   *
+   * @param exempt The session being opened, which must never be the one closed.
+   * @returns The session ids closed.
+   */
+  private enforceSessionCap(exempt: string): string[] {
+    const closable = [...this.sessions.entries()]
+      // Same three exclusions the reaper uses, for the same reasons: a turn in
+      // flight would lose work, and a conversation the agent never named has
+      // nothing to resume from, so closing it loses it rather than parks it.
+      .filter(([id, s]) => id !== exempt && !s.working && s.agentSessionId !== undefined)
+      .sort((a, b) => a[1].lastUsedAt - b[1].lastUsedAt);
+
+    const excess = this.sessions.size - Daemon.MAX_LIVE_SESSIONS;
+    const closed: string[] = [];
+    for (const [sessionId, session] of closable.slice(0, Math.max(0, excess))) {
+      if (session.replayTimer) clearTimeout(session.replayTimer);
+      session.handle?.close();
+      this.sessions.delete(sessionId);
+      closed.push(sessionId);
+    }
+    // Same announce the reaper sends, and for the same reason: `activeSessions`
+    // is how a client learns an id it still lists no longer exists here. Without
+    // it the phone would keep offering a conversation whose agent is gone and
+    // prompt it, which fails with "Unknown session" instead of resuming.
+    if (closed.length > 0) this.announceProviders();
+    return closed;
+  }
+
   /** Rescan `providers/`. Safe to call at any time — this is what makes a newly
    *  added manifest show up on the phone without a restart. */
   async refreshProviders(): Promise<{ errors: { source: string; message: string }[] }> {
@@ -956,6 +1006,10 @@ export class Daemon {
       ready: Promise.resolve(),
     };
     this.sessions.set(log.sessionId, session);
+    // Enforced as it opens, not on the reaper's five-minute tick: this is the
+    // moment memory grows, and someone opening several conversations in a burst
+    // would otherwise hold all of them until the next pass.
+    this.enforceSessionCap(log.sessionId);
 
     try {
       await this.connectSession(session, provider, cwd, undefined);
@@ -1234,6 +1288,10 @@ export class Daemon {
       ready: Promise.resolve(),
     };
     this.sessions.set(log.sessionId, session);
+    // Enforced as it opens, not on the reaper's five-minute tick: this is the
+    // moment memory grows, and someone opening several conversations in a burst
+    // would otherwise hold all of them until the next pass.
+    this.enforceSessionCap(log.sessionId);
     session.ready = this.connectSession(session, provider, cwd, agentSessionId);
     return { sessionId: log.sessionId, ready: session.ready };
   }

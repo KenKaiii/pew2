@@ -589,3 +589,43 @@ test("a prompt that throws does not strand the session as working for ever", asy
   (session as any).lastUsedAt = 0;
   expect(daemon.reapIdleSessions(2 * 60 * 60 * 1000)).toEqual(["failed"]);
 });
+
+test("opening conversations in a burst does not hold all of them", () => {
+  // The hole the time limit alone leaves. Someone working through a morning — a
+  // task here, a new one in another project, a third to check something — opens
+  // conversations far faster than a one-hour clock retires them, and ten live
+  // agents is roughly two gigabytes. The TTL bounds lingering; only a cap bounds
+  // the burst.
+  const { daemon } = daemonWithCollector();
+  const opened = [1, 2, 3, 4, 5].map((n) =>
+    plantIdleSession(daemon, `s${n}`, { lastUsedAt: n * 1000 }),
+  );
+
+  // A sixth arrives, the way a real one does.
+  plantIdleSession(daemon, "new", { lastUsedAt: 9_000 });
+  (daemon as any).enforceSessionCap("new");
+
+  // Four live agents plus the one being opened.
+  expect((daemon as any).sessions.size).toBe(4);
+  // Least recently *used* went first, not oldest-opened: a conversation started
+  // this morning and still worked in outranks one opened ten minutes ago and
+  // abandoned.
+  expect(opened[0]!.wasClosed()).toBe(true);
+  expect(opened[1]!.wasClosed()).toBe(true);
+  expect((daemon as any).sessions.has("new")).toBe(true);
+});
+
+test("the cap never closes the conversation being opened, or a running turn", () => {
+  // Two ways the cap could take work away from the user: closing the session it
+  // was called for, or killing an agent mid-answer to make room.
+  const { daemon } = daemonWithCollector();
+  const busy = plantIdleSession(daemon, "busy", { lastUsedAt: 0, working: true });
+  [1, 2, 3, 4].forEach((n) => plantIdleSession(daemon, `s${n}`, { lastUsedAt: n * 1000 }));
+
+  (daemon as any).enforceSessionCap("s4");
+
+  // The oldest session here is the working one, so an unguarded cap would have
+  // taken exactly it.
+  expect(busy.wasClosed()).toBe(false);
+  expect((daemon as any).sessions.has("s4")).toBe(true);
+});
