@@ -58,6 +58,27 @@ interface ActiveSession {
   ready: Promise<void>;
   /** Whether clients have been told this session exists. */
   live: boolean;
+  /**
+   * When this conversation was last opened, prompted, or answered.
+   *
+   * A session holds a whole agent process — GG Coder measures 90-330MB, Claude
+   * Code 350MB+ — and nothing used to end one. Every conversation opened in a
+   * run left its agent resident until the daemon died, which on a machine left
+   * running for a day meant eleven GG Coder processes and 2.2GB for
+   * conversations last touched hours earlier.
+   *
+   * Reaping needs this rather than the log's last entry because opening a
+   * conversation and reading it is use, and produces no events at all.
+   */
+  lastUsedAt: number;
+  /**
+   * A turn is in flight.
+   *
+   * The agent is working even when it is silent — thinking, or running a long
+   * tool — so elapsed quiet is not evidence a session can be closed. This is
+   * the flag that keeps the reaper off a running turn.
+   */
+  working?: boolean;
   /** Resume history is frame-batched until loading completes. */
   streamingReplay?: boolean;
   pendingReplay?: wire.SessionEvent[];
@@ -173,7 +194,7 @@ export class Daemon {
     // opening a conversation in any other one paid a full cold spawn — two to
     // three seconds of staring at an empty thread.
     string,
-    { handle: AcpSessionHandle; timer: NodeJS.Timeout; cwd: string }
+    { handle: AcpSessionHandle; timer: NodeJS.Timeout; cwd: string; providerId: string }
   >();
   /**
    * At most this many warm processes per provider, oldest evicted first.
@@ -204,6 +225,23 @@ export class Daemon {
     { ready: Promise<void>; announce: () => void }
   >();
   private static readonly SPARE_TTL_MS = 15 * 60 * 1000;
+
+  /**
+   * How long a conversation may sit untouched before its agent is closed.
+   *
+   * Longer than a spare's fifteen minutes, because this process holds something
+   * a spare does not: a loaded conversation. Closing it is cheap but not free —
+   * the next prompt pays a resume — so the window is generous enough that going
+   * for lunch and coming back finds the agent still there.
+   *
+   * Nothing bounded these at all before. Every conversation opened held its
+   * agent until the daemon died, so an afternoon of testing accumulated eleven
+   * GG Coder processes and 2.2GB for conversations nobody had touched in hours.
+   */
+  private static readonly SESSION_TTL_MS = 60 * 60 * 1000;
+  /** How often the reaper looks. Coarse: this is about hours, not seconds. */
+  private static readonly REAP_INTERVAL_MS = 5 * 60 * 1000;
+  private reaper?: NodeJS.Timeout;
 
   /**
    * Boot a provider in the background, refresh its cache, and push the result.
@@ -418,7 +456,7 @@ export class Daemon {
     }, Daemon.SPARE_TTL_MS);
     // The timer must not keep the daemon process alive on its own.
     timer.unref?.();
-    this.spares.set(key, { handle, timer, cwd });
+    this.spares.set(key, { handle, timer, cwd, providerId });
   }
 
   /**
@@ -661,6 +699,55 @@ export class Daemon {
   /** Point the daemon at a transport. Called with the relay socket's `send`. */
   attach(send: (message: unknown) => void) {
     this.send = send;
+    // Started here rather than in the constructor so building a Daemon in a test
+    // does not leave a timer running. `unref` for the same reason: this must
+    // never be the thing keeping the process alive.
+    if (!this.reaper) {
+      this.reaper = setInterval(() => this.reapIdleSessions(), Daemon.REAP_INTERVAL_MS);
+      this.reaper.unref?.();
+    }
+  }
+
+  /**
+   * Close agents for conversations nobody has touched in a long time.
+   *
+   * The process is the expensive part, not the conversation: the transcript is
+   * on disk and the agent keeps its own history, so a closed session reopens by
+   * resuming. What is being reclaimed is a language server sitting at 90-370MB
+   * for a chat that was finished hours ago.
+   *
+   * Clients are told through the ordinary `providers` announce, whose
+   * `activeSessions` is exactly the list of sessions this process still holds.
+   * The app already reacts to an id disappearing from it — that is how it
+   * survives a daemon restart — and resumes the conversation on screen instead
+   * of prompting an id that no longer exists. Reaping deliberately reuses that
+   * path rather than inventing a second one, so an older app on TestFlight
+   * handles this correctly too.
+   *
+   * @param now Injectable for tests; the reaper is on an hour-long clock.
+   * @returns The session ids closed.
+   */
+  reapIdleSessions(now: number = Date.now()): string[] {
+    const reaped: string[] = [];
+    for (const [sessionId, session] of this.sessions) {
+      // A turn in flight is never idle, however quiet it has gone: an agent can
+      // spend minutes inside one tool call without emitting anything.
+      if (session.working) continue;
+      if (now - session.lastUsedAt < Daemon.SESSION_TTL_MS) continue;
+      // Nothing to resume from means nothing to come back to. A conversation
+      // the agent never named would be lost rather than closed, so it is kept
+      // — these are rare and short-lived, since the id arrives during the
+      // handshake.
+      if (!session.agentSessionId) continue;
+      if (session.replayTimer) clearTimeout(session.replayTimer);
+      session.handle?.close();
+      this.sessions.delete(sessionId);
+      reaped.push(sessionId);
+    }
+    // Announce once for the whole pass, not once per session: the message is a
+    // full snapshot, so repeating it per id would be the same list several times.
+    if (reaped.length > 0) this.announceProviders();
+    return reaped;
   }
 
   /** Rescan `providers/`. Safe to call at any time — this is what makes a newly
@@ -671,8 +758,37 @@ export class Daemon {
     // Re-read every refresh, so `pew2 providers disable` takes effect without
     // restarting the daemon.
     this.disabled = await readDisabled();
+    this.closeDisabled();
     this.announceProviders();
     return { errors };
+  }
+
+  /**
+   * Stop agents the user has just turned off.
+   *
+   * Turning one off only ever stopped it being announced, probed or spawned
+   * *next* time. Anything already running kept running, so a machine that had
+   * warmed Cline and Qwen before they were deselected still had both resident
+   * hours later — which reads as the switch not working, and is the whole
+   * reason someone turns an agent off.
+   */
+  private closeDisabled() {
+    for (const [key, spare] of this.spares) {
+      if (this.isEnabled(spare.providerId)) continue;
+      clearTimeout(spare.timer);
+      spare.handle.close();
+      this.spares.delete(key);
+    }
+    for (const [sessionId, session] of this.sessions) {
+      if (this.isEnabled(session.providerId)) continue;
+      // A turn in flight is left alone. Killing an agent mid-answer would lose
+      // work the user is waiting on, and the session is reaped on its own clock
+      // once it finishes.
+      if (session.working) continue;
+      if (session.replayTimer) clearTimeout(session.replayTimer);
+      session.handle?.close();
+      this.sessions.delete(sessionId);
+    }
   }
 
   /**
@@ -836,6 +952,7 @@ export class Daemon {
       providerId,
       cwd,
       live: false,
+      lastUsedAt: Date.now(),
       ready: Promise.resolve(),
     };
     this.sessions.set(log.sessionId, session);
@@ -1113,6 +1230,7 @@ export class Daemon {
       providerId,
       cwd,
       live: false,
+      lastUsedAt: Date.now(),
       ready: Promise.resolve(),
     };
     this.sessions.set(log.sessionId, session);
@@ -1167,32 +1285,51 @@ export class Daemon {
 
   async prompt(sessionId: string, text: string, attachments: wire.PromptAttachment[] = []) {
     const session = this.require(sessionId);
-    // Written before the echo: an attachment that cannot be stored (over the
-    // limits, disk full) must fail the whole prompt rather than leave a turn on
-    // every screen referring to a file the agent never got.
-    const stored = await storeAttachments(sessionId, attachments);
-    // Echo immediately, then queue against a still-loading agent if necessary.
-    // The paths ride along so every client — including one replaying later —
-    // can show what was sent; only this machine can read them, which is exactly
-    // what `image.fetch` already exists to handle.
-    this.send(
-      session.log.append({
-        kind: "user_message",
-        text,
-        // Omitted entirely when there are none, so the shape of an ordinary
-        // text turn — which is nearly all of them — is unchanged in the log and
-        // in every replayed frame.
-        ...(stored.length > 0 && {
-          attachments: stored.map((file) => ({
-            name: file.name,
-            mimeType: file.mimeType,
-            uri: file.path,
-          })),
+    // Use, and the start of a turn. `working` is cleared in the `finally` below
+    // rather than on the agent's last word: an agent can go quiet for minutes
+    // mid-tool, and a reaper that read silence as "done" would close the
+    // process out from under a turn the user is waiting on.
+    //
+    // The whole body is inside the try, including storing attachments. A throw
+    // before the flag was cleared would leave the session marked working for
+    // ever, and a permanently working session is one the reaper can never
+    // touch — the exact leak this flag exists to bound.
+    session.lastUsedAt = Date.now();
+    session.working = true;
+    try {
+      // Written before the echo: an attachment that cannot be stored (over the
+      // limits, disk full) must fail the whole prompt rather than leave a turn on
+      // every screen referring to a file the agent never got.
+      const stored = await storeAttachments(sessionId, attachments);
+      // Echo immediately, then queue against a still-loading agent if necessary.
+      // The paths ride along so every client — including one replaying later —
+      // can show what was sent; only this machine can read them, which is exactly
+      // what `image.fetch` already exists to handle.
+      this.send(
+        session.log.append({
+          kind: "user_message",
+          text,
+          // Omitted entirely when there are none, so the shape of an ordinary
+          // text turn — which is nearly all of them — is unchanged in the log and
+          // in every replayed frame.
+          ...(stored.length > 0 && {
+            attachments: stored.map((file) => ({
+              name: file.name,
+              mimeType: file.mimeType,
+              uri: file.path,
+            })),
+          }),
         }),
-      }),
-    );
-    await session.ready;
-    await session.handle!.prompt(text, stored);
+      );
+      await session.ready;
+      await session.handle!.prompt(text, stored);
+    } finally {
+      session.working = false;
+      // Touched again at the end, so the idle window is measured from when the
+      // agent stopped rather than from when the user typed. A turn that ran for
+      // twenty minutes would otherwise be reapable the moment it finished.
+      session.lastUsedAt = Date.now();
+    }
   }
 
   async cancel(sessionId: string) {
@@ -1230,10 +1367,20 @@ export class Daemon {
 
   /** Replay everything a reconnecting client has not seen yet. */
   replay(sessionId: string, cursor: number): wire.SessionEvent[] {
-    return this.sessions.get(sessionId)?.log.since(cursor) ?? [];
+    const session = this.sessions.get(sessionId);
+    if (!session) return [];
+    // Reading a conversation is using it. Without this, a session someone is
+    // sitting in — scrolling, reading a long answer — aged out on the same
+    // clock as one nobody had opened since breakfast.
+    session.lastUsedAt = Date.now();
+    return session.log.since(cursor);
   }
 
   closeAll() {
+    if (this.reaper) {
+      clearInterval(this.reaper);
+      this.reaper = undefined;
+    }
     for (const session of this.sessions.values()) {
       if (session.replayTimer) clearTimeout(session.replayTimer);
       session.handle?.close();

@@ -525,6 +525,11 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
   );
 
   useEffect(() => {
+    // The drawer is the full height of the screen and its conversations run to
+    // the bottom edge, so opening it mid-sentence left the older ones behind the
+    // keyboard. Leaving the conversation is exactly the moment the keyboard has
+    // no claim on the screen — unlike the model pill, which keeps it on purpose.
+    if (menuOpen) Keyboard.dismiss();
     settleDrawer(menuOpen);
     return () => drawer.stopAnimation();
   }, [menuOpen, settleDrawer, drawer]);
@@ -1069,11 +1074,17 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
               { paddingBottom: insets.bottom + theme.space(2) },
             ]}
             onLayout={(event) => {
+              // Read out here, not inside the updater. React pools synthetic
+              // events and nulls `nativeEvent` once the handler returns, and a
+              // state updater runs after that — reaching into the event from in
+              // there threw `Cannot read property 'layout' of null` and took the
+              // whole render down.
+              const height = event.nativeEvent.layout.height;
               // Recorded against the state it was measured in, and only when it
               // actually changed: an unconditional set would re-render on every
               // layout pass the dock does, including the ones the keyboard's own
               // animation causes.
-              setDockHeights((prev) => recordDockHeight(prev, typing, event.nativeEvent.layout.height));
+              setDockHeights((prev) => recordDockHeight(prev, typing, height));
             }}
           >
           {/* The dock keeps the composer even while an approval is pending:

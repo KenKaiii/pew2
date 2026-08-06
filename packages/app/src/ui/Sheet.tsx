@@ -17,7 +17,7 @@
  * away there were two cards all along.
  */
 import { memo, useEffect, useRef, useState, type ReactNode } from "react";
-import { Animated, Pressable, StyleSheet, View } from "react-native";
+import { Animated, Keyboard, Pressable, StyleSheet, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { theme } from "../theme";
@@ -57,7 +57,14 @@ function SheetView({ visible, title, onClose, onBack, dismissLabel, children }: 
   // with the other hooks, above any early return.
   const [mounted, setMounted] = useState(visible);
   useEffect(() => {
-    if (visible) setMounted(true);
+    if (!visible) return;
+    setMounted(true);
+    // A sheet rests against the bottom edge, which is exactly where the keyboard
+    // is. Opening one from the composer put the whole card behind it — invisible,
+    // and its rows unreachable. Every sheet in this app is a list or a set of
+    // buttons, none of them holds a text field, so there is never a reason for
+    // the keyboard to stay up over one.
+    Keyboard.dismiss();
   }, [visible]);
 
   // The travel distance is the sheet's own height, and that is not known until

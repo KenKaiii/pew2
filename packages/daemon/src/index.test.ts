@@ -467,3 +467,125 @@ test("an agent that is not installed is never announced to the phone", () => {
   expect(ids).toEqual(["here", "needs-key"]);
   expect(ids).not.toContain("absent");
 });
+
+/** A session as the reaper sees it: a closable handle and a last-used clock. */
+function plantIdleSession(
+  daemon: Daemon,
+  sessionId: string,
+  overrides: Record<string, unknown> = {},
+) {
+  let closed = false;
+  const session = {
+    handle: { close: () => { closed = true; } } as unknown as AcpSessionHandle,
+    log: new SessionLog(sessionId),
+    providerId: "test",
+    cwd: "/tmp",
+    live: true,
+    ready: Promise.resolve(),
+    agentSessionId: `agent-${sessionId}`,
+    lastUsedAt: 0,
+    ...overrides,
+  };
+  (daemon as any).sessions.set(sessionId, session);
+  return { session, wasClosed: () => closed };
+}
+
+test("a conversation nobody has touched in hours gives its agent back", () => {
+  // Nothing ended a session before this. Every conversation opened held a whole
+  // agent process until the daemon died — measured on a real machine as eleven
+  // GG Coder processes and 2.2GB, for chats finished hours earlier.
+  const { daemon } = daemonWithCollector();
+  const old = plantIdleSession(daemon, "stale");
+
+  const reaped = daemon.reapIdleSessions(2 * 60 * 60 * 1000);
+
+  expect(reaped).toEqual(["stale"]);
+  expect(old.wasClosed()).toBe(true);
+  // Gone from the map as well as closed: a session whose process is dead must
+  // not stay listed as one a client can prompt.
+  expect((daemon as any).sessions.has("stale")).toBe(false);
+});
+
+test("a turn still running is never reaped, however quiet it has gone", () => {
+  // The dangerous case. An agent can spend minutes inside a single tool call
+  // without emitting anything, so elapsed silence is not evidence of idleness —
+  // and closing the process there would lose an answer the user is waiting for.
+  const { daemon } = daemonWithCollector();
+  const working = plantIdleSession(daemon, "working", { working: true });
+
+  expect(daemon.reapIdleSessions(2 * 60 * 60 * 1000)).toEqual([]);
+  expect(working.wasClosed()).toBe(false);
+});
+
+test("a conversation used recently is left alone", () => {
+  const { daemon } = daemonWithCollector();
+  const fresh = plantIdleSession(daemon, "fresh", { lastUsedAt: 60 * 60 * 1000 });
+
+  // Ten minutes later: well inside the window.
+  expect(daemon.reapIdleSessions(60 * 60 * 1000 + 10 * 60 * 1000)).toEqual([]);
+  expect(fresh.wasClosed()).toBe(false);
+});
+
+test("a session with nothing to resume from is kept, not closed", () => {
+  // Closing one of these would lose the conversation rather than park it: with
+  // no agent session id there is nothing to reopen from. They are rare and
+  // short-lived, since the id arrives during the handshake.
+  const { daemon } = daemonWithCollector();
+  const unnamed = plantIdleSession(daemon, "unnamed", { agentSessionId: undefined });
+
+  expect(daemon.reapIdleSessions(2 * 60 * 60 * 1000)).toEqual([]);
+  expect(unnamed.wasClosed()).toBe(false);
+});
+
+test("reaping tells clients, through the list they already watch", () => {
+  // Deliberately the ordinary `providers` announce rather than a new message:
+  // its `activeSessions` is the set this process still holds, and the app
+  // already resumes a conversation whose id has left that list — which is how
+  // it survives a daemon restart. An app already on TestFlight handles this.
+  const { daemon, sent } = daemonWithCollector();
+  plantIdleSession(daemon, "stale");
+  sent.length = 0;
+
+  daemon.reapIdleSessions(2 * 60 * 60 * 1000);
+
+  const announce = sent.find((m: any) => m?.t === "providers") as any;
+  expect(announce).toBeDefined();
+  expect(announce.activeSessions).not.toContain("stale");
+});
+
+test("a pass that reaps nothing says nothing", () => {
+  // The reaper runs every few minutes forever. Announcing each time would put a
+  // full provider list on the wire for no reason, and re-render the drawer.
+  const { daemon, sent } = daemonWithCollector();
+  plantIdleSession(daemon, "fresh", { lastUsedAt: 60 * 60 * 1000 });
+  sent.length = 0;
+
+  daemon.reapIdleSessions(60 * 60 * 1000);
+
+  expect(sent).toEqual([]);
+});
+
+test("a prompt that throws does not strand the session as working for ever", async () => {
+  // `working` makes a session un-reapable, so every path out of a prompt must
+  // clear it. A turn can fail before the agent is even reached — an attachment
+  // over the size limit, a disk with nothing left — and if that escaped the
+  // guard the session stayed marked working permanently and the reaper could
+  // never touch it again. A permanent leak, created by the flag added to stop
+  // one.
+  const { daemon } = daemonWithCollector();
+  // A handle whose `prompt` rejects: the same shape as any turn that fails.
+  const { session } = plantIdleSession(daemon, "failed", {
+    handle: {
+      close: () => {},
+      prompt: () => Promise.reject(new Error("disk full")),
+    } as unknown as AcpSessionHandle,
+  });
+
+  await expect(daemon.prompt("failed", "hello")).rejects.toThrow("disk full");
+
+  expect((session as any).working).toBe(false);
+  // And is genuinely reapable again, which is the property that actually
+  // matters — the flag is only interesting through the reaper.
+  (session as any).lastUsedAt = 0;
+  expect(daemon.reapIdleSessions(2 * 60 * 60 * 1000)).toEqual(["failed"]);
+});

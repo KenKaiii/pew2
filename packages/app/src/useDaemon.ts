@@ -15,6 +15,7 @@ import { mergeAgentSessions, needsResume, replaceAgentSessionStub } from "./agen
 import {
   beginActivity,
   foldActivity,
+  isTimingTurn,
   summariseActivity,
   IDLE_ACTIVITY,
   type Activity,
@@ -694,26 +695,43 @@ export function useDaemon(
             // Reveal on the first real batch. An empty final frame still clears
             // the skeleton for sessions with no visible transcript.
             if (events.length === 0 && !complete) return folded;
+            // Replay is history, not an active agent turn. Claude may still be
+            // attaching in the background, but prompts safely queue server-side.
+            //
+            // Except when a turn is already running *here*. Every session gets a
+            // replay the moment it goes live — empty, for one just created to
+            // carry a first prompt — and clearing on that frame stopped the clock
+            // before the agent had said anything. The turn then ended with no
+            // start time to measure, so the first exchange of every conversation
+            // finished without its "Answered in 4s" while every later one had it.
+            //
+            // "Running here" means a clock this device started, not `prev.busy`.
+            // Opening an old conversation sets `busy` on the way in (it may still
+            // be mid-turn on the desktop), and the replay is the only frame that
+            // ever cleared it — so carrying it through here left every resumed
+            // conversation pulsing in the drawer for as long as the app was open.
+            const running = isTimingTurn(prev.activity);
             return {
               ...folded,
               loadingSession: false,
-              // Replay is history, not an active agent turn. Claude may still be
-              // attaching in the background, but prompts safely queue server-side.
-              //
-              // Except when a turn is already running here. Every session gets a
-              // replay the moment it goes live — empty, for one just created to
-              // carry a first prompt — and clearing the clock on that frame
-              // stopped the timer before the agent had said anything. The turn
-              // then ended with no start time to measure, so the first exchange
-              // of every conversation finished without its "Answered in 4s"
-              // while every later one had it.
-              busy: prev.busy ? true : false,
+              busy: running,
               // Replayed tool calls finished long ago — the same reason a replay
               // batch never raises a permission. Timing them from this device's
               // clock would report a minutes-old turn as taking an instant. A
               // clock this device started is a different thing and is kept.
-              activity: prev.activity.startedAt !== undefined ? prev.activity : IDLE_ACTIVITY,
+              activity: running ? prev.activity : IDLE_ACTIVITY,
               receipt: undefined,
+              // The drawer entry too, and this is the flag the user actually
+              // sees: the pulsing dot beside the conversation's name. Resuming
+              // marks the session working on the way in, `session.started`
+              // copies that onto its entry, and nothing else ever takes it off
+              // for an agent that sends no `session.idle` after attaching.
+              // Only this conversation — a background turn elsewhere is real.
+              sessions: folded.sessions.map((session) =>
+                session.id === message.sessionId && session.busy !== running
+                  ? { ...session, busy: running }
+                  : session,
+              ),
             };
           });
           return;

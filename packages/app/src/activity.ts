@@ -93,6 +93,23 @@ export function beginActivity(now: number): Activity {
 }
 
 /**
+ * Whether a turn is being timed by *this* device.
+ *
+ * The distinction a `session.replay` frame turns on. Every session gets one the
+ * moment it goes live, so that frame arrives in two very different situations:
+ * a conversation just created to carry a first prompt, where a turn is running
+ * here and its clock must survive; and an old conversation being reopened,
+ * where the transcript is history and the frame should settle it to idle.
+ *
+ * `busy` cannot tell those apart — it is set on the way into a resumed session
+ * too, because the agent may genuinely still be mid-turn on the desktop. A
+ * clock this device started can.
+ */
+export function isTimingTurn(state: Activity): boolean {
+  return state.startedAt !== undefined;
+}
+
+/**
  * Fold one `session/update` payload into the live activity.
  *
  * Returns the same object when nothing changed, so the transcript's memoised
