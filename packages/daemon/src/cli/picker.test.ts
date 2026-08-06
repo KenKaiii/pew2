@@ -13,7 +13,7 @@ const item = (over: Partial<PickerItem> & { id: string }): PickerItem => ({
 const items: PickerItem[] = [
   item({ id: "claude-code", name: "Claude Code" }),
   item({ id: "opencode", name: "OpenCode" }),
-  item({ id: "codex", name: "Codex", selectable: false, detail: "not installed" }),
+  item({ id: "codex", name: "Codex", selectable: false, note: "not installed" }),
   item({ id: "goose", name: "goose" }),
 ];
 
@@ -41,6 +41,13 @@ test("space toggles the agent under the cursor", () => {
 
   state = reduce(state, " ");
   expect(state.chosen.has("claude-code")).toBe(true);
+});
+
+test("usable agents come first, whatever order they arrived in", () => {
+  // The list is a thing to act on. Interleaving agents that cannot be picked
+  // means arrowing past rows that do nothing to reach the ones that do.
+  const state = initialState(items);
+  expect(state.items.map((i) => i.id)).toEqual(["claude-code", "opencode", "goose", "codex"]);
 });
 
 test("arrows move, and skip agents that cannot be chosen", () => {
@@ -140,12 +147,22 @@ test("the screen shows state, cursor and the keys that work", () => {
   expect(text).toContain("toggle");
 });
 
-test("an unusable agent is shown, dimmed, with the reason", () => {
-  // Seeing what else exists is half the value of the screen; it just cannot
-  // be chosen.
-  const text = render(initialState(items), plain).map(stripAnsi).join("\n");
-  expect(text).toContain("Codex");
-  expect(text).toContain("not installed");
+test("an unusable agent says why on its own row, not a second one", () => {
+  // Seeing what else exists is half the value of the screen; it just cannot be
+  // chosen. A reason under every row doubled the height of the list and pushed
+  // the agents you can actually use off the top of a short terminal.
+  const lines = render(initialState(items), plain).map(stripAnsi);
+  const row = lines.find((l) => l.includes("Codex"))!;
+
+  expect(row).toContain("Codex (not installed)");
+  // Exactly one line mentions it.
+  expect(lines.filter((l) => l.includes("not installed"))).toHaveLength(1);
+});
+
+test("a usable agent carries no parenthetical at all", () => {
+  // Nothing stands between it and being picked, so there is nothing to say.
+  const lines = render(initialState(items), plain).map(stripAnsi);
+  expect(lines.find((l) => l.includes("Claude Code"))).not.toContain("(");
 });
 
 test("every line stays on the rail", () => {

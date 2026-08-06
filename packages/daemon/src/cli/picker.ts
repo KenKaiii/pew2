@@ -22,8 +22,15 @@ import { rail, plural, type RenderOptions } from "./rail.js";
 export interface PickerItem {
   id: string;
   name: string;
-  /** One short line: what it is, or why it cannot be used. */
-  detail?: string;
+  /**
+   * Short parenthetical after the name, for agents that cannot be chosen.
+   *
+   * Inline rather than on its own line: a reason under every row doubled the
+   * height of the list and pushed the agents you can actually use off the top
+   * of a short terminal. "Codex (not installed)" says the same thing in the
+   * space it deserves.
+   */
+  note?: string;
   /**
    * Installed and able to run.
    *
@@ -46,16 +53,20 @@ export interface PickerState {
 
 /** Start the picker with everything installed already turned on. */
 export function initialState(items: PickerItem[], disabled: Set<string> = new Set()): PickerState {
+  // Usable agents first, in the order they came in. The list is a thing to act
+  // on, and interleaving agents that cannot be picked means arrowing past rows
+  // that do nothing to reach the ones that do.
+  const ordered = [
+    ...items.filter((i) => i.selectable),
+    ...items.filter((i) => !i.selectable),
+  ];
+
   return {
-    items,
-    // On the first selectable row, so the first arrow press does something
-    // visible rather than moving off an unusable row.
-    cursor: Math.max(
-      0,
-      items.findIndex((i) => i.selectable),
-    ),
+    items: ordered,
+    // Index 0 is a usable row whenever there is one, given the sort above.
+    cursor: 0,
     chosen: new Set(
-      items.filter((i) => i.selectable && !disabled.has(i.id)).map((i) => i.id),
+      ordered.filter((i) => i.selectable && !disabled.has(i.id)).map((i) => i.id),
     ),
   };
 }
@@ -151,8 +162,8 @@ export function render(state: PickerState, options: RenderOptions = {}): string[
         ? s.bold(item.name)
         : item.name;
 
-    out.push(r.line(`${caret} ${box} ${name}`));
-    if (item.detail) out.push(r.line(`    ${s.hex(PALETTE.faint, item.detail)}`));
+    const note = item.note ? s.hex(PALETTE.faint, ` (${item.note})`) : "";
+    out.push(r.line(`${caret} ${box} ${name}${note}`));
   });
 
   out.push(r.bar());

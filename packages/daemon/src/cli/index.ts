@@ -237,20 +237,21 @@ async function cmdValidate() {
 }
 
 
-/** The one line the picker shows under an agent's name. */
-function pickerDetail(agent: {
+/**
+ * The parenthetical after an agent's name in the picker.
+ *
+ * Only for agents that cannot be chosen, and only ever a couple of words. This
+ * screen answers "which of these do I want", so anything that is not about
+ * being pickable is noise \u2014 what an agent needs before it will run is already
+ * `pew2 setup`'s own report and `pew2 doctor`'s job.
+ */
+function pickerNote(agent: {
   notInstalled: boolean;
-  missingEnv: string[];
-  verify?: { status: string; detail?: string };
-  summary?: string;
+  verify?: { status: string };
 }): string | undefined {
-  // Whatever stands between this agent and being usable, since that is what
-  // decides whether ticking it is worth anything. Falls back to what the agent
-  // is, for the ones with nothing in the way.
-  if (agent.notInstalled) return "not installed on this computer";
-  if (agent.missingEnv.length > 0) return `needs ${agent.missingEnv.join(", ")}`;
-  if (agent.verify?.status === "failed") return agent.verify.detail ?? "would not start";
-  return agent.summary;
+  if (agent.notInstalled) return "not installed";
+  if (agent.verify?.status === "failed") return "not working";
+  return undefined;
 }
 
 async function cmdSetup(flags: Set<string>) {
@@ -306,7 +307,7 @@ async function cmdSetup(flags: Set<string>) {
         id: agent.id,
         name: agent.name,
         selectable: !agent.notInstalled && agent.verify?.status !== "failed",
-        detail: pickerDetail(agent),
+        note: pickerNote(agent),
       })),
       { disabled },
     );
