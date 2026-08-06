@@ -9,6 +9,11 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Manual trigger, because a push that silently creates no run leaves nobody a
+  # way to ask. It has happened on this repository — four consecutive pushes to
+  # `main` registered as push events and produced no CI run at all — and without
+  # this the only recourse is another commit hoping the trigger fires.
+  workflow_dispatch:
 
 jobs:
   check:
