@@ -158,6 +158,27 @@ export class SecureChannel {
    * exists so the daemon can hang up early rather than serve a peer that can
    * never talk.
    */
+  /**
+   * Forget what has been seen from a sender, so its counters may restart at 0.
+   *
+   * A peer opens a new socket with a new channel, and counters are per-channel:
+   * they begin again at zero every time. On the LAN that is invisible, because
+   * the daemon builds a fresh channel per socket and has no history to compare
+   * against. Over the relay one long-lived channel carries every device, so the
+   * window remembered the highest counter from the last connection and rejected
+   * the next one's first frame as a replay — permanently, until the daemon was
+   * restarted.
+   *
+   * Called when a peer says `hello`, which is by definition the start of a new
+   * connection. Safe because a `hello` carries a proof whose timestamp is only
+   * valid for a couple of minutes, so this cannot be driven by an old captured
+   * frame; and because an attacker who could replay it still cannot seal a
+   * single readable command afterwards.
+   */
+  resetSender(from: string): void {
+    this.seen.delete(from);
+  }
+
   verifyProof(envelope: unknown, deviceId: string, now = Date.now()): boolean {
     // Partitioned by the device it claims to be, so two phones handshaking over
     // one relay socket do not invalidate each other's proofs.

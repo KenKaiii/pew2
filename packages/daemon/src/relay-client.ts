@@ -220,7 +220,15 @@ export class RelayClient {
           socket.send(JSON.stringify({ t: "error", code: "wire-version", message: mismatch }));
           return;
         }
-        if (!deviceId || !this.channel.verifyProof(hello.proof, deviceId)) return;
+        // A `hello` is a new socket, and the peer's counters restart at zero
+        // with it. This one channel is shared by every device on the relay and
+        // outlives all of them, so without clearing the window first its memory
+        // of the last connection rejects this one's first frame as a replay —
+        // which stranded the app on "getting the list of agents" and left
+        // `pew2 pair` waiting for a phone that had already arrived.
+        if (!deviceId) return;
+        this.channel.resetSender(deviceId);
+        if (!this.channel.verifyProof(hello.proof, deviceId)) return;
 
         // The app may have been waiting here long before this machine woke up,
         // so re-announce rather than assume it saw the last list.

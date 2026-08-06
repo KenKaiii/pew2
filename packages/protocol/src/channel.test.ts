@@ -227,3 +227,52 @@ test("a non-proof message cannot be used as a proof", () => {
   const { daemon, app } = pair();
   expect(daemon.verifyProof(app.seal({ t: "session.cancel" }), "phone-1")).toBe(false);
 });
+
+test("a peer that reconnects is not mistaken for a replay", () => {
+  // The relay carries every device on one long-lived daemon channel, while each
+  // phone builds a fresh channel per socket — so its counters restart at zero
+  // on every reconnect. Without forgetting the last connection, the daemon
+  // rejected that first frame as a replay and never recovered: the app sat on
+  // "getting the list of agents" and `pew2 pair` waited for a phone that had
+  // already arrived. A daemon restart was the only cure.
+  const key = new Uint8Array(32).fill(7);
+  const daemon = new SecureChannel(key, "daemon");
+
+  const first = new SecureChannel(key, "app");
+  expect(daemon.verifyProof(first.proof("phone"), "phone")).toBe(true);
+  expect(daemon.open(first.seal({ t: "ping" }), "phone")).toEqual({ t: "ping" });
+
+  // The phone drops and comes back with a brand new channel, counting from 0.
+  const second = new SecureChannel(key, "app");
+  daemon.resetSender("phone");
+  expect(daemon.verifyProof(second.proof("phone"), "phone")).toBe(true);
+  expect(daemon.open(second.seal({ t: "ping" }), "phone")).toEqual({ t: "ping" });
+});
+
+test("resetting one device does not reopen replay for another", () => {
+  // Two phones share the relay's single channel. One reconnecting must not
+  // clear the other's protection.
+  const key = new Uint8Array(32).fill(9);
+  const daemon = new SecureChannel(key, "daemon");
+  const other = new SecureChannel(key, "app");
+
+  const frame = other.seal({ t: "ping" });
+  expect(daemon.open(frame, "other")).toEqual({ t: "ping" });
+
+  daemon.resetSender("phone");
+  // Still refused: the replayed frame belongs to a sender that never reset.
+  expect(daemon.open(frame, "other")).toBeUndefined();
+});
+
+test("replay is still refused within one connection", () => {
+  // The reset happens only on `hello`. Inside a live connection a repeated
+  // frame must still be dropped, or the fix would remove replay protection
+  // rather than scope it.
+  const key = new Uint8Array(32).fill(3);
+  const daemon = new SecureChannel(key, "daemon");
+  const app = new SecureChannel(key, "app");
+
+  const frame = app.seal({ t: "ping" });
+  expect(daemon.open(frame, "phone")).toEqual({ t: "ping" });
+  expect(daemon.open(frame, "phone")).toBeUndefined();
+});
