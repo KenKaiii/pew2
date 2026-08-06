@@ -594,11 +594,11 @@ test("a prompt that throws does not strand the session as working for ever", asy
 });
 
 test("opening conversations in a burst does not hold all of them", () => {
-  // The hole the time limit alone leaves. Someone working through a morning — a
-  // task here, a new one in another project, a third to check something — opens
-  // conversations far faster than a one-hour clock retires them, and ten live
-  // agents is roughly two gigabytes. The TTL bounds lingering; only a cap bounds
-  // the burst.
+  // The hole the time limit alone leaves, at any TTL. Someone working through a
+  // morning — a task here, a new one in another project, a third to check
+  // something — opens conversations faster than an idle clock retires them, and
+  // ten live agents is roughly two gigabytes. The TTL bounds lingering; only a
+  // cap bounds the burst.
   const { daemon } = daemonWithCollector();
   const opened = [1, 2, 3, 4, 5].map((n) =>
     plantIdleSession(daemon, `s${n}`, { lastUsedAt: n * 1000 }),
