@@ -96,9 +96,18 @@ jobs:
 
   publish:
     needs: build
-    # Tags only. See the note on workflow_dispatch above: a manual run has no
-    # version to release, and naming one after a branch breaks the install URL.
-    if: startsWith(github.ref, 'refs/tags/')
+    # `always()` so a single target cannot hold the release hostage.
+    #
+    # `needs` waits for every matrix job whatever `fail-fast` says, and the jobs
+    # do not fail evenly: during a GitHub Actions incident the scarcer runner
+    # pools (linux-arm64 especially) sit queued for hours while the rest build in
+    # fifteen seconds. That blocked `curl | sh` on Mac and Windows for an entire
+    # evening over a Linux ARM binary that almost nobody downloads.
+    #
+    # The guard against publishing rubble is the explicit check below, which is a
+    # better rule than "every target succeeded" anyway: what matters is that the
+    # platforms the install scripts fetch are actually present.
+    if: always() && startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -107,6 +116,30 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+
+      # Which assets a release cannot go out without.
+      #
+      # These are the ones `install.sh` and `install.ps1` resolve by name, so a
+      # release missing any of them is not a partial release, it is a broken
+      # install command for everyone on that platform. Linux ARM is deliberately
+      # absent: it has no installer path of its own and is a download people
+      # reach for by hand.
+      - name: Require the platforms the installers fetch
+        run: |
+          missing=""
+          for asset in pew2-darwin-arm64 pew2-darwin-x64 pew2-linux-x64 pew2-windows-x64.exe; do
+            if [ ! -f "dist/$asset" ] || [ ! -f "dist/$asset.sha256" ]; then
+              missing="$missing $asset"
+            fi
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::Refusing to publish without:$missing"
+            echo "The install scripts fetch these by name, so a release without one"
+            echo "is a broken install command rather than a smaller release."
+            exit 1
+          fi
+          echo "Publishing:"
+          ls -1 dist
 
       # The install scripts read from `/releases/latest/download/<name>`, so the
       # asset names are effectively an API: renaming one breaks every install
