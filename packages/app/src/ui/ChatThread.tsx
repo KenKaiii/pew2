@@ -137,7 +137,27 @@ function ChatThreadView(
   // container is not in that measurement: the transcript could be scrolled
   // under the composer and the last message sat behind it. A header and footer
   // are laid out like any other row, so the list knows they are there.
-  const headerStyle = useMemo(() => ({ height: threadTop }), [threadTop]);
+  // The header does two jobs: clearing the floating nav, and — while the
+  // transcript is short — reserving the footer's reading inset as well.
+  //
+  // `startRenderingFromBottom` sits a short list against the bottom edge by
+  // giving the *item container* a top margin of `windowSize - contentSize`. The
+  // footer is rendered outside that container, so its height is not in that sum:
+  // with one message the list bottom-aligns the message itself, the footer's
+  // inset hangs off the end of the viewport, and the message ends up under the
+  // composer. That is the state every first prompt is in — it stayed hidden
+  // until the reply arrived and gave the list enough content to scroll.
+  //
+  // Keyed off the turn count rather than a measurement because FlashList
+  // swallows `onLayout` and has no `onContentSizeChange`, so the list's own
+  // height is not observable from here. A first exchange cannot fill a phone
+  // screen, and by the time it might, the extra top pad is scrolled off the top
+  // and costs nothing.
+  const shortTranscript = turns.length <= SHORT_TRANSCRIPT_TURNS;
+  const headerStyle = useMemo(
+    () => ({ height: shortTranscript ? threadTop + threadBottom : threadTop }),
+    [threadTop, threadBottom, shortTranscript],
+  );
   const footerStyle = useMemo(() => ({ paddingBottom: threadBottom }), [threadBottom]);
 
   // Three states of one row, in priority order: the tool the agent is running,
@@ -239,6 +259,15 @@ function ChatThreadView(
  * two can never disagree about whether you are at the bottom.
  */
 const FOLLOW_THRESHOLD = 0.2;
+
+/**
+ * How few turns still counts as a short transcript.
+ *
+ * Two covers the case that matters: a prompt on its own, and a prompt with its
+ * reply. Neither fills a phone screen, and both are bottom-aligned by the list
+ * rather than scrolled.
+ */
+const SHORT_TRANSCRIPT_TURNS = 2;
 
 const MAINTAIN_POSITION = {
   startRenderingFromBottom: true,
