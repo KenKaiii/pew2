@@ -280,7 +280,19 @@ const MAINTAIN_POSITION = {
 const keyExtractor = (turn: TurnData) => turn.key ?? turn.id;
 
 /** Carries only a `ListHeaderComponentStyle`/`ListFooterComponentStyle` inset. */
-const SpacerOnly = () => null;
+/**
+ * The idle footer: nothing to see, but exactly as tall as the busy one.
+ *
+ * `Working`, `ActivityLine` and `TurnReceipt` all occupy one body line plus the
+ * gap above it. This rendered nothing, so the moment an agent started thinking
+ * the transcript jumped by that height — visible on every first prompt as the
+ * message sliding upward just before the reply began.
+ *
+ * Only the first turn showed it: after that the list is long enough to be
+ * scrolled rather than bottom-aligned, so the growth goes below the fold where
+ * nobody sees it.
+ */
+const SpacerOnly = () => <View style={styles.footerSpacer} />;
 
 /** Three dots that fade in sequence. Calm, and it costs no layout. */
 function Working() {
@@ -329,6 +341,12 @@ const styles = StyleSheet.create({
     height: theme.line.body,
     marginTop: theme.space(5),
     paddingHorizontal: theme.gutter,
+  },
+  // Mirrors `workingRow` exactly. If one changes, so must the other, or the
+  // transcript will shift the moment an agent starts working.
+  footerSpacer: {
+    height: theme.line.body,
+    marginTop: theme.space(5),
   },
   dot: {
     width: 6,
