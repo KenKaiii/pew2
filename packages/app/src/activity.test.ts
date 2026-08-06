@@ -186,3 +186,19 @@ describe("formatting", () => {
     expect(formatTokens(1_240_000)).toBe("1.2M");
   });
 });
+
+test("a receipt needs the clock that was started when the prompt was sent", () => {
+  // The bug this pins: `session.started` used to overwrite `busy` with
+  // `message.resumed === true`, which is false for a brand new conversation.
+  // That stopped the turn's clock the instant the session opened — before the
+  // agent had said anything — so the first exchange of every conversation ended
+  // with no "Answered in 4s" while every later one had it.
+  //
+  // The unit under test is `summariseActivity`'s contract: no start time, no
+  // receipt. Losing the start is what losing the receipt looks like.
+  const started = beginActivity(1_000);
+  expect(summariseActivity(started, 5_000)).toMatchObject({ duration: "4s" });
+
+  // What the reset produced: an activity with nothing running and no clock.
+  expect(summariseActivity(IDLE_ACTIVITY, 5_000)).toBeUndefined();
+});

@@ -1064,7 +1064,13 @@ export function useDaemon(
                 }),
                 // Keep the skeleton until the batched transcript follows this frame.
                 loadingSession: message.resumed === true,
-                busy: message.resumed === true,
+                // `prev.busy`, not `false`, for a session started to carry a
+                // first prompt: `start` already marked it working and began the
+                // clock. Overwriting that stopped the timer before the agent had
+                // said anything, so `summariseActivity` found no start time and
+                // the first turn of every conversation finished without its
+                // "Answered in 4s" — every later turn had one.
+                busy: message.resumed === true ? true : prev.busy,
               };
             }
 

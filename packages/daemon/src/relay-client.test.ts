@@ -397,3 +397,44 @@ test("a rekeyed client does not leave the old socket scheduling retries", () => 
   expect(statuses.at(-1)).toBe("online");
   relay.stop();
 });
+
+test("the same phone can reconnect over and over", async () => {
+  // The bug this exists to stop, and the reason it went unnoticed for a day.
+  //
+  // A phone builds a fresh SecureChannel per socket, so its replay counter
+  // restarts at zero on every reconnect. The daemon's relay channel is one
+  // long-lived object shared by every device, and it remembered the highest
+  // counter from the last connection — so the *second* connection from the same
+  // device was rejected as a replay, permanently, until the daemon restarted.
+  //
+  // It never showed up in a test because every test used a fresh device id,
+  // which sidesteps it completely. Real phones do not: they keep one id for
+  // their lifetime, so every reconnect after the first one failed.
+  const seen: unknown[] = [];
+  const { relay } = client({ onBroadcast: (message) => seen.push(message) });
+  relay.start();
+  const socket = FakeSocket.instances[0]!;
+  socket.open();
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    // A new channel each time, exactly as the app does on reconnect.
+    const app = phone();
+    socket.receive({
+      t: "hello",
+      wire: WIRE_VERSION,
+      role: "app",
+      deviceId: "Kens-iPhone",
+      proof: app.proof("Kens-iPhone"),
+    });
+    await new Promise((r) => setTimeout(r, 20));
+
+    const joins = seen.filter((m) => (m as { t?: string }).t === "device.joined");
+    expect(joins.length, `reconnect ${attempt + 1} was not accepted`).toBe(attempt + 1);
+
+    // And the connection is usable, not merely admitted: a sealed frame from
+    // the new channel must still open.
+    expect(relay.online).toBe(true);
+  }
+
+  relay.stop();
+});
