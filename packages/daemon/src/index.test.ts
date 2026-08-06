@@ -432,3 +432,38 @@ test("a prompt over the attachment limits is refused before anything is echoed",
 
   expect(sent.map((m: any) => m.payload).some((p: any) => p?.kind === "user_message")).toBe(false);
 });
+
+test("an agent that is not installed is never announced to the phone", () => {
+  // A dimmed row for an agent that is not on the machine is furniture that can
+  // never become useful: you cannot install a CLI from a phone. It also made the
+  // phone disagree with `pew2 setup`, whose picker will not let these be chosen
+  // — so the app offered agents the user was never given a choice about.
+  //
+  // An agent that is installed but still needs a key is a different case and is
+  // announced: it really is here, and the reason says what to do on the desktop.
+  const { daemon, sent } = daemonWithCollector();
+  (daemon as any).providers = [
+    {
+      manifest: { id: "here", name: "Here", pew: { transport: "acp" } },
+      commandMissing: false,
+      missingEnv: [],
+    },
+    {
+      manifest: { id: "needs-key", name: "Needs Key", pew: { transport: "acp" } },
+      commandMissing: false,
+      missingEnv: ["SOME_KEY"],
+    },
+    {
+      manifest: { id: "absent", name: "Absent", pew: { transport: "acp" } },
+      commandMissing: true,
+      missingEnv: [],
+    },
+  ];
+
+  (daemon as any).announceProviders();
+
+  const announce: any = sent.findLast((m: any) => m.t === "providers");
+  const ids = announce.providers.map((p: any) => p.id);
+  expect(ids).toEqual(["here", "needs-key"]);
+  expect(ids).not.toContain("absent");
+});

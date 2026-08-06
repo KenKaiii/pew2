@@ -701,6 +701,16 @@ export class Daemon {
         // Turned off by the user. Filtered here rather than in the app, so the
         // phone is never even told about an agent it should not offer.
         .filter((p) => this.isEnabled(p.manifest.id))
+        // Not on this machine at all. Nothing about it can be acted on from a
+        // phone \u2014 you cannot install a CLI from there \u2014 so a dimmed row for it
+        // is a permanent piece of furniture that never becomes useful.
+        //
+        // This is also what makes the phone agree with `pew2 setup`: the picker
+        // will not let these be chosen, so announcing them showed agents the
+        // user was never offered. An agent that is installed but still needs a
+        // key is a different case and stays, because it is really here and the
+        // reason says what to do about it.
+        .filter((p) => !p.commandMissing)
         .map((p) => ({
           id: p.manifest.id,
           name: p.manifest.name,
