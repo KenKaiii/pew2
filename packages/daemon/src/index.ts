@@ -554,7 +554,11 @@ export class Daemon {
         callbacks.onUpdate({ sessionId: loadSessionId, update });
       }
     }
-    let loadingDuplicateReplay = localUpdates !== undefined;
+    // Already on screen, so the agent does not need to send it again. Agents
+    // that offer `session/resume` are asked to restore context without the
+    // replay; the rest still replay and it is still discarded below.
+    const haveHistory = localUpdates !== undefined;
+    let loadingDuplicateReplay = haveHistory;
     // What the agent sends while loading, kept so this conversation opens from
     // disk next time. Only collected when there was no cache to begin with:
     // re-writing what was just read would grow the file on every open.
@@ -580,7 +584,7 @@ export class Daemon {
       try {
         // `cwd` is what makes the spare usable for this conversation: the warm
         // process was booted for the probe's workspace, not this project.
-        await spare.adopt({ loadSessionId, cwd, ...agentCallbacks });
+        await spare.adopt({ loadSessionId, cwd, haveHistory, ...agentCallbacks });
         session.handle = spare;
       } catch {
         spare.close();
@@ -591,6 +595,7 @@ export class Daemon {
         provider,
         cwd,
         loadSessionId,
+        haveHistory,
         ...agentCallbacks,
         onStderr: (line) => console.error(`[${provider.manifest.id}] ${line}`),
       });

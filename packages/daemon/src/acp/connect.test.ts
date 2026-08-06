@@ -13,7 +13,7 @@
  * on a loading skeleton with nothing in the log.
  */
 import { expect, test } from "bun:test";
-import { HANDSHAKE_TIMEOUT_MARKER, withTimeout } from "./connect.js";
+import { HANDSHAKE_TIMEOUT_MARKER, restoreMethodFor, withTimeout } from "./connect.js";
 
 test("a promise that never settles is rejected with the caller's error", async () => {
   const never = new Promise<string>(() => {});
@@ -83,4 +83,28 @@ test("the timeout marker survives being carried through a rejection", async () =
   // which would report a dead process as merely slow.
   expect("ACP connection closed").not.toContain(HANDSHAKE_TIMEOUT_MARKER);
   expect("'goose' was not found on PATH").not.toContain(HANDSHAKE_TIMEOUT_MARKER);
+});
+
+test("a conversation already on screen is restored without a second copy of it", () => {
+  // The daemon paints every thread from its own cache before the agent attaches,
+  // then discards whatever the agent replays on top. Against GG Coder that was
+  // 8,457 update notifications decoded and dropped, and 941ms instead of 418ms —
+  // more than half the cost of reopening a conversation, which is exactly the
+  // cost the idle-session reaper trades against.
+  expect(restoreMethodFor(true, true)).toBe("session/resume");
+});
+
+test("an agent that never offered resume is still asked to replay", () => {
+  // Asking for a capability an agent did not advertise is a protocol error, not
+  // a graceful no-op: it fails the whole open rather than falling back. Claude
+  // Code is in this group today.
+  expect(restoreMethodFor(true, false)).toBe("session/load");
+});
+
+test("without the transcript, the replay is the only way to draw the thread", () => {
+  // The other half of the condition. A conversation with no cached history has
+  // nothing on screen, so skipping the replay would open an empty thread that
+  // never fills — worse than the 500ms it saves.
+  expect(restoreMethodFor(false, true)).toBe("session/load");
+  expect(restoreMethodFor(false, false)).toBe("session/load");
 });

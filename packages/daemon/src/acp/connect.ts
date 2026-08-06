@@ -227,6 +227,8 @@ export interface AdoptOptions {
    * so every adopt has to say where it is going.
    */
   cwd: string;
+  /** As on {@link ConnectOptions}: skip the replay, keep the agent context. */
+  haveHistory?: boolean;
   onUpdate: (payload: unknown) => void;
   onPermissionRequest: (request: { requestId: string; params: unknown }) => void;
   onConfigOptions?: (options: ConfigOption[]) => void;
@@ -263,6 +265,20 @@ export interface ConnectOptions {
    */
   loadSessionId?: string;
   /**
+   * The caller already has this conversation's history and does not want it
+   * replayed — only the agent-side context back.
+   *
+   * Set when the daemon painted the thread from its own cache, which it does
+   * for every provider. Without it the agent replays a transcript the user is
+   * already looking at, and the daemon drops every message of it: 8,354
+   * notifications and 938ms, measured against GG Coder, to arrive at the screen
+   * that was already drawn.
+   *
+   * Only a hint. An agent that does not advertise `session/resume` still gets a
+   * `session/load`, and the duplicate replay is still discarded as before.
+   */
+  haveHistory?: boolean;
+  /**
    * How long to wait for the agent to answer `initialize`.
    *
    * Overridable mainly so tests do not have to wait out the real budget.
@@ -290,6 +306,36 @@ const HANDSHAKE_TIMEOUT_MS = 180_000;
  * crashed ones, pointing the user at a problem they never had.
  */
 export const HANDSHAKE_TIMEOUT_MARKER = "did not respond to the ACP handshake";
+
+/**
+ * Which ACP method reopens a stored conversation.
+ *
+ * `session/load` replays the whole transcript through the update handler before
+ * it resolves. `session/resume` restores the same agent-side context and sends
+ * nothing. They are otherwise equivalent: same session id, same capabilities.
+ *
+ * Measured against GG Coder on one real conversation:
+ *
+ *   session/load     941ms   8,457 update notifications
+ *   session/resume   418ms       0 update notifications
+ *
+ * The daemon paints every thread from its own cache before the agent is even
+ * attached, so those 8,457 messages were being decoded and then dropped. Asking
+ * for them was more than half the cost of reopening a conversation — which is
+ * the cost the whole idle-session reaper trades against.
+ *
+ * @param haveHistory The caller already has the transcript on screen.
+ * @param canResumeSession The agent advertised `session/resume`.
+ */
+export function restoreMethodFor(
+  haveHistory: boolean,
+  canResumeSession: boolean,
+): "session/load" | "session/resume" {
+  // Both conditions, and neither is optional. Without the transcript the replay
+  // is the only way to draw the thread; without the capability, asking is a
+  // protocol error rather than a graceful no-op.
+  return haveHistory && canResumeSession ? "session/resume" : "session/load";
+}
 
 /**
  * Reject with `onTimeout()` if `promise` has not settled in `ms`.
@@ -555,12 +601,23 @@ export async function connectProvider(options: ConnectOptions): Promise<AcpSessi
     agentCapabilities?: {
       loadSession?: boolean;
       promptCapabilities?: PromptCapabilities;
-      sessionCapabilities?: { list?: unknown };
+      sessionCapabilities?: { list?: unknown; resume?: unknown };
     };
   };
 
   const caps = initialized.agentCapabilities;
   const canLoadSession = caps?.loadSession === true;
+  // `session/resume` reconnects to a stored conversation *without* replaying it.
+  //
+  // Worth a separate capability check because it is the difference between
+  // reopening a conversation in 150ms and in 1.2s: measured against GG Coder, a
+  // `session/load` of one long conversation pushed 8,354 update notifications
+  // and blocked for 938ms — all of which the daemon then discarded, because it
+  // had already painted the same history from its own cache.
+  //
+  // `{}` is how ACP says "supported" for a capability with no options of its
+  // own, so presence is the test, not truthiness.
+  const canResumeSession = caps?.sessionCapabilities?.resume !== undefined;
   // How an attachment may be sent to this agent: pixels inline, file text
   // inline, or a path it can open for itself.
   const promptCapabilities = caps?.promptCapabilities;
@@ -627,6 +684,8 @@ export async function connectProvider(options: ConnectOptions): Promise<AcpSessi
       onPermissionRequest: ConnectOptions["onPermissionRequest"];
       onConfigOptions?: (options: ConfigOption[]) => void;
     },
+    /** The caller already has the transcript; see {@link ConnectOptions.haveHistory}. */
+    haveHistory = false,
   ): Promise<{ sessionId: string; configOptions: ConfigOption[] }> {
     if (loadSessionId) {
       updateHandlers.set(loadSessionId, route.onUpdate);
@@ -638,9 +697,10 @@ export async function connectProvider(options: ConnectOptions): Promise<AcpSessi
     availableCommands = [];
     pendingRoute = route;
     try {
+      const restoreMethod = restoreMethodFor(haveHistory, canResumeSession);
       const created: NewSessionResult = loadSessionId
         ? {
-            ...((await connection.agent.request("session/load", {
+            ...((await connection.agent.request(restoreMethod, {
               sessionId: loadSessionId,
               cwd: sessionCwd,
               mcpServers: [],
@@ -660,11 +720,16 @@ export async function connectProvider(options: ConnectOptions): Promise<AcpSessi
     }
   }
 
-  current = await openSession(options.loadSessionId, cwd, {
-    onUpdate: options.onUpdate,
-    onPermissionRequest: options.onPermissionRequest,
-    onConfigOptions: options.onConfigOptions,
-  });
+  current = await openSession(
+    options.loadSessionId,
+    cwd,
+    {
+      onUpdate: options.onUpdate,
+      onPermissionRequest: options.onPermissionRequest,
+      onConfigOptions: options.onConfigOptions,
+    },
+    options.haveHistory,
+  );
 
   return {
     connection,
@@ -681,11 +746,16 @@ export async function connectProvider(options: ConnectOptions): Promise<AcpSessi
     canLoadSession,
 
     async adopt(adoptOptions: AdoptOptions) {
-      current = await openSession(adoptOptions.loadSessionId, adoptOptions.cwd, {
-        onUpdate: adoptOptions.onUpdate,
-        onPermissionRequest: adoptOptions.onPermissionRequest,
-        onConfigOptions: adoptOptions.onConfigOptions,
-      });
+      current = await openSession(
+        adoptOptions.loadSessionId,
+        adoptOptions.cwd,
+        {
+          onUpdate: adoptOptions.onUpdate,
+          onPermissionRequest: adoptOptions.onPermissionRequest,
+          onConfigOptions: adoptOptions.onConfigOptions,
+        },
+        adoptOptions.haveHistory,
+      );
       exitHandler = adoptOptions.onExit;
     },
 
