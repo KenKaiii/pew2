@@ -9,7 +9,7 @@
  * enumerate someone's disk.
  */
 import { expect, test } from "bun:test";
-import { mkdir, mkdtemp, realpath, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { discoverRepos, listDirectory, resolveBrowsePath } from "./workspaces.js";
@@ -71,12 +71,30 @@ test("the scan stops at a sensible depth and skips noise directories", async () 
 });
 
 test("suggestions are ordered by recency, because that is how projects are chosen", async () => {
-  const { home, roots } = await fixture();
-  // Touch one repo so it is unambiguously the newest.
-  await writeFile(join(home, "code/web/touched"), "x");
+  // Times are set explicitly rather than by writing a file and hoping. The
+  // fixture's repos are created microseconds apart, so where mtimes are stamped
+  // to the second — CI runners do this, and this machine does not — they all
+  // land on the same timestamp, the sort has nothing to order by, and the
+  // result falls back to discovery order. That is how this passed everywhere it
+  // was run by hand and failed on CI with `api` first.
+  const older = new Date("2026-01-01T00:00:00Z");
+  const newer = new Date("2026-06-01T00:00:00Z");
+  const names = (found: Awaited<ReturnType<typeof discoverRepos>>) =>
+    found.map((entry) => entry.path.split("/").pop());
 
-  const found = await discoverRepos({ roots });
-  expect(found[0]?.path).toBe(join(home, "code/web"));
+  // Asserted both ways round, because one order or the other must disagree with
+  // whatever order the scan happened to find them in. Checking a single
+  // arrangement cannot tell "sorted by recency" apart from "listed as found",
+  // which is exactly the hole that let the flake through.
+  const web = await fixture();
+  await utimes(join(web.home, "code/api"), older, older);
+  await utimes(join(web.home, "code/web"), newer, newer);
+  expect(names(await discoverRepos({ roots: web.roots }))).toEqual(["web", "api"]);
+
+  const api = await fixture();
+  await utimes(join(api.home, "code/api"), newer, newer);
+  await utimes(join(api.home, "code/web"), older, older);
+  expect(names(await discoverRepos({ roots: api.roots }))).toEqual(["api", "web"]);
 });
 
 test("browsing lists directories only, and marks the ones that are repositories", async () => {
