@@ -202,3 +202,23 @@ test("a receipt needs the clock that was started when the prompt was sent", () =
   // What the reset produced: an activity with nothing running and no clock.
   expect(summariseActivity(IDLE_ACTIVITY, 5_000)).toBeUndefined();
 });
+
+test("a replay frame does not stop a turn this device is timing", () => {
+  // Every session gets a `session.replay` the moment it goes live — verified
+  // against the real daemon, which sends it immediately after `session.started`
+  // even for a conversation created seconds ago to carry a first prompt.
+  //
+  // Clearing the clock on that frame is correct for a resumed transcript, whose
+  // tool calls finished long ago and must not be timed from this device. It was
+  // wrong for a turn already running here: the timer stopped before the agent
+  // spoke, so the turn ended with no start time and the first exchange of every
+  // conversation had no "Answered in 4s" while every later one did.
+  const live = beginActivity(1_000);
+  const kept = live.startedAt !== undefined ? live : IDLE_ACTIVITY;
+  expect(summariseActivity(kept, 5_000)).toMatchObject({ duration: "4s" });
+
+  // A resumed transcript has no local clock, so the same rule still idles it.
+  const resumed = IDLE_ACTIVITY;
+  const cleared = resumed.startedAt !== undefined ? resumed : IDLE_ACTIVITY;
+  expect(summariseActivity(cleared, 5_000)).toBeUndefined();
+});

@@ -699,11 +699,20 @@ export function useDaemon(
               loadingSession: false,
               // Replay is history, not an active agent turn. Claude may still be
               // attaching in the background, but prompts safely queue server-side.
-              busy: false,
+              //
+              // Except when a turn is already running here. Every session gets a
+              // replay the moment it goes live — empty, for one just created to
+              // carry a first prompt — and clearing the clock on that frame
+              // stopped the timer before the agent had said anything. The turn
+              // then ended with no start time to measure, so the first exchange
+              // of every conversation finished without its "Answered in 4s"
+              // while every later one had it.
+              busy: prev.busy ? true : false,
               // Replayed tool calls finished long ago — the same reason a replay
               // batch never raises a permission. Timing them from this device's
-              // clock would report a minutes-old turn as taking an instant.
-              activity: IDLE_ACTIVITY,
+              // clock would report a minutes-old turn as taking an instant. A
+              // clock this device started is a different thing and is kept.
+              activity: prev.activity.startedAt !== undefined ? prev.activity : IDLE_ACTIVITY,
               receipt: undefined,
             };
           });
