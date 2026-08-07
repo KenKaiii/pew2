@@ -11,7 +11,7 @@ installs them separately, and what an app and a daemon must agree on is
 
 Dates are the day the tag was cut.
 
-## Unreleased
+## 0.9.11 — 2026-08-07
 
 ### Security
 
