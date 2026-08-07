@@ -162,15 +162,22 @@ export default tseslint.config(
 
       // Resetting state when the thing being displayed changes — clearing a
       // failed image when the source changes, dropping a sheet's step when it
-      // reopens — is exactly this pattern, and it is correct. Several of these
-      // sites are deliberate fixes for real bugs (Sheet's mount gate exists to
-      // stop an invisible full-screen scrim eating touches). A perf heuristic
-      // should not argue those back out.
+      // reopens so it never reopens onto its own second page — is exactly this
+      // pattern, and it is correct. Several of these sites are deliberate fixes
+      // for real bugs. A perf heuristic should not argue those back out.
       "react-hooks/set-state-in-effect": "off",
 
       // Animated values and layout measurements are held in refs and touched
       // during render on purpose throughout this app; 148 hits, no bugs.
       "react-hooks/refs": "off",
+
+      // Reanimated's shared values are mutable by design — assigning to
+      // `.value` from an effect, a layout callback, or a gesture handler *is*
+      // the API, and it is precisely how animation is kept off React's clock.
+      // The rule reads each of those as mutating something React owns, which
+      // it is not: no assignment here re-renders anything, and that is the
+      // whole reason the sheets were moved onto them.
+      "react-hooks/immutability": "off",
     },
   },
 

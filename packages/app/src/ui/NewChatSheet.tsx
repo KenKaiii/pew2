@@ -27,8 +27,14 @@
  * inert. A cut between two cards of different heights reads as the sheet
  * flinching; this reads as one object with somewhere to go.
  */
-import { memo, useEffect, useRef, useState } from "react";
-import { Animated, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { memo, useEffect, useState } from "react";
+import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import Animated, {
+  interpolate,
+  useAnimatedStyle,
+  useSharedValue,
+  withSpring,
+} from "react-native-reanimated";
 import { Ionicons } from "@expo/vector-icons";
 import { theme } from "../theme";
 import { touchSlop } from "./controls";
@@ -41,18 +47,12 @@ import type { WorkspaceBrowse } from "../useDaemon";
 /**
  * The push, tuned to sit just inside `Sheet`'s own arrival.
  *
- * Stiffer and lighter than the sheet's spring: this is a pane moving *within* a
- * card already on screen, and matching the sheet's travel would read as the
- * whole thing being re-presented. Critically damped, because a horizontal
+ * Quicker than the sheet's travel: this is a pane moving *within* a card already
+ * on screen, and matching the arrival would read as the whole thing being
+ * re-presented. Slightly tighter damping than the sheet too — a horizontal
  * overshoot on a list of projects looks like a bounce rather than a push.
  */
-const STEP_SPRING = {
-  damping: 30,
-  stiffness: 320,
-  mass: 0.85,
-  restDisplacementThreshold: 0.001,
-  restSpeedThreshold: 0.01,
-} as const;
+const STEP_SPRING = { duration: 340, dampingRatio: 0.92 } as const;
 
 /**
  * Which pane is on screen. Ordered, because moving between them is a push.
@@ -102,39 +102,31 @@ function NewChatSheetView({
   // are no projects at all. That is the cold start this exists for.
   const canBrowse = onBrowse !== undefined;
 
-  // Two values for one movement, because they cannot share a driver: transforms
-  // and opacity run on the native thread, `height` cannot. Started together and
-  // with the same spring, so they are one gesture in everything but plumbing.
-  const slide = useRef(new Animated.Value(0)).current;
-  const resize = useRef(new Animated.Value(0)).current;
+  // One value for one movement. This used to be two — a native-driven spring
+  // for the slide and a JS-driven one for the height, because legacy `Animated`
+  // cannot put `height` on the native thread. They were started together and
+  // still came apart: the JS half ran on React's clock, and React was busy
+  // because the height spring's own `onLayout` was firing a `setState` on every
+  // frame of it. That feedback loop is what made the step change stutter.
+  //
+  // On Reanimated `height` animates on the UI thread like anything else, so the
+  // whole movement is one shared value and the re-render count for a step
+  // change is one.
+  const step$ = useSharedValue(STEP_CHOICES);
 
   // Measured, never assumed: the first step is a couple of fixed rows but the
   // others are lists whose height depends on the machine, and a guess would make
   // the card settle at the wrong size and then correct itself.
-  const [heights, setHeights] = useState<[number, number]>([0, 0]);
-  const [width, setWidth] = useState(0);
+  //
+  // Shared values rather than state, so a pane reporting its size does not
+  // re-render the sheet — which is what turned every resize into a render storm.
+  const firstHeight = useSharedValue(0);
+  const secondHeight = useSharedValue(0);
+  const width = useSharedValue(0);
 
   useEffect(() => {
-    if (reduceMotion) {
-      slide.setValue(step);
-      resize.setValue(step);
-      return;
-    }
-    const animation = Animated.parallel([
-      Animated.spring(slide, {
-        toValue: step,
-        ...STEP_SPRING,
-        useNativeDriver: true,
-      }),
-      Animated.spring(resize, {
-        toValue: step,
-        ...STEP_SPRING,
-        useNativeDriver: false,
-      }),
-    ]);
-    animation.start();
-    return () => animation.stop();
-  }, [step, reduceMotion, slide, resize]);
+    step$.value = reduceMotion ? step : withSpring(step, STEP_SPRING);
+  }, [step, reduceMotion, step$]);
 
   // Always opens on the first step. A sheet that reopened onto the project list
   // because that is where it was last closed would hide its own primary action.
@@ -147,9 +139,8 @@ function NewChatSheetView({
   useEffect(() => {
     if (!visible) return;
     setStep(STEP_CHOICES);
-    slide.setValue(STEP_CHOICES);
-    resize.setValue(STEP_CHOICES);
-  }, [visible, slide, resize]);
+    step$.value = STEP_CHOICES;
+  }, [visible, step$]);
 
   // Only as tall as it needs to be, up to five rows — the same rule as the
   // command sheet, so the two read as one object at different lengths.
@@ -168,35 +159,27 @@ function NewChatSheetView({
 
   // Before a step has been measured, fall back to the other one rather than to
   // zero: the card must never animate through a collapsed state on first open.
-  const [firstHeight, secondHeight] = heights;
-  const cardHeight = resize.interpolate({
-    inputRange: [STEP_CHOICES, STEP_LIST],
-    outputRange: [firstHeight || secondHeight || 1, secondHeight || firstHeight || 1],
+  const cardStyle = useAnimatedStyle(() => {
+    const first = firstHeight.value || secondHeight.value || 1;
+    const second = secondHeight.value || firstHeight.value || 1;
+    return { height: interpolate(step$.value, [STEP_CHOICES, STEP_LIST], [first, second]) };
   });
 
   // Full-width travel, so each pane leaves and arrives at the card's own edge.
-  // Falls back to zero until measured, which reads as a cross-fade for the one
-  // frame before layout lands.
-  const outgoing = slide.interpolate({
-    inputRange: [0, 1],
-    outputRange: [0, -width],
-  });
-  const incoming = slide.interpolate({
-    inputRange: [0, 1],
-    outputRange: [width, 0],
-  });
-  // Faster than the travel: a pane at the halfway point is already mostly gone,
-  // which is what stops the two lists from reading as one doubled list.
-  const outgoingFade = slide.interpolate({
-    inputRange: [0, 0.6],
-    outputRange: [1, 0],
-    extrapolate: "clamp",
-  });
-  const incomingFade = slide.interpolate({
-    inputRange: [0.4, 1],
-    outputRange: [0, 1],
-    extrapolate: "clamp",
-  });
+  // Zero until the card has been measured, which reads as a cross-fade for the
+  // one frame before layout lands rather than as a pane flying in from nowhere.
+  //
+  // The fades run faster than the travel: a pane at the halfway point is already
+  // mostly gone, which is what stops the two lists from reading as one doubled
+  // list mid-push.
+  const outgoingStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(step$.value, [0, 0.6], [1, 0], "clamp"),
+    transform: [{ translateX: interpolate(step$.value, [0, 1], [0, -width.value]) }],
+  }));
+  const incomingStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(step$.value, [0.4, 1], [0, 1], "clamp"),
+    transform: [{ translateX: interpolate(step$.value, [0, 1], [width.value, 0]) }],
+  }));
 
   const goTo = (next: number) => {
     haptics.tap();
@@ -238,19 +221,20 @@ function NewChatSheetView({
       dismissLabel="Close new chat"
     >
       <Animated.View
-        style={[styles.card, { height: cardHeight }]}
-        onLayout={(event) => setWidth(event.nativeEvent.layout.width)}
+        style={[styles.card, cardStyle]}
+        onLayout={(event) => {
+          width.value = event.nativeEvent.layout.width;
+        }}
       >
         {/* Step one. Absolute so every pane occupies the same box and the card's
             animated height is the only thing deciding its size. */}
         <Animated.View
-          style={[styles.pane, { opacity: outgoingFade, transform: [{ translateX: outgoing }] }]}
+          style={[styles.pane, outgoingStyle]}
           // Inert once pushed past, or the invisible pane keeps taking the taps
           // meant for the list on top of it.
           pointerEvents={step === STEP_CHOICES ? "auto" : "none"}
           onLayout={(event) => {
-            const height = event.nativeEvent.layout.height;
-            setHeights((prev) => (prev[0] === height ? prev : [height, prev[1]]));
+            firstHeight.value = event.nativeEvent.layout.height;
           }}
         >
           {/* Absent when the agent has never run: there is no "here" to
@@ -298,11 +282,10 @@ function NewChatSheetView({
             the travel is an empty pane. */}
         {(canPick || canBrowse) && (
           <Animated.View
-            style={[styles.pane, { opacity: incomingFade, transform: [{ translateX: incoming }] }]}
+            style={[styles.pane, incomingStyle]}
             pointerEvents={step === STEP_LIST ? "auto" : "none"}
             onLayout={(event) => {
-              const height = event.nativeEvent.layout.height;
-              setHeights((prev) => (prev[1] === height ? prev : [prev[0], height]));
+              secondHeight.value = event.nativeEvent.layout.height;
             }}
           >
             {!browsing && (

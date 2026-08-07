@@ -13,20 +13,23 @@ import {
   Alert,
   Animated,
   AppState,
-  Easing,
   Keyboard,
-  PanResponder,
   Platform,
   Pressable,
   StyleSheet,
   Text,
   View,
 } from "react-native";
+import { Gesture, GestureDetector, GestureHandlerRootView } from "react-native-gesture-handler";
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { KeyboardProvider, useKeyboardHandler } from "react-native-keyboard-controller";
 import Reanimated, {
+  cancelAnimation,
+  runOnJS,
   useAnimatedStyle,
   useSharedValue,
+  withSpring,
+  withTiming,
 } from "react-native-reanimated";
 import { StatusBar } from "expo-status-bar";
 import { Ionicons } from "@expo/vector-icons";
@@ -124,14 +127,21 @@ export default function App() {
     // app becomes a blank rectangle — no message, and nothing a tester on a
     // TestFlight build can put in a report.
     <ErrorBoundary>
-      {/* Every keyboard-driven element in this app moves on the keyboard's own
-          frame-by-frame position rather than a JS animation started alongside
-          it. Coordinating two animation systems made the thread land twice. */}
-      <KeyboardProvider>
-        <SafeAreaProvider>
-          <Root />
-        </SafeAreaProvider>
-      </KeyboardProvider>
+      {/* Required for any gesture in the app to be recognised at all: it is the
+          native touch target every GestureDetector attaches under, and without
+          it a sheet's drag-to-dismiss silently does nothing. Inside the
+          boundary, like every other provider, so a throw from it still reaches
+          a screen with a message on it. */}
+      <GestureHandlerRootView style={{ flex: 1 }}>
+        {/* Every keyboard-driven element in this app moves on the keyboard's own
+            frame-by-frame position rather than a JS animation started alongside
+            it. Coordinating two animation systems made the thread land twice. */}
+        <KeyboardProvider>
+          <SafeAreaProvider>
+            <Root />
+          </SafeAreaProvider>
+        </KeyboardProvider>
+      </GestureHandlerRootView>
     </ErrorBoundary>
   );
 }
@@ -213,6 +223,24 @@ const ORB_REST_SIZE = 96;
 
 /** What it settles back to once the keyboard is up, as a fraction of that. */
 const ORB_SETTLED_SCALE = 56 / ORB_REST_SIZE;
+
+/**
+ * How the drawer finishes a movement it was handed.
+ *
+ * Barely underdamped, unlike the sheets: the drawer stops against the screen
+ * edge with a full conversation riding on it, and visible overshoot there reads
+ * as the whole app sloshing rather than as a panel arriving.
+ */
+const DRAWER_SETTLE = { duration: 340, dampingRatio: 0.95 } as const;
+
+/**
+ * A flick worth committing to, in points per second.
+ *
+ * The same threshold the drawer has always used, restated in the units gesture
+ * handler reports — it gives velocity per second where `PanResponder` gave it
+ * per millisecond, so the old `0.4` is this.
+ */
+const FLICK = 400;
 
 /**
  * Raises the thread and the composer by exactly the visible keyboard's height,
@@ -384,7 +412,26 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
     mode: theme.gutter,
   });
   const reduceMotion = useReducedMotion();
-  const drawer = useRef(new Animated.Value(0)).current;
+  // How far the drawer is uncovered, 0 to 1.
+  //
+  // A shared value rather than an `Animated.Value`, and that is not a detail
+  // here: this app streams an agent's output over a websocket while you use it,
+  // so the JS thread is the one thing guaranteed to be busy. The drawer used to
+  // be dragged from JS — a `PanResponder` calling `setValue` per touch event —
+  // so it dropped frames exactly while a turn was arriving, which is exactly
+  // when you reach for it. Nothing below re-renders as it moves.
+  const drawer$ = useSharedValue(0);
+  // How fast the finger was travelling when it let go, in drawer-widths per
+  // second, handed to the spring that finishes the movement. Zero for every
+  // other way in: a tap on the hamburger has no velocity to inherit.
+  //
+  // A plain ref rather than a shared value, because this is the one number that
+  // genuinely has to cross threads. A shared value written from the gesture and
+  // read back on the JS side syncs asynchronously — the settle would sometimes
+  // read the previous gesture's velocity, or zero. Set through the same
+  // `runOnJS` hop that dispatches the release, so it is always ordered before
+  // the read.
+  const fling = useRef(0);
 
   // The agent on screen. Before an explicit choice this is the one used last on
   // this device, resolved by the hook, so re-opening the app lands where the
@@ -537,15 +584,39 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
   // Push, not overlay: the conversation slides right to uncover the drawer, so
   // both surfaces stay part of one layout instead of becoming a modal layer.
   // Shared with the edge gesture, which hands the drawer over mid-drag.
+  //
+  // A spring rather than the fixed 280ms curve this used to be, for the same
+  // reason the sheets are springs: the drawer is most often released from a
+  // finger, and a fixed curve throws away how fast that finger was moving. A
+  // flick and a slow push now finish at the speeds they were given.
   const settleDrawer = useCallback(
-    (open: boolean) =>
-      Animated.timing(drawer, {
-        toValue: open ? 1 : 0,
-        duration: reduceMotion ? 0 : 280,
-        easing: Easing.out(Easing.cubic),
-        useNativeDriver: true,
-      }).start(),
-    [drawer, reduceMotion],
+    (open: boolean) => {
+      // Consumed, not just read: every other route into this — the hamburger, a
+      // session picked from the drawer, a cancelled gesture — must start from
+      // rest rather than inherit the last flick's speed.
+      const velocity = fling.current;
+      fling.current = 0;
+      drawer$.value = reduceMotion
+        ? withTiming(open ? 1 : 0, { duration: 0 })
+        : withSpring(open ? 1 : 0, { ...DRAWER_SETTLE, velocity });
+    },
+    [drawer$, reduceMotion],
+  );
+
+  /**
+   * The finger let go. Runs on the JS thread, in one hop, so the velocity is
+   * recorded before anything can read it.
+   */
+  const releaseDrawer = useCallback(
+    (open: boolean, changed: boolean, velocity: number) => {
+      fling.current = velocity;
+      haptics.tap();
+      // A state change re-runs the effect above, which settles. When the drawer
+      // ends up where it started there is no change to react to, so settle here.
+      if (changed) setMenuOpen(open);
+      else settleDrawer(open);
+    },
+    [settleDrawer],
   );
 
   useEffect(() => {
@@ -555,15 +626,13 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
     // no claim on the screen — unlike the model pill, which keeps it on purpose.
     if (menuOpen) Keyboard.dismiss();
     settleDrawer(menuOpen);
-    return () => drawer.stopAnimation();
-  }, [menuOpen, settleDrawer, drawer]);
+  }, [menuOpen, settleDrawer]);
 
   // Translate only. The conversation keeps its exact size as it moves, so no
   // text reflows or resamples mid-animation.
-  const slideX = drawer.interpolate({
-    inputRange: [0, 1],
-    outputRange: [0, DRAWER_WIDTH],
-  });
+  const paneSlide = useAnimatedStyle(() => ({
+    transform: [{ translateX: drawer$.value * DRAWER_WIDTH }],
+  }));
 
   useEffect(() => {
     const animation = Animated.timing(jumpOpacity, {
@@ -579,56 +648,67 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
   // edge when closed, and pushed back by the uncovered pane when open. It is
   // being moved by the gesture rather than triggered by it.
   //
-  // Read through a ref because PanResponder is built once and would otherwise
-  // capture the state from that first render forever.
-  const menuOpenRef = useRef(menuOpen);
-  menuOpenRef.current = menuOpen;
-  const edgeSwipe = useRef(
-    PanResponder.create({
-      // Claim only clearly horizontal movement, and only the direction that has
-      // somewhere to go, so a scroll is never stolen.
-      onMoveShouldSetPanResponder: (_event, gesture) => {
-        const enough = Math.abs(gesture.dx) > theme.space(2);
-        const horizontal = Math.abs(gesture.dx) > Math.abs(gesture.dy) * 2;
-        const claim = enough && horizontal && gesture.dx > 0 !== menuOpenRef.current;
-        // Leaving the conversation, even a little: the drawer is a different
-        // place, so the keyboard goes the moment the drag is claimed rather
-        // than once it commits. Switching a model does not do this — that is
-        // still the same conversation.
-        //
-        // Claim time, not `onPanResponderGrant`: the strip only has to win the
-        // responder for the drawer to start moving, and a grant that is later
-        // terminated by another responder would never have dismissed at all.
-        if (claim) Keyboard.dismiss();
-        return claim;
-      },
-      onPanResponderGrant: () => {
-        // The effect below animates this same value on `menuOpen`. Stopping it
-        // here means the finger takes over from wherever it currently rests.
-        drawer.stopAnimation();
-      },
-      onPanResponderMove: (_event, gesture) => {
-        const base = menuOpenRef.current ? 1 : 0;
-        drawer.setValue(
-          Math.min(1, Math.max(0, base + gesture.dx / DRAWER_WIDTH)),
-        );
-      },
-      onPanResponderRelease: (_event, gesture) => {
-        // Signed against the one direction that has somewhere to go, so a drag
-        // that is pulled back or flicked in reverse cancels rather than
-        // committing on distance alone.
-        const toward = menuOpenRef.current ? -gesture.dx : gesture.dx;
-        const thrown = menuOpenRef.current ? -gesture.vx : gesture.vx;
-        const commit = toward > DRAWER_WIDTH / 2 || thrown > 0.4;
-        const open = commit ? !menuOpenRef.current : menuOpenRef.current;
-        haptics.tap();
-        // Unchanged state would not re-run the effect, so settle here too.
-        if (open === menuOpenRef.current) settleDrawer(open);
-        else setMenuOpen(open);
-      },
-      onPanResponderTerminate: () => settleDrawer(menuOpenRef.current),
-    }),
-  ).current;
+  // Rebuilt when `menuOpen` changes rather than read through a ref. A worklet
+  // closes over its values when it is built, so the ref that kept the old
+  // `PanResponder` honest is not just unnecessary here — reading `.current`
+  // from the UI thread would not work at all.
+  const edgeSwipe = useMemo(() => {
+    // Far enough to be deliberate, short enough not to feel like a tug of war.
+    const reach = theme.space(2);
+    return (
+      Gesture.Pan()
+        // The claim rules, now enforced natively before a single frame reaches
+        // JS: only the direction that has somewhere to go, and abandoned the
+        // moment the finger commits to the vertical. The old ratio test did the
+        // same job from JS, one event late — which is how a fast scroll could
+        // still start dragging the drawer before the test caught up.
+        .activeOffsetX(menuOpen ? -reach : reach)
+        .failOffsetY([-reach, reach])
+        .onStart(() => {
+          // Leaving the conversation, even a little: the drawer is a different
+          // place, so the keyboard goes the moment the drag is claimed rather
+          // than once it commits. Switching a model does not do this — that is
+          // still the same conversation.
+          runOnJS(Keyboard.dismiss)();
+          // The effect above animates this same value on `menuOpen`. Cancelling
+          // here means the finger takes over from where the drawer currently
+          // rests rather than from where it was heading.
+          cancelAnimation(drawer$);
+        })
+        .onUpdate((event) => {
+          const base = menuOpen ? 1 : 0;
+          drawer$.value = Math.min(
+            1,
+            Math.max(0, base + event.translationX / DRAWER_WIDTH),
+          );
+        })
+        .onEnd((event) => {
+          // Signed against the one direction that has somewhere to go, so a drag
+          // that is pulled back or flicked in reverse cancels rather than
+          // committing on distance alone.
+          const toward = menuOpen ? -event.translationX : event.translationX;
+          const thrown = menuOpen ? -event.velocityX : event.velocityX;
+          const commit = toward > DRAWER_WIDTH / 2 || thrown > FLICK;
+          const open = commit ? !menuOpen : menuOpen;
+          runOnJS(releaseDrawer)(
+            open,
+            open !== menuOpen,
+            // Normalised to the same 0..1 scale the drawer moves on, or the
+            // spring would be handed a number in points and leave immediately.
+            event.velocityX / DRAWER_WIDTH,
+          );
+        })
+        .onFinalize((_event, success) => {
+          if (success) return;
+          // Cancelled rather than released: a system gesture took the touch, or
+          // the app lost it. Put the drawer back where it was instead of leaving
+          // it stranded part way across. Skipped when it never actually moved,
+          // which is every drag that failed the offset tests.
+          if (drawer$.value === (menuOpen ? 1 : 0)) return;
+          runOnJS(settleDrawer)(menuOpen);
+        })
+    );
+  }, [menuOpen, drawer$, releaseDrawer, settleDrawer]);
 
   // Belt and braces for every other way in: the hamburger, a swipe that the
   // strip lost, a session opened from the drawer. The drawer is never the place
@@ -887,14 +967,13 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
       />
 
       {/* The conversation pane. Slides right to reveal the drawer beneath. */}
-      <Animated.View style={[styles.pane, { transform: [{ translateX: slideX }] }]}>
+      <Reanimated.View style={[styles.pane, paneSlide]}>
       {/* Starts below the nav: this strip is the hit target for anything it
           covers, and over the nav it would swallow taps on the menu button. */}
       {!menuOpen && (
-        <View
-          style={[styles.edgeSwipe, { top: insets.top + navHeight }]}
-          {...edgeSwipe.panHandlers}
-        />
+        <GestureDetector gesture={edgeSwipe}>
+          <View style={[styles.edgeSwipe, { top: insets.top + navHeight }]} />
+        </GestureDetector>
       )}
       {/* Full-bleed on both edges: the thread runs behind the status bar and
           down to the home indicator, and a ProgressiveBlur covers each of those
@@ -1200,24 +1279,26 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
           anywhere on it closes, which matches the push metaphor better than a
           separate dimming layer would. */}
       {menuOpen && (
-        // The gesture lives on this wrapper, not the Pressable: Pressable spreads
-        // its own responder handlers last and would overwrite them. As the parent
-        // it can still claim the touch from the child once a drag begins.
-        <View style={StyleSheet.absoluteFill} {...edgeSwipe.panHandlers}>
-          <Pressable
-            style={StyleSheet.absoluteFill}
-            accessibilityRole="button"
-            accessibilityLabel="Close menu"
-            onPress={() => {
-              haptics.tap();
-              setMenuOpen(false);
-            }}
-          />
-        </View>
+        // The gesture lives on this wrapper rather than the Pressable, so a drag
+        // and a tap stay two separate things: the detector claims the touch once
+        // it moves horizontally, and the Pressable keeps everything else.
+        <GestureDetector gesture={edgeSwipe}>
+          <View style={StyleSheet.absoluteFill}>
+            <Pressable
+              style={StyleSheet.absoluteFill}
+              accessibilityRole="button"
+              accessibilityLabel="Close menu"
+              onPress={() => {
+                haptics.tap();
+                setMenuOpen(false);
+              }}
+            />
+          </View>
+        </GestureDetector>
       )}
 
       </SafeAreaView>
-      </Animated.View>
+      </Reanimated.View>
     </View>
     </ImageResolverProvider>
   );
