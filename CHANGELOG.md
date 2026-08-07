@@ -66,9 +66,19 @@ Dates are the day the tag was cut.
 - The app caps a conversation's turns in memory, matching the daemon's transcript
   cache. It was the only unbounded store in the system, on the device with the
   least memory in it.
+- Sheets open the moment you tap, instead of a beat later. Every one of them
+  waited to be measured before it would move, which cost three passes over the
+  whole screen before the first frame; the new chat sheet also stuttered on its
+  way to the project list, because resizing the card was making the screen
+  redraw on every frame of its own animation. The menu is the same story: it was
+  dragged from the same place the conversation arrives, so it stalled while an
+  agent was replying, which is exactly when you reach for it.
 
 ### Added
 
+- Sheets and the menu can be thrown. Drag a sheet down by its top edge to send
+  it away, or the menu across from either side; let go part way and it goes back
+  where it came from, at the speed you let go at.
 - Crash reporting, on-device only: a fatal error outside a render — the kind that
   ends the process with no error boundary to catch it — is recorded on the way
   down and shown on the next launch, with nothing sent anywhere.
