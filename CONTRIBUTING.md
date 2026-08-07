@@ -38,9 +38,26 @@ tested is running the daemon itself on Node.
 - Security fixes come with an *adversarial* test: the attack, executed, refused.
   `packages/protocol/src/channel.test.ts` is the shape to copy.
 
-Some suites spawn a real agent process (the ACP pipeline, the workspace tests). A
-sandbox that blocks `exec` will fail those and only those — worth checking before
-concluding the tree is broken.
+Some suites spawn a real agent process (the ACP pipeline, the workspace tests),
+and those are sensitive to where you run them from. If they fail in a fraction of
+a second while everything else passes, the agent is dying at spawn rather than
+failing a test — try `cd /tmp && bun test <repo>/packages` before concluding the
+tree is broken. CI runs them from a clean checkout and is the authority.
+
+## When CI does not run
+
+A push that produces no run at all is not the same as a run that fails, and it is
+not always your branch: a GitHub Actions incident can drop push and pull-request
+events entirely, and those events are *not* replayed once it recovers. If the
+commit you pushed has no run against it, check
+[githubstatus.com](https://www.githubstatus.com), then start one by hand:
+
+```bash
+gh workflow run CI --ref main
+```
+
+That is what `workflow_dispatch` on the CI workflow is for. Do not assume green
+from a silent Actions tab — no run is no evidence.
 
 ## Comments
 
