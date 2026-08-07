@@ -64,7 +64,7 @@
     },
     "packages/daemon": {
       "name": "@pew2/daemon",
-      "version": "0.9.10",
+      "version": "0.9.11",
       "bin": {
         "pew2": "./src/cli/index.ts",
       },
