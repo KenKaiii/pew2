@@ -46,6 +46,13 @@
     "sharp": "^0.35.2",
     "typescript": "~5.9.2"
   },
+  "expo": {
+    "install": {
+      "exclude": [
+        "react-native-keyboard-controller"
+      ]
+    }
+  },
   "scripts": {
     "start": "expo start",
     "android": "expo run:android",
