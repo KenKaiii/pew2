@@ -25,6 +25,7 @@ import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from "react-native-
 import { KeyboardProvider, useKeyboardHandler } from "react-native-keyboard-controller";
 import Reanimated, {
   cancelAnimation,
+  Easing,
   runOnJS,
   useAnimatedStyle,
   useSharedValue,
@@ -243,21 +244,30 @@ const DRAWER_SETTLE = { duration: 340, dampingRatio: 0.95 } as const;
 const FLICK = 400;
 
 /**
+ * The curve iOS moves its keyboard along.
+ *
+ * UIKit animates the keyboard with a private curve — `UIViewAnimationCurve(7)`,
+ * which has no public constant and is not any of the four documented ones. This
+ * bezier is the long-standing community match for it, and it only matters when
+ * the pane is animating itself because the platform has not reported the
+ * keyboard's real position; when frames do arrive they overwrite this anyway.
+ */
+const KEYBOARD_CURVE = Easing.bezier(0.17, 0.59, 0.4, 0.77);
+
+/**
  * Raises the thread and the composer by exactly the visible keyboard's height,
  * and returns a second style for content that is centred rather than
  * bottom-anchored.
  *
- * Written from a worklet on every frame of the keyboard's own animation, so the
- * two move in perfect step. No JS re-render can land halfway through and move
- * things a second time.
+ * Written from a worklet on the keyboard's own animation, so the two move in
+ * perfect step. No JS re-render can land halfway through and move things a
+ * second time.
  *
  * A transform, deliberately, not a height. The thread is a recycling list, and
  * `RecyclerView` answers any container resize with a full layout pass in JS — so
  * shortening the pane per frame queued sixty of them across the keyboard's
  * animation, which is the stutter. Translating moves the same pixels on the UI
- * thread and lays out nothing. This is the shape `KeyboardChatScrollView` uses;
- * that component would do it for us, but it landed in
- * react-native-keyboard-controller 1.21 and this app is on 1.18.
+ * thread and lays out nothing.
  *
  * Cross-platform by construction rather than by branch: `useKeyboardHandler`
  * calls the library's `useResizeMode`, which sets Android to `adjustResize`, and
@@ -278,14 +288,56 @@ function useKeyboardLift(bottomInset: number) {
 
   useKeyboardHandler(
     {
+      // Start the movement on the platform's own terms before a single frame
+      // has been reported.
+      //
+      // `onMove` is the good path and stays the good path — it is the keyboard's
+      // real position, sampled per frame. But it is *not guaranteed to arrive*.
+      // iOS 26 stopped delivering those frames to release builds: the library
+      // finds the keyboard by walking the window hierarchy for private UIKit
+      // class names (`UIInputSetHostView` and friends) and driving a
+      // `CADisplayLink` off the view it finds, and when that lookup comes back
+      // empty there is no per-frame anything. `onStart`/`onEnd` still fire,
+      // because those are ordinary keyboard notifications. So the pane sat
+      // still for the whole animation and then snapped — in TestFlight only,
+      // while every development build looked perfect, which is exactly the
+      // shape of the bug that was so maddening to chase.
+      //
+      // Animating here removes the dependency. `event.duration` is what the
+      // system says the keyboard will take, so the pane covers the same
+      // distance in the same time whether or not a single frame is ever
+      // reported. When they are reported, the assignment in `onMove` simply
+      // takes over — assigning to a shared value cancels whatever animation is
+      // running on it — and the exact path wins. Degrading, not branching:
+      // there is no version check to go stale.
+      onStart: (event) => {
+        "worklet";
+        const target = Math.max(0, event.height - bottomInset * event.progress);
+        if (event.duration <= 0) {
+          height.value = target;
+          progress.value = event.progress;
+          return;
+        }
+        const timing = { duration: event.duration, easing: KEYBOARD_CURVE };
+        height.value = withTiming(target, timing);
+        progress.value = withTiming(event.progress, timing);
+      },
       onMove: (event) => {
         "worklet";
         height.value = Math.max(0, event.height - bottomInset * event.progress);
         progress.value = event.progress;
       },
+      // The keyboard has stopped, so this is the authoritative position — but
+      // only assign it if it is not already there. On the fallback path the
+      // timing started in `onStart` is still running toward this exact value,
+      // and overwriting it lands the last few points as a cut instead of the
+      // end of the movement.
       onEnd: (event) => {
         "worklet";
-        height.value = Math.max(0, event.height - bottomInset * event.progress);
+        const target = Math.max(0, event.height - bottomInset * event.progress);
+        if (Math.abs(height.value - target) > 0.5) {
+          height.value = target;
+        }
         progress.value = event.progress;
       },
     },
