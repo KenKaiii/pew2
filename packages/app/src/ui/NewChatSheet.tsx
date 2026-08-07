@@ -157,12 +157,27 @@ function NewChatSheetView({
   const browseHeight = Math.max(1, Math.min(browseRows, SHEET_VISIBLE_ROWS)) * SHEET_ROW_HEIGHT;
   const browseScrolls = browseRows > SHEET_VISIBLE_ROWS;
 
-  // Before a step has been measured, fall back to the other one rather than to
-  // zero: the card must never animate through a collapsed state on first open.
+  // Explicit only once there is something real to be explicit about.
+  //
+  // Until the first pane has reported its size the card takes its height from
+  // that pane directly, which is why the pane is in normal flow rather than
+  // absolutely positioned like the one behind it. The alternative — falling back
+  // to a placeholder height — is what made the first open of this sheet wrong:
+  // the card was one point tall for the frame in which the sheet measured itself
+  // to decide how far it had to travel, so it stopped short of the top and only
+  // looked right on the second open, once these measurements were left over from
+  // the first.
   const cardStyle = useAnimatedStyle(() => {
-    const first = firstHeight.value || secondHeight.value || 1;
-    const second = secondHeight.value || firstHeight.value || 1;
-    return { height: interpolate(step$.value, [STEP_CHOICES, STEP_LIST], [first, second]) };
+    const first = firstHeight.value;
+    const second = secondHeight.value;
+    if (first === 0 && second === 0) return { height: undefined };
+    return {
+      height: interpolate(
+        step$.value,
+        [STEP_CHOICES, STEP_LIST],
+        [first || second, second || first],
+      ),
+    };
   });
 
   // Full-width travel, so each pane leaves and arrives at the card's own edge.
@@ -229,7 +244,7 @@ function NewChatSheetView({
         {/* Step one. Absolute so every pane occupies the same box and the card's
             animated height is the only thing deciding its size. */}
         <Animated.View
-          style={[styles.pane, outgoingStyle]}
+          style={[styles.firstPane, outgoingStyle]}
           // Inert once pushed past, or the invisible pane keeps taking the taps
           // meant for the list on top of it.
           pointerEvents={step === STEP_CHOICES ? "auto" : "none"}
@@ -446,8 +461,12 @@ function Row({
 
 const styles = StyleSheet.create({
   card: sheetCardStyle,
-  // Both panes share one box. `top: 0` with left/right pinned lets each measure
-  // its own natural height while the card animates between the two.
+  // The first pane stays in normal flow so the card has a natural height on the
+  // frame it first appears, before any measurement has come back. Everything
+  // after it is measured and driven by the card's animated height instead.
+  firstPane: { width: "100%" },
+  // Stacked over the first rather than after it: the two occupy one box, each
+  // measuring its own natural height while the card animates between them.
   pane: { position: "absolute", left: 0, right: 0, top: 0 },
   row: {
     flex: 1,

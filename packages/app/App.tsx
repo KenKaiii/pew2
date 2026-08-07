@@ -652,7 +652,7 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
   // closes over its values when it is built, so the ref that kept the old
   // `PanResponder` honest is not just unnecessary here — reading `.current`
   // from the UI thread would not work at all.
-  const edgeSwipe = useMemo(() => {
+  const buildEdgeSwipe = useCallback(() => {
     // Far enough to be deliberate, short enough not to feel like a tug of war.
     const reach = theme.space(2);
     return (
@@ -709,6 +709,14 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
         })
     );
   }, [menuOpen, drawer$, releaseDrawer, settleDrawer]);
+
+  // Two instances of the same gesture rather than one shared between the edge
+  // strip and the overlay. A GestureDetector stamps its own handler tag onto the
+  // object it is given, so handing the same one to two detectors leaves whichever
+  // mounted last owning the tag — and since these two swap places every time the
+  // drawer opens or closes, the loser is the one still on screen.
+  const edgeSwipeClosed = useMemo(() => buildEdgeSwipe(), [buildEdgeSwipe]);
+  const edgeSwipeOpen = useMemo(() => buildEdgeSwipe(), [buildEdgeSwipe]);
 
   // Belt and braces for every other way in: the hamburger, a swipe that the
   // strip lost, a session opened from the drawer. The drawer is never the place
@@ -971,7 +979,7 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
       {/* Starts below the nav: this strip is the hit target for anything it
           covers, and over the nav it would swallow taps on the menu button. */}
       {!menuOpen && (
-        <GestureDetector gesture={edgeSwipe}>
+        <GestureDetector gesture={edgeSwipeClosed}>
           <View style={[styles.edgeSwipe, { top: insets.top + navHeight }]} />
         </GestureDetector>
       )}
@@ -1282,7 +1290,7 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
         // The gesture lives on this wrapper rather than the Pressable, so a drag
         // and a tap stay two separate things: the detector claims the touch once
         // it moves horizontally, and the Pressable keeps everything else.
-        <GestureDetector gesture={edgeSwipe}>
+        <GestureDetector gesture={edgeSwipeOpen}>
           <View style={StyleSheet.absoluteFill}>
             <Pressable
               style={StyleSheet.absoluteFill}

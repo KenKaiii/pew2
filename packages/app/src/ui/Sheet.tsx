@@ -32,20 +32,17 @@
  * what the platform spends too.
  */
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Keyboard, Pressable, StyleSheet, View } from "react-native";
+import { Dimensions, Keyboard, Pressable, StyleSheet, View } from "react-native";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import Animated, {
   Easing,
   FadeIn,
-  FadeOut,
   interpolate,
   runOnJS,
   useAnimatedStyle,
   useSharedValue,
   withSpring,
   withTiming,
-  type EntryAnimationsValues,
-  type ExitAnimationsValues,
 } from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
@@ -84,18 +81,17 @@ interface SheetProps {
  * enough that a deliberate flick never has to travel the whole card.
  */
 const DISMISS_FRACTION = 0.25;
-/** …or this fast, in points per second, however far it actually got. */
-const DISMISS_VELOCITY = 700;
+/** …or this fast, in card-heights per second, however far it actually got. */
+const DISMISS_VELOCITY = 2.2;
 
 /**
  * The arrival.
  *
- * Underdamped on purpose, unlike the critically-damped spring this replaces.
- * That one could not overshoot, but the price was a long imperceptible creep
- * into the final few points — the card looked parked while the scrim was still
- * darkening, which is the "mushy" half of the old feel. `dampingRatio` 0.85 is
- * what UIKit's own sheet transitions use: it arrives, tightens once by well
- * under a point, and is *done*.
+ * Underdamped on purpose. A critically damped spring cannot overshoot, but the
+ * price is a long imperceptible creep into the final few points — the card looks
+ * parked while the scrim is still darkening, which is the "mushy" feel this
+ * replaced. `dampingRatio` 0.85 is what UIKit's own sheet transitions use: it
+ * arrives, tightens once by well under a point, and is *done*.
  *
  * `duration` here is perceptual, not literal — Reanimated runs the spring for
  * about 1.5× the number, so 420 is a ~630ms tail with the last third of it
@@ -116,20 +112,29 @@ const RETURN = { duration: 320, dampingRatio: 0.9 } as const;
 /**
  * Reduced motion: the same movement with the time taken out.
  *
- * A zero-duration timing rather than a bare target value, because the sheet's
- * unmount hangs off the exit animation's completion callback. Assigning a plain
+ * A zero-duration timing rather than a bare assignment, because the unmount
+ * hangs off the closing animation's completion callback. Assigning a plain
  * number skips the animation machinery, and with it the callback — which would
  * leave the sheet mounted forever for exactly the users who cannot see it.
  */
 const INSTANT = { duration: 0 } as const;
 
+/**
+ * Where the card sits before it has ever been measured.
+ *
+ * Only ever used for the first frame of the first open, and only as a distance
+ * to start *from* — so an overestimate is invisible (the card is off screen
+ * either way) and there is no underestimate that could leave it peeking.
+ */
+const OFF_SCREEN = Dimensions.get("window").height;
+
 function SheetView({ visible, title, onClose, onBack, dismissLabel, children }: SheetProps) {
   const insets = useSafeAreaInsets();
   const reduceMotion = useReducedMotion();
 
-  // Present in the tree, which outlasts `visible` by exactly one exit animation:
-  // an always-mounted overlay would swallow every touch meant for the
-  // conversation behind it.
+  // Present in the tree, which outlasts `visible` by exactly one closing
+  // animation: an always-mounted overlay would swallow every touch meant for
+  // the conversation behind it.
   //
   // Raised *during render* rather than from an effect. An effect would cost a
   // second commit of the whole app tree before the card existed at all, and
@@ -138,10 +143,30 @@ function SheetView({ visible, title, onClose, onBack, dismissLabel, children }: 
   const [present, setPresent] = useState(visible);
   if (visible && !present) setPresent(true);
 
-  // How far the finger has dragged the card down from its resting position.
-  // Lives on the UI thread and is never read by React, so a drag re-renders
-  // nothing at all.
-  const drag = useSharedValue(0);
+  /**
+   * How far in the card is: 0 is fully off the bottom edge, 1 is resting.
+   *
+   * One value for the whole movement, arriving and leaving and dragged, so
+   * every one of those can interrupt any other by simply being retargeted —
+   * which is what makes a sheet feel like an object rather than a clip being
+   * played at you.
+   *
+   * Deliberately *not* a layout animation on `originY`, which is what this used
+   * to be. A layout animation resolves its destination from the measurement
+   * taken when it starts, and these sheets contain a card that measures itself
+   * a frame later — so the first open of a sheet whose content had never been
+   * laid out animated to a position derived from a 1pt-tall card and stopped
+   * short. Every later open looked right because the measurement was by then
+   * left over from the first. A transform to zero has no such dependency: zero
+   * means "wherever layout puts you", which stays true however the card resizes
+   * around it.
+   */
+  const progress = useSharedValue(0);
+
+  // The card's own height, so a drag is judged against the thing being dragged
+  // rather than against the screen. Written from `onLayout`, read only on the
+  // UI thread; nothing here re-renders.
+  const travel = useSharedValue(0);
 
   useEffect(() => {
     if (!visible) return;
@@ -153,211 +178,154 @@ function SheetView({ visible, title, onClose, onBack, dismissLabel, children }: 
     Keyboard.dismiss();
   }, [visible]);
 
-  // Read by the exit callback, which cannot use `visible` from a closure: an
-  // exiting animation runs the config captured on the *last render the view
-  // existed*, which is the one where `visible` was still true. A closure would
-  // therefore always see the stale `true` and never unmount anything.
-  const isVisible = useRef(visible);
-  isVisible.current = visible;
-
-  // Removed only once the exit has actually played. Guarded against a sheet
+  // Removed only once the card has actually left. Guarded against a sheet
   // reopened mid-exit: the callback for the old animation still arrives, and
   // unmounting on it would delete a card that is on its way back in.
   const finishExit = useCallback(() => {
-    if (isVisible.current) return;
-    // Back to rest, so a sheet dismissed by a drag does not open next time
-    // already pushed halfway down the screen.
-    drag.value = 0;
-    setPresent(false);
-  }, [drag]);
+    setPresent((wasPresent) => (visible ? wasPresent : false));
+  }, [visible]);
 
-  /**
-   * Entering: from exactly its own height below its resting place.
-   *
-   * `targetHeight` is measured by Reanimated on the UI thread, in the same
-   * frame the view is laid out. That is the whole reason this is a custom
-   * animation rather than `SlideInDown`, which travels a full window height —
-   * a card that rests on the bottom edge should rise by its own height and no
-   * more, or the visible part of the movement is a burst rather than a travel.
-   *
-   * It also replaces the measure-into-React-state round trip this component
-   * used to do, which cost two extra renders and left the first frame hidden.
-   */
-  const entering = useCallback(
-    (values: EntryAnimationsValues) => {
+  useEffect(() => {
+    if (visible) {
+      progress.value = reduceMotion
+        ? withTiming(1, INSTANT)
+        : withSpring(1, ARRIVE);
+      return;
+    }
+    progress.value = withTiming(0, reduceMotion ? INSTANT : DEPART, (finished) => {
       "worklet";
-      return {
-        initialValues: { originY: values.targetOriginY + values.targetHeight },
-        animations: {
-          originY: reduceMotion
-            ? withTiming(values.targetOriginY, INSTANT)
-            : withSpring(values.targetOriginY, ARRIVE),
-        },
-      };
-    },
-    [reduceMotion],
-  );
-
-  const exiting = useCallback(
-    (values: ExitAnimationsValues) => {
-      "worklet";
-      const gone = values.currentOriginY + values.currentHeight;
-      return {
-        initialValues: { originY: values.currentOriginY },
-        animations: {
-          originY: withTiming(gone, reduceMotion ? INSTANT : DEPART),
-        },
-        callback: () => {
-          "worklet";
-          runOnJS(finishExit)();
-        },
-      };
-    },
-    [reduceMotion, finishExit],
-  );
-
-  // Written from `onLayout` into a shared value rather than state: the gesture
-  // needs the card's height to know what a quarter of it is, and nothing about
-  // rendering does. Declared before the gesture, which captures it — a worklet
-  // closes over its variables when it is built, not when it runs.
-  const layoutHeight = useSharedValue(0);
+      // Interrupted means it was reopened on the way out, and the newer
+      // animation owns what happens next.
+      if (finished) runOnJS(finishExit)();
+    });
+  }, [visible, reduceMotion, progress, finishExit]);
 
   const dismiss = onClose;
   // The card follows the finger one-to-one downward and refuses to go up: a
   // sheet already flush against the bottom edge has nothing above it to reveal,
   // and letting it lift would show daylight underneath.
+  //
+  // Expressed as a change in `progress` rather than as its own offset, so a
+  // release can hand straight over to the spring, and so the scrim thins with
+  // the drag for free.
   const dragGesture = useMemo(
     () =>
       Gesture.Pan()
         .enabled(dismiss !== undefined && !reduceMotion)
         .onChange((event) => {
-          drag.value = Math.max(0, drag.value + event.changeY);
+          const height = travel.value;
+          if (height <= 0) return;
+          progress.value = Math.min(1, progress.value - event.changeY / height);
         })
         .onEnd((event) => {
-          const height = layoutHeight.value;
-          const farEnough = height > 0 && drag.value > height * DISMISS_FRACTION;
-          if (farEnough || event.velocityY > DISMISS_VELOCITY) {
-            // Left exactly where the finger let go. The exit animation carries
-            // it the rest of the way down from here, so the card never snaps
-            // back up a single point before leaving.
+          const height = travel.value;
+          const thrown = height > 0 ? event.velocityY / height : 0;
+          if (progress.value < 1 - DISMISS_FRACTION || thrown > DISMISS_VELOCITY) {
+            // Left exactly where the finger let go: the closing animation picks
+            // `progress` up from here, so the card never snaps back up a single
+            // point before leaving.
             runOnJS(haptics.tap)();
             if (dismiss) runOnJS(dismiss)();
             return;
           }
-          drag.value = withSpring(0, RETURN);
+          progress.value = withSpring(1, RETURN);
         }),
-    [dismiss, reduceMotion, drag, layoutHeight],
+    [dismiss, reduceMotion, progress, travel],
   );
 
   const cardStyle = useAnimatedStyle(() => ({
-    transform: [{ translateY: drag.value }],
+    // Falls back to a whole screen only until the first measurement lands, and
+    // only as a starting distance — the resting end of this is always exactly
+    // zero, which is why a card that resizes after arriving still ends flush.
+    transform: [{ translateY: (1 - progress.value) * (travel.value || OFF_SCREEN) }],
   }));
 
-  // The scrim thins as the card is dragged away, so the conversation behind it
-  // comes back under the thumb. Not linear with the drag: it reaches full
-  // brightness at 70% of the travel, because a scrim that is still visibly dark
-  // at the point of release makes the dismissal read as reluctant.
-  const scrimDragStyle = useAnimatedStyle(() => ({
-    opacity:
-      layoutHeight.value > 0
-        ? interpolate(drag.value, [0, layoutHeight.value * 0.7], [1, 0], "clamp")
-        : 1,
+  // The scrim tracks the same value, so dragging the card away brings the
+  // conversation back under the thumb. Squared off early: it reaches full
+  // darkness at 70% of the travel, because a scrim still visibly dark at the
+  // point of release makes the dismissal read as reluctant.
+  const scrimStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(progress.value, [0, 0.7], [0, 1], "clamp"),
   }));
 
   if (!present) return null;
 
   return (
-    <View style={styles.host} pointerEvents="box-none">
+    // Inert while leaving: the card is still on screen for the length of its
+    // exit, and a scrim that kept taking touches for that quarter second would
+    // eat the first tap of whatever the user turned to next.
+    <View style={styles.host} pointerEvents={visible ? "box-none" : "none"}>
       {/* Tapping away is the primary dismissal, so the scrim is a control —
           except on a blocking sheet, where it is only a dimming layer that
-          still absorbs touches meant for the conversation.
-
-          Two nested animated views, because they are driven by two different
-          things: the outer fades with the sheet's own presence, the inner with
-          the drag. One view cannot carry both a layout animation and an
-          animated style for the same property. */}
-      {visible && (
-        <Animated.View
+          still absorbs touches meant for the conversation. */}
+      {onClose ? (
+        <Pressable
           style={StyleSheet.absoluteFill}
-          entering={FadeIn.duration(ARRIVE.duration)}
-          exiting={FadeOut.duration(DEPART.duration)}
-          pointerEvents="box-none"
+          accessibilityRole="button"
+          accessibilityLabel={dismissLabel ?? `Dismiss ${title}`}
+          onPress={onClose}
         >
-          {onClose ? (
-            <Pressable
-              style={StyleSheet.absoluteFill}
-              accessibilityRole="button"
-              accessibilityLabel={dismissLabel ?? `Dismiss ${title}`}
-              onPress={onClose}
-            >
-              <Animated.View style={[styles.scrim, scrimDragStyle]} />
-            </Pressable>
-          ) : (
-            <Animated.View style={[StyleSheet.absoluteFill, styles.scrim]} />
-          )}
-        </Animated.View>
+          <Animated.View style={[styles.scrim, scrimStyle]} />
+        </Pressable>
+      ) : (
+        <Animated.View style={[StyleSheet.absoluteFill, styles.scrim, scrimStyle]} />
       )}
 
-      {visible && (
-        <Animated.View entering={entering} exiting={exiting}>
-          <Animated.View
-            onLayout={(event) => {
-              layoutHeight.value = event.nativeEvent.layout.height;
-            }}
-            style={[
-              styles.sheet,
-              // The home indicator's clearance is inside the sheet, not under it,
-              // so the content clears the indicator while the surface still
-              // reaches the physical edge.
-              { paddingBottom: insets.bottom + theme.space(3) },
-              cardStyle,
-            ]}
-          >
-            {/* Dragging is bound to the header strip rather than the whole card:
-                every sheet's body is a scrolling list, and a pan over one would
-                have to win a fight against the scroll on every gesture. The
-                grabber sits inside it, so the affordance is where the gesture
-                actually is. */}
-            <GestureDetector gesture={dragGesture}>
-              {/* Not collapsable: React Native flattens a View that adds no
-                  styling of its own, and gesture-handler needs a real native
-                  view to attach to. */}
-              <View collapsable={false}>
-                <View style={styles.grabber} />
+      <Animated.View
+        onLayout={(event) => {
+          travel.value = event.nativeEvent.layout.height;
+        }}
+        style={[
+          styles.sheet,
+          // The home indicator's clearance is inside the sheet, not under it,
+          // so the content clears the indicator while the surface still
+          // reaches the physical edge.
+          { paddingBottom: insets.bottom + theme.space(3) },
+          cardStyle,
+        ]}
+      >
+        {/* Dragging is bound to the header strip rather than the whole card:
+            every sheet's body is a scrolling list, and a pan over one would have
+            to win a fight against the scroll on every gesture. The grabber sits
+            inside it, so the affordance is where the gesture actually is. */}
+        <GestureDetector gesture={dragGesture}>
+          {/* Not collapsable: React Native flattens a View that adds no styling
+              of its own, and gesture-handler needs a real native view to attach
+              to. */}
+          <View collapsable={false}>
+            <View style={styles.grabber} />
 
-                <View style={styles.header}>
-                  {/* Keyed, and that is what makes the fade happen at all: both
-                      branches render a CircleButton at the same position, so
-                      without distinct keys React reconciles one instance, the
-                      icon never remounts, and the swap hard-cuts. */}
-                  {onBack ? (
-                    <CircleButton key="back" label="Back" onPress={onBack} size={theme.size.chip}>
-                      <CrossfadeIcon name="chevron-back" />
-                    </CircleButton>
-                  ) : onClose ? (
-                    <CircleButton
-                      key="close"
-                      label={dismissLabel ?? `Close ${title}`}
-                      onPress={onClose}
-                      size={theme.size.chip}
-                    >
-                      <CrossfadeIcon name="close" />
-                    </CircleButton>
-                  ) : (
-                    <View style={styles.headerSpacer} />
-                  )}
-                  <CrossfadeTitle title={title} />
-                  {/* Balances the close button so the title stays optically
-                      centred. */}
-                  <View style={styles.headerSpacer} />
-                </View>
-              </View>
-            </GestureDetector>
+            <View style={styles.header}>
+              {/* Keyed, and that is what makes the fade happen at all: both
+                  branches render a CircleButton at the same position, so without
+                  distinct keys React reconciles one instance, the icon never
+                  remounts, and the swap hard-cuts. */}
+              {onBack ? (
+                <CircleButton key="back" label="Back" onPress={onBack} size={theme.size.chip}>
+                  <CrossfadeIcon name="chevron-back" />
+                </CircleButton>
+              ) : onClose ? (
+                <CircleButton
+                  key="close"
+                  label={dismissLabel ?? `Close ${title}`}
+                  onPress={onClose}
+                  size={theme.size.chip}
+                >
+                  <CrossfadeIcon name="close" />
+                </CircleButton>
+              ) : (
+                <View style={styles.headerSpacer} />
+              )}
+              <CrossfadeTitle title={title} />
+              {/* Balances the close button so the title stays optically
+                  centred. */}
+              <View style={styles.headerSpacer} />
+            </View>
+          </View>
+        </GestureDetector>
 
-            {children}
-          </Animated.View>
-        </Animated.View>
-      )}
+        {children}
+      </Animated.View>
     </View>
   );
 }
