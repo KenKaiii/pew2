@@ -451,3 +451,16 @@ test("a claim is never written beside a derived PEW2_TOKEN pairing", async () =>
 
   expect((await loadPairing(scoped)).claimedBy).toBeUndefined();
 });
+
+test("a placeholder claim left by a pre-gate app is overwritten", async () => {
+  // Apps from before the gate claimed pairings as the literal `phone`. If that
+  // stuck, the same user's updated app would introduce itself with a real id,
+  // fail to match, and be refused from its own pairing on every restart.
+  const { env } = await sandbox();
+  await loadPairing(env);
+  await claimPairing("phone", env);
+
+  await claimPairing("phone-aaaa", env);
+
+  expect((await loadPairing(env)).claimedBy).toBe("phone-aaaa");
+});

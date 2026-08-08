@@ -7,7 +7,7 @@
  * every agent on the machine.
  */
 import { test, expect } from "bun:test";
-import { decideClaim, REFUSED_MESSAGE } from "./device-claim.js";
+import { decideClaim, isRealClaim, REFUSED_MESSAGE } from "./device-claim.js";
 
 test("an unclaimed pairing is taken by the first device to arrive", () => {
   const decision = decideClaim(undefined, "phone-aaaa");
@@ -56,4 +56,34 @@ test("ids are matched whole, not by prefix", () => {
   // cheaper than guessing the whole id.
   expect(decideClaim("phone-aaaa", "phone-aaaabbbb").ok).toBe(false);
   expect(decideClaim("phone-aaaabbbb", "phone-aaaa").ok).toBe(false);
+});
+
+test("a phone still calling itself 'phone' is admitted, and claims nothing", () => {
+  // Apps built before the gate kept the `deviceId=phone` placeholder that
+  // `pew2 pair` bakes into printed links. Refusing them would lock out everyone
+  // who has not updated yet, on pairings that were never single-device anyway.
+  // Recording the claim would be worse: the placeholder would become the owner
+  // and refuse that same user the moment they do update.
+  expect(decideClaim(undefined, "phone")).toEqual({ ok: true });
+  expect(decideClaim("phone-aaaa", "phone")).toEqual({ ok: true });
+});
+
+test("a placeholder left on disk is replaced by the first real device", () => {
+  // The upgrade path: a pre-gate app claimed `phone`, the user updates, and the
+  // new build introduces itself with a real id. That must take the pairing
+  // rather than be refused from it.
+  expect(decideClaim("phone", "phone-aaaa")).toEqual({ ok: true, claim: "phone-aaaa" });
+});
+
+test("a real claim still refuses everyone else", () => {
+  // The allowance is only for the placeholder. Once a real device owns the
+  // pairing, the gate is exactly as strict as before.
+  expect(decideClaim("phone-aaaa", "phone-bbbb").ok).toBe(false);
+});
+
+test("only the placeholder counts as unclaimed", () => {
+  expect(isRealClaim("phone")).toBe(false);
+  expect(isRealClaim(undefined)).toBe(false);
+  expect(isRealClaim("")).toBe(false);
+  expect(isRealClaim("phone-aaaa")).toBe(true);
 });

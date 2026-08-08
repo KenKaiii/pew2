@@ -11,6 +11,55 @@ installs them separately, and what an app and a daemon must agree on is
 
 Dates are the day the tag was cut.
 
+## 0.9.12 — 2026-08-08
+
+### Security
+
+- **A pairing link now admits one device.** The link never expires, which is what
+  lets a phone reconnect after a reboot without scanning anything — but it also
+  meant a code caught on camera stayed usable forever. The first device to
+  complete a handshake claims the pairing; every later one is refused. Your phone
+  keeps reconnecting as before, and a QR that appears in a screenshot or a video
+  is worthless once it has.
+
+  Rotation is still the only revocation, and it is still all-or-nothing: run
+  `pew2 pair --rotate` to move a pairing to a different phone. A link that leaked
+  *before* it was ever used must be rotated, not merely re-scanned — whoever
+  claims it first, wins.
+
+- **Every phone used to call itself `phone`.** `pew2 pair` prints a link
+  containing `deviceId=phone` so the URL is valid on its own, and the app kept
+  that name instead of using its own. Devices were indistinguishable, which would
+  have made the claim above decorative. The app now always substitutes its own
+  identifier, drawn from the system's secure random source rather than
+  `Math.random`.
+
+- **A refusal is addressed to the device it refuses.** The relay forwards
+  cleartext to every app in a room, so an unaddressed refusal reached the phone
+  that owned the pairing too — and it treats one as final. Left alone, that handed
+  anyone holding a leaked link a single frame that would knock the real device
+  offline.
+
+### Fixed
+
+- **A dead pairing code says so instead of hanging.** Scanning a rotated or
+  retired code checked only that the link was well-formed, then moved on to the
+  main screen and sat on "Connecting to your machine..." indefinitely — the one
+  state that looks like a slow network and is actually permanent. Both refusals
+  happen below the socket and send nothing back, so the app now completes a real
+  handshake before it accepts a code, and stays put with the reason if it fails.
+- **A machine that cannot be reached stops claiming it is nearly there.** After
+  about fifteen seconds the app says so plainly and names what to check, while
+  continuing to retry in the background — a sleeping laptop and a retired token
+  are indistinguishable from the phone, and one of them comes back on its own.
+- **`pew2 pair` warns before you scan** when a pairing already belongs to a
+  device, rather than leaving you to discover it as a refusal on the phone.
+
+### Upgrading
+
+Nothing to do. A phone paired before this release keeps working, and claims the
+pairing properly the first time it connects from an updated app.
+
 ## 0.9.11 — 2026-08-07
 
 ### Security

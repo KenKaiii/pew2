@@ -22,6 +22,7 @@ import { hostname } from "node:os";
 import { SecureChannel, e2e, wire } from "@pew2/protocol";
 import { daemonPort, daemonUrl } from "./doctor.js";
 import { lanAddresses, loadPairing, pairingUrl, qrCode, rotatePairing } from "../pairing.js";
+import { isRealClaim } from "../device-claim.js";
 import {
   PALETTE,
   colorLevel,
@@ -251,7 +252,7 @@ export async function cmdPair(flags: Set<string>): Promise<number> {
           reach,
           // An agent driving setup needs to know this code cannot onboard a
           // second device, rather than discovering it when the phone is refused.
-          claimedBy: pairing.claimedBy ?? null,
+          claimedBy: isRealClaim(pairing.claimedBy) ? pairing.claimedBy : null,
         },
         null,
         2,
@@ -270,7 +271,10 @@ export async function cmdPair(flags: Set<string>): Promise<number> {
     port,
     daemonRunning,
     rotated: Boolean(options.rotate),
-    ...(pairing.claimedBy ? { claimedBy: pairing.claimedBy } : {}),
+    // Only a real claim is worth warning about. A stored placeholder from a
+    // pre-gate app is treated as unclaimed, so announcing it would tell the user
+    // their code is spoken for when the next scan will take it.
+    ...(isRealClaim(pairing.claimedBy) ? { claimedBy: pairing.claimedBy } : {}),
   };
 
   const style = styler(colorLevel());

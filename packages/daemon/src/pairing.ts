@@ -20,6 +20,7 @@ import { networkInterfaces } from "node:os";
 import { dirname, join } from "node:path";
 import { e2e } from "@pew2/protocol";
 import { userProvidersDir } from "./providers/registry.js";
+import { isRealClaim } from "./device-claim.js";
 
 export interface Pairing {
   /**
@@ -209,7 +210,11 @@ export async function claimPairing(
   const existing = await loadPairing(env);
   // Re-reading first means a claim never resurrects a token that was rotated
   // out from under this process.
-  if (existing.claimedBy) return;
+  //
+  // A stored placeholder is not a real claim and is overwritten: an app from
+  // before the gate wrote `phone` there, and leaving it would refuse that same
+  // user's phone the moment they update.
+  if (isRealClaim(existing.claimedBy)) return;
   await writePairing({ ...existing, claimedBy: deviceId }, env);
 }
 

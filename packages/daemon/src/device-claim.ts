@@ -27,6 +27,36 @@
  *     ever used must be rotated, not merely re-scanned.
  */
 
+/**
+ * The id every app used to call itself.
+ *
+ * `pew2 pair` bakes a literal `deviceId=phone` into the printed link so the URL
+ * is valid standalone, and apps built before the claim gate kept it rather than
+ * substituting their own. So a phone paired on an older build claims its pairing
+ * under this name — and once the user updates, their app introduces itself with
+ * a real random id, does not match, and is refused from its own pairing.
+ *
+ * Treated as unclaimed for that reason: it identifies no particular device, so
+ * it is not evidence that any device holds this pairing. The next handshake
+ * claims it properly. The window this opens is one connection wide and only for
+ * pairings made before the gate existed, which were bearer credentials in full
+ * anyway — whereas the alternative is every existing user locked out by an
+ * update, with a refusal that reads like an accusation.
+ */
+const PLACEHOLDER_DEVICE_ID = "phone";
+
+/**
+ * Does this stored claim name a real device?
+ *
+ * The placeholder does not, so persistence must be willing to overwrite it —
+ * otherwise the claim on disk stays `phone` forever and every updated app is
+ * refused on the next restart, which is the failure this whole allowance exists
+ * to prevent.
+ */
+export function isRealClaim(claimedBy: string | undefined): claimedBy is string {
+  return Boolean(claimedBy) && claimedBy !== PLACEHOLDER_DEVICE_ID;
+}
+
 /** The outcome of offering a device id to a pairing. */
 export type ClaimDecision =
   /** Admitted. `claim` is set when this handshake is what took the pairing. */
@@ -58,8 +88,15 @@ export function decideClaim(claimedBy: string | undefined, deviceId: string): Cl
   // stored value must not become a wildcard that matches the next blank.
   if (!deviceId) return { ok: false, message: REFUSED_MESSAGE };
 
-  // Unclaimed: this device takes it.
-  if (!claimedBy) return { ok: true, claim: deviceId };
+  // A device still calling itself `phone` is running a build from before the
+  // gate. Refusing it would lock out someone who has not updated yet, on a
+  // pairing that was never single-device to begin with; admitting it without
+  // recording the claim keeps the placeholder from becoming the owner and
+  // locking out that same person the moment they do update.
+  if (deviceId === PLACEHOLDER_DEVICE_ID) return { ok: true };
+
+  // Unclaimed, or claimed only by the placeholder an older app left behind.
+  if (!claimedBy || claimedBy === PLACEHOLDER_DEVICE_ID) return { ok: true, claim: deviceId };
 
   // Already ours — the ordinary case, every reconnect for the life of the
   // pairing.
