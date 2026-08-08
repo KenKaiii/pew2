@@ -29,6 +29,7 @@ import {
   type Style,
 } from "./ui.js";
 import { rail } from "./rail.js";
+import { isRealClaim } from "../device-claim.js";
 
 export type Reach = "anywhere" | "local" | "unreachable";
 
@@ -50,6 +51,10 @@ export interface PairView {
    * A link admits one device, so a code printed for an already-claimed pairing
    * cannot onboard a second phone. Saying so here is the difference between a
    * one-line fix and scanning a QR that answers with a refusal.
+   *
+   * A placeholder left by a pre-gate app is not a real claim and is not
+   * announced; `isRealClaim` decides, so the screen and the gate cannot drift
+   * into disagreeing about who owns a pairing.
    */
   claimedBy?: string;
 }
@@ -336,9 +341,14 @@ export function renderPair(
       rail(options).bar(),
       `${g_}${s.hex(PALETTE.warning, g.warn)} ${s.dim("token rotated — devices paired before now must scan again")}`,
     );
-  } else if (view.claimedBy) {
+  } else if (isRealClaim(view.claimedBy)) {
     // Only when it was not just rotated: a rotation clears the claim, so both
     // notices at once would contradict each other.
+    //
+    // And only for a real claim. A pre-gate app stored the literal `phone`,
+    // which the daemon treats as unclaimed and the next scan will take — so
+    // warning about it would tell the user their code is spoken for at the exact
+    // moment it is not.
     const s = options.style ?? styler();
     const g = options.glyph ?? glyphs();
     lines.push(

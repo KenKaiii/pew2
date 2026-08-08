@@ -113,6 +113,17 @@ test("an already-claimed pairing says so before anyone scans it", () => {
   expect(text).toContain("pew2 pair --rotate");
 });
 
+test("a placeholder claim is not announced as an owner", () => {
+  // A pre-gate app stored the literal `phone`, which the daemon treats as
+  // unclaimed and the next scan will take. Warning about it would tell the user
+  // their code is spoken for at the exact moment it is not.
+  const text = renderPair(view({ claimedBy: "phone" }), undefined, plain)
+    .map(stripAnsi)
+    .join("\n");
+
+  expect(text).not.toContain("admits no other");
+});
+
 test("a fresh rotation does not also claim to be already paired", () => {
   // `--rotate` clears the claim, so showing both notices would have the output
   // contradict itself in the one moment the user is deciding whether to scan.
