@@ -11,6 +11,41 @@ installs them separately, and what an app and a daemon must agree on is
 
 Dates are the day the tag was cut.
 
+## 0.9.14 — 2026-08-08
+
+### Fixed
+
+- **The model pill always names the model that will answer.** Reopening an old
+  conversation and then starting a new one showed the old one's model, while the
+  prompt actually ran on the one you last chose — and the pill only corrected
+  itself after you had sent something. A new conversation opens with your
+  remembered choice; a reopened one comes back with whatever it was last used
+  with. Those are two different answers, and the pill was showing whichever had
+  arrived most recently.
+
+  It now shows nothing at all for the moment while a conversation is still
+  loading, rather than guessing. Changing a model in one conversation also
+  updates what the next one will open with, on every device you have paired.
+
+- Cold launch, streaming and idle battery cost are all down. Long replies
+  re-parsed the entire message on every chunk that arrived, blurred surfaces were
+  rebuilt rather than reused, and animations kept running while the app was in
+  the background.
+- The model dropdown could open transparent on its first use, and looked right
+  the next time. Fading a blurred surface is what did it; the card is scaled now
+  and never faded.
+- A notification banner is shown even when the computer could not register for
+  remote push — the local one was being suppressed by the failure of the remote
+  one, so a refused token meant no notification at all rather than the one that
+  still worked.
+- "Can't reach your computer" clears itself when the app comes back and the
+  connection succeeds, instead of staying on screen over a working session.
+
+### Added
+
+- **Finished turns notify you while the app is closed.** Until now a reply that
+  landed while you were in another app was silent until you opened it again.
+
 ## 0.9.13 — 2026-08-08
 
 ### Fixed
