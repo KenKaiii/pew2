@@ -249,3 +249,56 @@ test("a cache without message counts is still served from disk", async () => {
     else process.env.PEW2_HOME = home;
   }
 });
+
+test("a background refresh writes to the home its daemon was built for", async () => {
+  // A cache hit kicks off a live reprobe that outlives the call, and its write
+  // lands whenever the agent finishes answering. Resolving `PEW2_HOME` at that
+  // moment rather than at construction meant the write followed whatever home
+  // was installed *then* — so a refresh belonging to one daemon could overwrite
+  // a cache belonging to something else.
+  //
+  // In production nothing moves `PEW2_HOME` and the two are the same value. In a
+  // test process where several homes exist at once it is the difference between
+  // isolated cases and a suite that fails on whichever one happened to be
+  // reading when a stray write landed.
+  const mine = await tempEnv();
+  const theirs = await tempEnv();
+  await writeProbeCache("echo", capabilities, mine);
+  await writeProbeCache(
+    "echo",
+    { ...capabilities, sessions: [{ sessionId: "t1", cwd: "/tmp", title: "Not yours" }] },
+    theirs,
+  );
+
+  const home = process.env.PEW2_HOME;
+  process.env.PEW2_HOME = mine.PEW2_HOME;
+  try {
+    const { Daemon } = await import("./index.js");
+    const daemon = new Daemon({ id: "test", name: "test" }, true);
+    await daemon.refreshProviders();
+
+    // Serves from disk and arms the background refresh that used to leak.
+    await daemon.probeProvider("echo");
+
+    // The ambient home moves on, exactly as it does when the next test installs
+    // its own, while that refresh is still in flight.
+    process.env.PEW2_HOME = theirs.PEW2_HOME;
+    await (daemon as any).warming.get("echo");
+
+    // The cache write is fire-and-forget inside the probe, so it lands after the
+    // refresh itself resolves. Give it room to arrive rather than reading the
+    // instant before it would have — a race here would make this test pass
+    // whether or not the leak exists, which is worse than not having it.
+    for (let i = 0; i < 50; i += 1) {
+      if ((await readProbeCache("echo", theirs))?.sessions[0]?.title !== "Not yours") break;
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    daemon.closeAll();
+
+    // The other home is untouched: no live probe result landed on top of it.
+    expect((await readProbeCache("echo", theirs))?.sessions[0]?.title).toBe("Not yours");
+  } finally {
+    if (home === undefined) delete process.env.PEW2_HOME;
+    else process.env.PEW2_HOME = home;
+  }
+});

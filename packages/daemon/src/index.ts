@@ -723,10 +723,30 @@ export class Daemon {
     return applied;
   }
 
+  /**
+   * Where this daemon's files live, fixed at construction.
+   *
+   * The probe cache path is derived from `PEW2_HOME`, and the background refresh
+   * that follows a cache hit outlives the call that started it. Reading the
+   * ambient environment when that write finally lands means it goes to whatever
+   * home is installed *then* rather than the one this daemon was built for — so
+   * a refresh could overwrite a cache belonging to something else entirely.
+   *
+   * In production nothing ever moves `PEW2_HOME`, so this is the same value
+   * either way. It matters wherever more than one home exists in a process,
+   * which is every test that works in a temporary directory.
+   */
+  private readonly env: NodeJS.ProcessEnv;
+
   constructor(
     private readonly machine: { id: string; name: string },
     private readonly includeExperimental = false,
-  ) {}
+    env: NodeJS.ProcessEnv = process.env,
+  ) {
+    // Copied, not referenced: the point is a value that cannot change under a
+    // write that lands later.
+    this.env = { ...env };
+  }
 
   /** Point the daemon at a transport. Called with the relay socket's `send`. */
   attach(send: (message: unknown) => void) {
@@ -993,7 +1013,7 @@ export class Daemon {
     // The probe is already resolved by the time a session starts, so this is a
     // map lookup in practice rather than a wait on the agent.
     const probed = await this.probes.get(providerId);
-    return probed?.sessions[0]?.cwd ?? (await readProbeCache(providerId))?.sessions[0]?.cwd;
+    return probed?.sessions[0]?.cwd ?? (await readProbeCache(providerId, this.env))?.sessions[0]?.cwd;
   }
 
   async startSession(providerId: string, cwd: string): Promise<string> {
@@ -1153,7 +1173,7 @@ export class Daemon {
     // answer from disk instantly and refresh it in the background instead of
     // making the drawer wait on the agent's boot time.
     if (!refresh) {
-      const disk = await readProbeCache(providerId);
+      const disk = await readProbeCache(providerId, this.env);
       // Used whatever it holds. This used to insist every row carried a message
       // count and reprobe otherwise \u2014 which was reasonable while counts came
       // from opening each conversation, and became a trap the moment that
@@ -1262,7 +1282,7 @@ export class Daemon {
         };
         // Persist so the next ask — and the next daemon boot — answers from
         // disk instead of spawning again.
-        void writeProbeCache(providerId, capabilities, process.env, all).catch(() => {});
+        void writeProbeCache(providerId, capabilities, this.env, all).catch(() => {});
         return capabilities;
       } catch (error) {
         // A probe is best-effort: this is what the app shows before a session
