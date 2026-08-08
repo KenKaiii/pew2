@@ -1191,14 +1191,22 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
                 {/* A refusal the daemon explained outranks the connecting
                     state: reconnecting cannot fix a rotated key or a version
                     mismatch, so "Connecting..." would loop forever while
-                    telling the one person who can act nothing at all. */}
+                    telling the one person who can act nothing at all.
+
+                    Then the quieter version of the same failure. A pairing the
+                    machine rejects below the socket — 401 from the daemon, 409
+                    from a relay room with no machine in it — sends no frame to
+                    explain itself, so retrying continues in the background
+                    while the words stop pretending it is nearly there. */}
                 {daemon.fatal
                   ? daemon.fatal
-                  : daemon.status !== "online"
-                    ? "Connecting to your machine..."
-                    : active
-                      ? greeting
-                      : emptyReason(daemon.providers.length)}
+                  : daemon.unreachable
+                    ? "Can't reach your machine. Check it's awake and running pew2 — if this code is old, run `pew2 pair` there for the current one."
+                    : daemon.status !== "online"
+                      ? "Connecting to your machine..."
+                      : active
+                        ? greeting
+                        : emptyReason(daemon.providers.length)}
               </Text>
             </Pressable>
           </Reanimated.View>

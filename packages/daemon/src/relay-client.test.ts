@@ -448,3 +448,110 @@ test("the same phone can reconnect over and over", async () => {
 
   relay.stop();
 });
+
+test("a second device on the same pairing is refused over the relay", async () => {
+  // The link never expires, so the claim is what makes a leaked QR worthless.
+  // The relay is the path that actually matters here: a recording of a pairing
+  // code is usable from anywhere, whereas the LAN socket needs the attacker on
+  // the same Wi-Fi.
+  //
+  // Note what the attacker has: the root key. Their proof verifies. They are
+  // stopped by the claim alone.
+  const claimed = "Kens-iPhone";
+  const { relay } = client({
+    admitDevice: (deviceId) =>
+      deviceId === claimed ? { ok: true } : { ok: false, message: "already in use" },
+  });
+
+  relay.start();
+  const socket = FakeSocket.instances[0]!;
+  socket.open();
+  const attacker = phone();
+  socket.receive({
+    t: "hello",
+    wire: WIRE_VERSION,
+    role: "app",
+    deviceId: "Mallory-Phone",
+    proof: attacker.proof("Mallory-Phone"),
+  });
+  await new Promise((r) => setTimeout(r, 20));
+
+  // Told why, in cleartext: the app cannot decrypt anything yet, and a silent
+  // drop would look identical to a network fault the user would keep retrying.
+  const refusal = socket.sent
+    .map((raw) => JSON.parse(raw) as { t?: string; code?: string; deviceId?: string })
+    .find((m) => m.t === "error" && m.code === "device-refused");
+  expect(refusal).toBeDefined();
+
+  // Addressed to the device it refuses. The relay forwards cleartext to every
+  // app in the room, so an unaddressed refusal also reaches the phone that owns
+  // the pairing — which treats it as fatal and stops reconnecting. That would
+  // hand an attacker holding a leaked link a one-frame way to knock the real
+  // device offline using the very gate meant to stop them.
+  expect(refusal?.deviceId).toBe("Mallory-Phone");
+
+  // And never joined: no announcement, so nothing downstream treats it as a
+  // present device.
+  expect(
+    socket.sent.some((raw) => {
+      const opened = attacker.open(JSON.parse(raw)) as { t?: string } | null;
+      return opened?.t === "device.joined";
+    }),
+  ).toBe(false);
+  relay.stop();
+});
+
+test("a refused device does not get its replay window cleared", async () => {
+  // `acceptHandshake` resets the counters a replay check depends on. Doing that
+  // for a device the gate then refuses would let anyone holding a leaked link
+  // wipe the real phone's replay protection by simply announcing its name — and
+  // from there replay a captured `session.permission` to re-approve a tool call
+  // the user approved once.
+  const { relay } = client({ admitDevice: () => ({ ok: false, message: "already in use" }) });
+
+  relay.start();
+  const socket = FakeSocket.instances[0]!;
+  socket.open();
+  const attacker = phone();
+  socket.receive({
+    t: "hello",
+    wire: WIRE_VERSION,
+    role: "app",
+    deviceId: "Kens-iPhone",
+    proof: attacker.proof("Kens-iPhone"),
+  });
+  await new Promise((r) => setTimeout(r, 20));
+  socket.sent.length = 0;
+
+  // A sealed frame from the refused device must go nowhere.
+  socket.receive({ ...attacker.seal({ t: "hello" }), from: "Kens-iPhone" });
+  await new Promise((r) => setTimeout(r, 20));
+
+  expect(socket.sent).toHaveLength(0);
+  relay.stop();
+});
+
+test("without a gate every prover is admitted, so the check is opt-in", async () => {
+  // Pins the fallback: `admitDevice` is optional, and a daemon that does not
+  // supply one must keep working exactly as before rather than refusing
+  // everything.
+  const { relay } = client();
+
+  relay.start();
+  const socket = FakeSocket.instances[0]!;
+  socket.open();
+  const app = phone();
+  socket.receive({
+    t: "hello",
+    wire: WIRE_VERSION,
+    role: "app",
+    deviceId: "Kens-iPhone",
+    proof: app.proof("Kens-iPhone"),
+  });
+  await new Promise((r) => setTimeout(r, 20));
+
+  expect(
+    socket.sent.some((raw) => (app.open(JSON.parse(raw)) as { t?: string })?.t === "device.joined"),
+  ).toBe(true);
+  relay.stop();
+});

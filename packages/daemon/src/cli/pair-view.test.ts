@@ -101,6 +101,29 @@ test("rotation warns that existing devices are now unpaired", () => {
   expect(text).toContain("just rotated");
 });
 
+test("an already-claimed pairing says so before anyone scans it", () => {
+  // A link admits one device. Printing a code that cannot onboard a second
+  // phone, with nothing said, sends the user to scan it and read a refusal on
+  // the phone instead — where the fix is hardest to act on.
+  const text = renderPair(view({ claimedBy: "phone-aaaa" }), undefined, plain)
+    .map(stripAnsi)
+    .join("\n");
+
+  expect(text).toContain("admits no other");
+  expect(text).toContain("pew2 pair --rotate");
+});
+
+test("a fresh rotation does not also claim to be already paired", () => {
+  // `--rotate` clears the claim, so showing both notices would have the output
+  // contradict itself in the one moment the user is deciding whether to scan.
+  const text = renderPair(view({ rotated: true, claimedBy: "phone-aaaa" }), undefined, plain)
+    .map(stripAnsi)
+    .join("\n");
+
+  expect(text).toContain("must scan again");
+  expect(text).not.toContain("admits no other");
+});
+
 test("the QR is centred without touching its own escape sequences", () => {
   // The QR sets a background per cell; indenting inside the escapes would bleed
   // the terminal's own background into the quiet zone and can stop it scanning.

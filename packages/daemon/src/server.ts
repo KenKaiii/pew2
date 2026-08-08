@@ -12,8 +12,9 @@
  * conversation at once.
  */
 import { Daemon } from "./index.js";
-import { loadPairing, pairingPath, pairingUrl, qrCode, tokenMatches } from "./pairing.js";
+import { claimPairing, loadPairing, pairingPath, pairingUrl, qrCode, tokenMatches } from "./pairing.js";
 import { watchPairing } from "./pairing-watch.js";
+import { decideClaim, type ClaimDecision } from "./device-claim.js";
 import { SecureChannel, e2e, envelopeHeader, wire } from "@pew2/protocol";
 import { handleMessage } from "./handler.js";
 import { RelayClient } from "./relay-client.js";
@@ -55,6 +56,37 @@ if (!pairing.key) {
 // daemon is running. See `watchPairing` at the bottom of this file.
 let currentToken = pairing.token;
 let rootKey = e2e.fromHex(pairing.key);
+// The device this pairing belongs to, once one has claimed it. Held here for
+// the same reason as the two above: a rotation clears it while the daemon runs.
+let claimedBy = pairing.claimedBy;
+
+/**
+ * Admit a device that has already proved it holds the key, claiming the pairing
+ * for it if nothing has yet.
+ *
+ * Both transports go through here. Two copies of this rule would mean the LAN
+ * socket and the relay could disagree about who owns a pairing, and only the
+ * more permissive one would matter.
+ */
+function admitDevice(deviceId: string): ClaimDecision {
+  const decision = decideClaim(claimedBy, deviceId);
+  if (!decision.ok) {
+    console.error(`[pairing] refused '${deviceId}': already claimed by '${claimedBy}'`);
+    return decision;
+  }
+  if (decision.claim) {
+    // The in-memory value is the authority for this process, and it is set
+    // synchronously: both transports decide against it inside one turn of the
+    // event loop, so two devices racing the same unclaimed pairing cannot both
+    // be admitted. The disk write only has to survive a restart.
+    claimedBy = decision.claim;
+    void claimPairing(decision.claim).catch((error: unknown) => {
+      console.error("[pairing] could not persist the device claim:", error);
+    });
+    console.error(`[pairing] claimed by '${deviceId}' — this link now admits only that device`);
+  }
+  return decision;
+}
 
 /**
  * One connection's encryption state.
@@ -118,6 +150,10 @@ const relay = pairing.relay
       // Relay traffic is fanned out locally too, so a desktop client and a
       // phone on 5G genuinely see the same conversation.
       onBroadcast: (message) => broadcast(message),
+      // The same single-device rule the LAN socket enforces. The relay is the
+      // path a leaked link is actually usable from, so leaving it ungated would
+      // make the gate decorative.
+      admitDevice,
       onStatus: (status, detail) =>
         console.log(`[relay] ${status}${detail ? ` — ${detail}` : ""}`),
     })
@@ -220,6 +256,26 @@ const server = Bun.serve({
           return;
         }
 
+        // A pairing link admits one device. Checked after the proof so a
+        // stranger without the key is refused as unpaired and never learns
+        // whether this pairing is claimed — that answer is only for someone who
+        // already holds the key, which a leaked link does give them.
+        const decision = admitDevice(deviceId);
+        if (!decision.ok) {
+          // Named, though this socket serves one device and needs no routing.
+          // The relay path must address its refusals or they reach the phone
+          // that owns the pairing, and a frame that means the same thing on both
+          // transports should not have two shapes.
+          sendPlain(ws, {
+            t: "error",
+            code: "device-refused",
+            deviceId,
+            message: decision.message,
+          });
+          ws.close(1008, "device refused");
+          return;
+        }
+
         client.authenticated = true;
         client.deviceId = deviceId;
         // Admits this device on the channel and lets its counters start from
@@ -306,6 +362,10 @@ const stopWatching = watchPairing(pairingPath(), pairing, () => loadPairing(), {
     const decoded = e2e.fromHex(next.key!);
     currentToken = next.token;
     rootKey = decoded;
+    // A rotation mints an unclaimed pairing, so the next device to arrive takes
+    // it. Not carried over: the point of rotating is to hand the pairing to a
+    // different phone.
+    claimedBy = next.claimedBy;
   },
   disconnectClients: () => {
     // Sealed with the previous key, so they cannot be carried across. The app

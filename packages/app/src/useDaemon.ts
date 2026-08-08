@@ -195,6 +195,15 @@ export interface WorkspaceBrowse {
   refused: boolean;
 }
 
+/**
+ * Failed connection attempts before the app stops saying "connecting".
+ *
+ * With the capped exponential backoff below, four attempts is about fifteen
+ * seconds — past a network switch or a daemon restart, and well short of the
+ * forever that a rotated pairing used to spend pretending to connect.
+ */
+const STALLED_ATTEMPTS = 4;
+
 interface State {
   status: Status;
   /**
@@ -207,6 +216,21 @@ interface State {
    * needs to act nothing at all.
    */
   fatal?: string;
+  /**
+   * Set once reconnecting has failed enough times to stop being a blip.
+   *
+   * Distinct from `fatal`, and deliberately weaker. The refusals that produce a
+   * dead pairing happen *below* the WebSocket — the daemon answers 401, the
+   * relay answers 409 for a room with no machine in it — so no frame ever
+   * arrives to explain them, and the app cannot tell a rotated token from a
+   * laptop that is merely asleep. Both must keep retrying, because one of them
+   * comes back on its own.
+   *
+   * What must not continue is the claim that a connection is in progress.
+   * "Connecting to your machine..." held forever is the state that sent someone
+   * to a stuck screen with nothing to act on.
+   */
+  unreachable?: boolean;
   providers: Provider[];
   sessionId?: string;
   /** The agent the composer will talk to. Chosen before a session exists. */
@@ -620,6 +644,12 @@ export function useDaemon(
     // A different pairing deserves a fresh attempt: this effect re-runs when the
     // url changes, which is exactly when someone has scanned a new code.
     fatal.current = false;
+    // The attempt counter and the verdict it produced belong to the pairing that
+    // failed. Carried into a newly scanned one, they would leave "Can't reach
+    // your machine" sitting over a connection that is only just starting — and
+    // one already past the threshold would show it before the first try.
+    attempts.current = 0;
+    setState((s) => (s.unreachable ? { ...s, unreachable: false } : s));
 
     const connect = () => {
       if (!alive.current) return;
@@ -642,6 +672,8 @@ export function useDaemon(
         setState((s) => ({
           ...s,
           status: "online",
+          // Whatever it was, it is reachable now.
+          unreachable: false,
           // Turns end while the phone is asleep and the socket is dead, and
           // `session.idle` is not replayed — only `session.event` is persisted.
           // So anything believed to be working across a drop is a guess, and
@@ -684,7 +716,24 @@ export function useDaemon(
         const kind = (frame as { t?: unknown } | null)?.t;
         if (kind === "error") {
           const code = (frame as { code?: unknown }).code;
-          if (code === "wire-version" || code === "unpaired") {
+          // `device-refused` joins these: the pairing is already claimed by
+          // another device, which is fatal in exactly the same way — retrying
+          // cannot fix it, and the message names the rotation that can.
+          //
+          // But only when it is addressed to this device. The relay forwards
+          // cleartext to every app in the room, so a refusal aimed at someone
+          // else — an attacker probing with a leaked link — arrives here too.
+          // Acting on it would let one frame from that attacker put the phone
+          // that actually owns the pairing into a permanent, un-retried failure.
+          const refusedDevice = (frame as { deviceId?: unknown }).deviceId;
+          if (
+            code === "device-refused" &&
+            typeof refusedDevice === "string" &&
+            refusedDevice !== deviceId
+          ) {
+            return;
+          }
+          if (code === "wire-version" || code === "unpaired" || code === "device-refused") {
             const detail = (frame as { message?: unknown }).message;
             fatal.current = true;
             setState((s) => ({
@@ -1333,7 +1382,16 @@ export function useDaemon(
           setState((s) => ({ ...s, status: "offline" }));
           return;
         }
-        setState((s) => ({ ...s, status: "offline" }));
+        // Past this many tries the socket is not coming up on its own schedule,
+        // and calling it "connecting" is no longer true. Roughly fifteen seconds
+        // of backoff: long enough to ride out a network switch or a daemon
+        // restart, short enough that nobody is left reading a spinner.
+        const stalled = attempts.current + 1 >= STALLED_ATTEMPTS;
+        setState((s) =>
+          s.status === "offline" && Boolean(s.unreachable) === stalled
+            ? s
+            : { ...s, status: "offline", unreachable: stalled },
+        );
         // Exponential backoff, capped, so a sleeping laptop does not get hammered.
         const delay = Math.min(1000 * 2 ** attempts.current, 10_000);
         attempts.current += 1;

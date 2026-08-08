@@ -38,6 +38,15 @@ export interface Pairing {
   /** When the token was minted, so the CLI can show its age. */
   createdAt: string;
   /**
+   * The device that claimed this pairing, if one has.
+   *
+   * A pairing link admits exactly one device: the first to complete a
+   * handshake is recorded here, and every later device is refused. That is what
+   * makes a leaked link — a QR caught on video — worthless once the real phone
+   * has connected. Cleared by `rotate`, which is the only revocation.
+   */
+  claimedBy?: string;
+  /**
    * Relay origin, when one is configured. Its presence is what decides whether
    * this machine is reachable from anywhere or only from the same network, so
    * it is stored beside the token rather than passed per-command.
@@ -137,6 +146,11 @@ export async function loadPairing(env: NodeJS.ProcessEnv = process.env): Promise
         token: parsed.token,
         key: parsed.key,
         createdAt: parsed.createdAt ?? new Date().toISOString(),
+        // Carried through explicitly. Dropping it here would unclaim the
+        // pairing on every daemon restart, which is the whole defence.
+        ...(typeof parsed.claimedBy === "string" && parsed.claimedBy
+          ? { claimedBy: parsed.claimedBy }
+          : {}),
         // The environment wins, so a relay can be pointed elsewhere for one run
         // without rewriting stored configuration.
         relay: env.PEW2_RELAY ?? parsed.relay,
@@ -174,6 +188,29 @@ export async function rotatePairing(env: NodeJS.ProcessEnv = process.env): Promi
     },
     env,
   );
+}
+
+/**
+ * Record the device that has claimed this pairing.
+ *
+ * Written straight through to disk so the claim survives a restart — an
+ * in-memory claim would quietly reopen the pairing every time the daemon
+ * relaunched, which is exactly when nobody is watching.
+ *
+ * Does nothing under `PEW2_TOKEN`: that pairing is derived, never stored, and
+ * writing a claim beside it would create a file `loadPairing` then ignores.
+ * Tests and containers re-claim on each run, which is what they want anyway.
+ */
+export async function claimPairing(
+  deviceId: string,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<void> {
+  if (env.PEW2_TOKEN) return;
+  const existing = await loadPairing(env);
+  // Re-reading first means a claim never resurrects a token that was rotated
+  // out from under this process.
+  if (existing.claimedBy) return;
+  await writePairing({ ...existing, claimedBy: deviceId }, env);
 }
 
 /** Point this machine at a relay, or clear it with `undefined`. */

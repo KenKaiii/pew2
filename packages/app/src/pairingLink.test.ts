@@ -62,15 +62,20 @@ test("adds the device id the relay requires", () => {
   expect(new URL(result.pairing.url).searchParams.get("deviceId")).toBe("phone-abc123");
 });
 
-test("keeps a device id already present in the link", () => {
+test("replaces the device id carried by the link with this install's own", () => {
+  // `pew2 pair` prints `deviceId=phone` so the URL is valid standalone. Keeping
+  // it would give every phone that scanned a QR the same identity — and the
+  // daemon admits one device per pairing by exactly this id, so a shared
+  // placeholder would let a leaked link impersonate the phone that claimed it.
   const result = parsePairing(
-    `wss://relay.example.com/connect?pairing=${TOKEN}&role=app&deviceId=existing${FRAGMENT}`,
+    `wss://relay.example.com/connect?pairing=${TOKEN}&role=app&deviceId=phone${FRAGMENT}`,
     "phone-abc123",
   );
 
   expect(result.ok).toBe(true);
   if (!result.ok) return;
-  expect(new URL(result.pairing.url).searchParams.get("deviceId")).toBe("existing");
+  expect(new URL(result.pairing.url).searchParams.get("deviceId")).toBe("phone-abc123");
+  expect(result.pairing.deviceId).toBe("phone-abc123");
 });
 
 test("corrects a relay link pasted with the daemon role", () => {

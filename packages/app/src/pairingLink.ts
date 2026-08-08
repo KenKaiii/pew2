@@ -100,7 +100,14 @@ export function parsePairing(input: string, deviceId = "phone"): ParseResult {
     url.searchParams.set("role", "app");
     // The relay answers 400 without this, which surfaces as a socket that just
     // never opens and no explanation anywhere.
-    if (!url.searchParams.get("deviceId")) url.searchParams.set("deviceId", deviceId);
+    //
+    // Always overwritten, never kept. `pew2 pair` bakes a literal `deviceId=phone`
+    // into the printed link purely so that URL is valid on its own — and honouring
+    // it would make every phone that ever scanned a QR call itself "phone". The
+    // daemon admits one device per pairing and tells them apart by this id, so a
+    // shared placeholder would hand a leaked link the same identity as the phone
+    // that claimed it, which is precisely the attack the claim is there to stop.
+    url.searchParams.set("deviceId", deviceId);
   }
 
   // `localhost` resolves to the phone itself, so a direct link to it can only
@@ -112,7 +119,8 @@ export function parsePairing(input: string, deviceId = "phone"): ParseResult {
       url: url.toString(),
       label: url.host,
       remote,
-      deviceId: url.searchParams.get("deviceId") ?? deviceId,
+      // This install's own id, not whatever the link carried.
+      deviceId,
       key: keyHex,
     },
   };

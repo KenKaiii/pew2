@@ -249,6 +249,9 @@ export async function cmdPair(flags: Set<string>): Promise<number> {
           daemonRunning,
           remote: reach === "anywhere",
           reach,
+          // An agent driving setup needs to know this code cannot onboard a
+          // second device, rather than discovering it when the phone is refused.
+          claimedBy: pairing.claimedBy ?? null,
         },
         null,
         2,
@@ -267,6 +270,7 @@ export async function cmdPair(flags: Set<string>): Promise<number> {
     port,
     daemonRunning,
     rotated: Boolean(options.rotate),
+    ...(pairing.claimedBy ? { claimedBy: pairing.claimedBy } : {}),
   };
 
   const style = styler(colorLevel());

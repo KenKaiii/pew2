@@ -18,6 +18,8 @@ import {
   pairingUrl,
   renderQr,
   rotatePairing,
+  setRelay,
+  claimPairing,
   tokenFromUrl,
   tokenMatches,
   qrCode,
@@ -388,4 +390,64 @@ test("a short PEW2_TOKEN is refused instead of quietly becoming a weak key", asy
   // Named requirement, and a way to satisfy it: this fires at startup, where
   // "invalid token" alone would send someone looking in the wrong place.
   expect(() => pairingFromToken("short")).toThrow(/openssl rand -hex 32/);
+});
+
+test("a claim survives a restart", async () => {
+  // The claim is the whole defence against a leaked link. Holding it only in
+  // memory would quietly reopen the pairing on every daemon restart — which is
+  // exactly when nobody is watching.
+  const { env } = await sandbox();
+  await loadPairing(env);
+
+  await claimPairing("phone-aaaa", env);
+
+  expect((await loadPairing(env)).claimedBy).toBe("phone-aaaa");
+});
+
+test("a claimed pairing is not re-claimed by a later device", async () => {
+  // Persisting a second claim would overwrite the first and hand the pairing to
+  // whoever connected most recently — the opposite of the rule.
+  const { env } = await sandbox();
+  await loadPairing(env);
+  await claimPairing("phone-aaaa", env);
+
+  await claimPairing("phone-bbbb", env);
+
+  expect((await loadPairing(env)).claimedBy).toBe("phone-aaaa");
+});
+
+test("rotating clears the claim, so a new phone can pair", async () => {
+  // Rotation is the only revocation, and it has to actually be one: a claim
+  // carried across would leave the user with a fresh QR that nothing can scan.
+  const { env } = await sandbox();
+  await loadPairing(env);
+  await claimPairing("phone-aaaa", env);
+
+  const rotated = await rotatePairing(env);
+
+  expect(rotated.claimedBy).toBeUndefined();
+  expect((await loadPairing(env)).claimedBy).toBeUndefined();
+});
+
+test("pointing at a relay keeps the claim", async () => {
+  // `pew2 relay <url>` rewrites the same file. Dropping the claim there would
+  // silently unlock the pairing as a side effect of changing where it connects.
+  const { env } = await sandbox();
+  await loadPairing(env);
+  await claimPairing("phone-aaaa", env);
+
+  await setRelay("wss://relay.example.com", env);
+
+  expect((await loadPairing(env)).claimedBy).toBe("phone-aaaa");
+});
+
+test("a claim is never written beside a derived PEW2_TOKEN pairing", async () => {
+  // That pairing is never read back from disk, so a file written here would be
+  // ignored on the next run — a claim that looks enforced and is not.
+  const { env } = await sandbox();
+  const scoped = { ...env, PEW2_TOKEN: FIXED };
+
+  await claimPairing("phone-aaaa", scoped);
+
+  expect((await loadPairing(scoped)).claimedBy).toBeUndefined();
 });

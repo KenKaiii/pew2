@@ -44,6 +44,14 @@ export interface PairView {
   port: number;
   daemonRunning: boolean;
   rotated: boolean;
+  /**
+   * The device already using this pairing, if one has claimed it.
+   *
+   * A link admits one device, so a code printed for an already-claimed pairing
+   * cannot onboard a second phone. Saying so here is the difference between a
+   * one-line fix and scanning a QR that answers with a refusal.
+   */
+  claimedBy?: string;
 }
 
 export interface RenderOptions {
@@ -327,6 +335,16 @@ export function renderPair(
     lines.push(
       rail(options).bar(),
       `${g_}${s.hex(PALETTE.warning, g.warn)} ${s.dim("token rotated — devices paired before now must scan again")}`,
+    );
+  } else if (view.claimedBy) {
+    // Only when it was not just rotated: a rotation clears the claim, so both
+    // notices at once would contradict each other.
+    const s = options.style ?? styler();
+    const g = options.glyph ?? glyphs();
+    lines.push(
+      rail(options).bar(),
+      `${g_}${s.hex(PALETTE.warning, g.warn)} ${s.dim("already paired to a device — this code admits no other")}`,
+      `${g_}  ${s.dim("to move to a different phone: pew2 pair --rotate")}`,
     );
   }
 

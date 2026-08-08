@@ -26,9 +26,17 @@ interface Props {
   onScan: (value: string) => void;
   /** Set when the last scan produced an invalid link, so it can be shown here. */
   error?: string | null;
+  /**
+   * Set while a scanned code is being checked against the machine.
+   *
+   * Reading a code is instant, but proving it works is a round trip that can
+   * take seconds on mobile data. Without this the viewfinder just sits there
+   * after a good scan, looking like it failed to read anything.
+   */
+  busy?: boolean;
 }
 
-export function QrScanner({ visible, onClose, onScan, error }: Props) {
+export function QrScanner({ visible, onClose, onScan, error, busy }: Props) {
   const insets = useSafeAreaInsets();
   const [permission, requestPermission] = useCameraPermissions();
   // The camera fires continuously while a code is in frame. Without a latch the
@@ -128,7 +136,11 @@ export function QrScanner({ visible, onClose, onScan, error }: Props) {
               {/* A frame, not a mask: it tells the user where to aim without
                   hiding the rest of the viewfinder. */}
               <View style={styles.reticle} />
-              <Text style={styles.hint}>{error ?? "Point at the code"}</Text>
+              {/* Progress outranks the error beneath it: a check in flight has
+                  already superseded the last failure. */}
+              <Text style={styles.hint}>
+                {busy ? "Checking the code…" : (error ?? "Point at the code")}
+              </Text>
             </View>
           ) : (
             <View style={styles.centre}>

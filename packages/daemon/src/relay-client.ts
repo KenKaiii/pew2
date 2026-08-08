@@ -43,6 +43,14 @@ export interface RelayClientOptions {
    * network rather than the local Wi-Fi.
    */
   onBroadcast?: (message: unknown) => void;
+  /**
+   * Decide whether a device that has proved it holds the key may connect.
+   *
+   * Supplied by the daemon so the relay and the LAN socket enforce one rule: a
+   * pairing link admits a single device, and a leaked copy of it is refused.
+   * Absent in tests that predate the gate, which then admit every prover.
+   */
+  admitDevice?: (deviceId: string) => { ok: boolean; message?: string };
   /** Injectable for tests. Defaults to the global WebSocket. */
   createSocket?: (url: string) => WebSocket;
 }
@@ -247,6 +255,39 @@ export class RelayClient {
         // and re-approve a tool call the user approved once.
         if (!deviceId) return;
         if (!this.channel.verifyProof(hello.proof, deviceId)) return;
+
+        // One pairing, one device. Enforced here as well as on the LAN socket:
+        // a leaked link is most useful to an attacker from off the network, so
+        // the relay is the path that actually needs this.
+        //
+        // Decided before the handshake is accepted, so a refused device never
+        // gets its replay window cleared — which was the whole reason the proof
+        // has to come first. Synchronous by design: this runs inside the socket's
+        // message handler, and an await here would let the next frame overtake
+        // the handshake it depends on.
+        const decision = this.options.admitDevice?.(deviceId);
+        if (decision && !decision.ok) {
+          // Cleartext, like the version mismatch above and for the same reason:
+          // this refusal is what stops the channel being established, so there
+          // is no sealed path to send it down. It carries no user content — only
+          // that this pairing belongs to another device.
+          //
+          // Addressed to the device it refuses, because the relay fans cleartext
+          // out to every app in the room: only sealed frames are stamped and
+          // routed. Unaddressed, this refusal would also land on the phone that
+          // legitimately owns the pairing, which treats it as fatal and stops
+          // reconnecting — handing an attacker a one-frame way to knock the real
+          // device offline with the very gate meant to stop them.
+          socket.send(
+            JSON.stringify({
+              t: "error",
+              code: "device-refused",
+              deviceId,
+              message: decision.message,
+            }),
+          );
+          return;
+        }
         this.channel.acceptHandshake(deviceId);
 
         // The app may have been waiting here long before this machine woke up,
