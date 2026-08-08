@@ -396,6 +396,16 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
   const [choice, setChoice] = useState<NotificationChoice | undefined>(undefined);
   useEffect(() => onNotificationChoice(setChoice), []);
 
+  // Whether the daemon has somewhere to push.
+  //
+  // What stops a backgrounded Android phone announcing the same turn twice:
+  // there the socket outlives the app leaving the screen, so `session.idle`
+  // still arrives and both routes would fire. Driven by the daemon accepting
+  // the token rather than this app merely holding one — an older daemon refuses
+  // `app.push`, and suppressing the local banner for a push that can never come
+  // would leave the phone silent.
+  const pushExpected = useRef(false);
+
   /**
    * Announce a turn that ended somewhere the user cannot see it.
    *
@@ -403,16 +413,6 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
    * backgrounded or looking at another project, so without this a finished
    * five-minute turn is only discovered by going back to check.
    */
-  // Whether the daemon has somewhere to push. Set once a token is handed over,
-  // and what stops a backgrounded Android phone showing the same turn twice —
-  // there the socket outlives the app leaving the screen, so both routes fire.
-  const pushExpected = useRef(false);
-  const registerPush = useCallback(async () => {
-    const address = await pushAddress();
-    pushExpected.current = address !== undefined;
-    return address;
-  }, []);
-
   const announceTurn = useCallback((turn: TurnFinished) => {
     const notice = finishedNotice({
       ...turn,
@@ -431,7 +431,10 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
     // announce a finished turn even after iOS has suspended this app and taken
     // its socket with it — previously that banner waited for the app to be
     // reopened, which is minutes too late to be worth anything.
-    pushAddress: registerPush,
+    pushAddress,
+    onPushRegistered: (registered) => {
+      pushExpected.current = registered;
+    },
   });
 
   // Tell the notification layer which conversation is open, so a push that

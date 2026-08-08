@@ -26,9 +26,11 @@ export interface FinishedTurn {
   /**
    * Whether the daemon has somewhere to push this turn.
    *
-   * True once a push token has been handed over. False on a simulator, in a
-   * fresh clone with no EAS project, or when notification permission was
-   * refused — all of which leave the local banner as the only route.
+   * True once the daemon has *accepted* a push token — not merely once this app
+   * holds one. False on a simulator, in a fresh clone with no EAS project, when
+   * permission was refused, and when the daemon refused the token (including a
+   * daemon too old to know `app.push`). All of those leave the local banner as
+   * the only route, so it must still be raised.
    */
   pushExpected?: boolean;
 }

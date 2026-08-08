@@ -459,6 +459,16 @@ interface DaemonOptions {
    * with no EAS project, or a refused permission.
    */
   pushAddress?: () => Promise<PushAddress | undefined>;
+  /**
+   * Whether the daemon now has somewhere to push, told to the screen.
+   *
+   * Reports acceptance, not acquisition: holding a token means nothing if the
+   * daemon never stored it. A daemon older than `app.push` answers
+   * `unknown_message`, and one that has not seen this device's `hello` refuses
+   * it — in both cases no push will ever arrive, and the screen has to know so
+   * it keeps raising the local banner instead of going silent.
+   */
+  onPushRegistered?: (registered: boolean) => void;
 }
 
 /**
@@ -689,8 +699,10 @@ export function useDaemon(
       const ws = new WebSocket(url);
       socket.current = ws;
       // A new socket has told nobody anything yet, and the daemon on the far
-      // end may be a restarted process holding no tokens at all.
+      // end may be a restarted process holding no tokens at all. Until it
+      // accepts one, the local banner is the only route there is.
       pushRegistered.current = false;
+      optionsRef.current.onPushRegistered?.(false);
       // Fresh per connection: the counters that make replay detectable are only
       // meaningful within one socket, so carrying them across a reconnect would
       // make the new connection's first frames look like replays.
@@ -1003,8 +1015,14 @@ export function useDaemon(
           if (askPush && !pushRegistered.current) {
             pushRegistered.current = true;
             void askPush().then((address) => {
-              if (!address || ws.readyState !== WebSocket.OPEN) return;
-              ws.send(JSON.stringify(secure.seal({ t: "app.push", ...address })));
+              // Reported as sent, not as accepted: the daemon stays silent on
+              // success, and only speaks up to refuse. A refusal arrives as an
+              // `error` below and puts this back to false.
+              const sent = address !== undefined && ws.readyState === WebSocket.OPEN;
+              if (sent) {
+                ws.send(JSON.stringify(secure.seal({ t: "app.push", ...address })));
+              }
+              optionsRef.current.onPushRegistered?.(sent);
             });
           }
           if (Array.isArray(message.activeSessions)) {
@@ -1054,6 +1072,21 @@ export function useDaemon(
         // that project again would be ignored for the life of the socket.
         if (message.t === "error" && message.code === "unknown_message") {
           pendingProjectSessions.current.clear();
+        }
+        // A refused push token, for any of the three reasons it can be refused:
+        // a daemon too old to know `app.push`, one that has not seen this
+        // device's `hello`, or a token it will not accept. All three mean no
+        // push will ever arrive, and the screen must go back to raising the
+        // local banner — otherwise suppressing it in favour of a push that
+        // cannot come leaves a backgrounded phone silent, which is worse than
+        // the behaviour this feature replaced.
+        if (
+          message.t === "error" &&
+          (message.code === "unknown_message" ||
+            message.code === "push_unidentified" ||
+            message.code === "push_token_invalid")
+        ) {
+          optionsRef.current.onPushRegistered?.(false);
         }
 
         // Project and git state, answered per request. An answer for a

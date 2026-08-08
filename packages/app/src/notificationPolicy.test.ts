@@ -49,9 +49,17 @@ describe("finishedNotice", () => {
   });
 
   it("still announces a backgrounded turn when there is no push to wait for", () => {
-    // A simulator, a fresh clone with no EAS project, or a refused permission.
-    // Losing the banner here would regress the old local-only behaviour.
+    // A simulator, a fresh clone with no EAS project, a refused permission, or
+    // a daemon too old to know `app.push` and which therefore refused the
+    // token. Losing the banner here would be worse than the local-only
+    // behaviour this feature replaced: the phone would go silent entirely.
     expect(finishedNotice({ ...base, foreground: false, pushExpected: false })).not.toBeNull();
+  });
+
+  it("announces a backgrounded turn when nothing said whether a push is coming", () => {
+    // `pushExpected` omitted, which is how every caller behaved before push
+    // existed. The safe default is the banner, not silence.
+    expect(finishedNotice({ ...base, foreground: false })).not.toBeNull();
   });
 
   it("still announces another session while the user is looking at this one", () => {

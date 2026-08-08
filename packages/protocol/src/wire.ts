@@ -535,10 +535,14 @@ export const SessionIdle = z.object({
  * Sent on every connect, because push tokens rotate.
  *
  * Deliberately not a `WIRE_VERSION` bump. A new message type is additive: a
- * daemon that predates it answers `unknown_message` and the app keeps its
- * local-only banners, which is exactly the behaviour it had before. Bumping
- * would instead refuse the connection outright and take working sessions down
- * to deliver a notification improvement.
+ * daemon that predates it answers `unknown_message`, which the app treats as a
+ * refusal and falls back to its local-only banners — exactly the behaviour it
+ * had before. Bumping would instead refuse the connection outright and take
+ * working sessions down to deliver a notification improvement.
+ *
+ * The daemon says nothing on success. Silence is acceptance; only a refusal is
+ * spoken, so the app must not assume a token it holds is a token the daemon
+ * kept.
  */
 export const PushRegister = z.object({
   t: z.literal("app.push"),
