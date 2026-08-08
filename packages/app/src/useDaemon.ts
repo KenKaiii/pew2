@@ -534,6 +534,7 @@ export function useDaemon(
   const retry = useRef<ReturnType<typeof setTimeout> | null>(null);
   const attempts = useRef(0);
   const alive = useRef(true);
+  const resume = useRef<(() => void) | undefined>(undefined);
   // Mirrors state.sessionId so actions can read it without doing work inside a
   // state updater. Updaters must stay pure: React may invoke them twice.
   const sessionRef = useRef<string | undefined>(undefined);
@@ -1492,8 +1493,35 @@ export function useDaemon(
 
     connect();
 
+    // Published for `resumeNow` below, which cannot reach `connect` itself: the
+    // socket and its backoff are scoped to this effect.
+    resume.current = () => {
+      if (!alive.current) return;
+      // A refusal the daemon explained is still a refusal after a trip to the
+      // home screen; retrying it here would defeat the whole point of `fatal`.
+      if (fatal.current) return;
+      const ws = socket.current;
+      // A live socket needs nothing. `CONNECTING` is left alone too: an attempt
+      // is already in flight, and replacing it would abandon a connection that
+      // may be one frame from opening.
+      if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+        return;
+      }
+      if (retry.current) {
+        clearTimeout(retry.current);
+        retry.current = null;
+      }
+      // Deliberately back to zero. The attempts behind us were made against a
+      // backgrounded app, and carrying their count forward would both stretch
+      // the next delay and let one more failure trip the "can't reach your
+      // machine" threshold on what is, for the user, the first try.
+      attempts.current = 0;
+      connect();
+    };
+
     return () => {
       alive.current = false;
+      resume.current = undefined;
       if (retry.current) clearTimeout(retry.current);
       const ws = socket.current;
       socket.current = null;
@@ -1547,6 +1575,29 @@ export function useDaemon(
     },
     [post],
   );
+
+  /**
+   * Retry the connection now instead of waiting out the backoff.
+   *
+   * Called when the app returns to the foreground. iOS suspends the socket on
+   * background and it closes without ceremony, so a retry is usually already
+   * queued — and because the delay doubles, it can be up to ten seconds out. The
+   * user comes back to a conversation reporting itself offline on a network that
+   * is perfectly fine, for no reason but a timer's opinion. Returning to the
+   * foreground is strong evidence the network is worth another try.
+   *
+   * The `AppState` listener that calls this lives in the caller rather than in
+   * here, and that is load-bearing rather than tidiness: this module is reached
+   * by the daemon's own tests through `agentHistory.ts`, which imports `Session`
+   * from it. A `react-native` import here drags React Native's global type
+   * declarations into the daemon's TypeScript program, where they redefine
+   * `setTimeout` as returning a browser-style `number` — breaking every
+   * `.unref()` and `Timeout` in the daemon, in files nobody touched. Keeping
+   * this hook free of native imports is the same rule the pure modules follow.
+   */
+  const resumeNow = useCallback(() => {
+    resume.current?.();
+  }, []);
 
   const actions = useMemo(
     () => ({
@@ -2015,6 +2066,7 @@ export function useDaemon(
   return {
     ...state,
     ...actions,
+    resumeNow,
     // Exported so the UI names the same agent the composer targets: the drawer
     // and top bar must not show Claude Code while a prompt would go elsewhere.
     effectiveProviderId,

@@ -12,7 +12,7 @@
  */
 import { memo } from "react";
 import { Image, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
-import { Ionicons } from "@expo/vector-icons";
+import Ionicons from "@expo/vector-icons/Ionicons";
 import { theme } from "../theme";
 import { touchSlop } from "./controls";
 import { haptics } from "./haptics";

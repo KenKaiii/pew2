@@ -9,7 +9,7 @@ is where it is — not ceremony, consequence.
 ```bash
 bun install
 bun run typecheck
-bun test packages
+bun run test
 bun run lint
 ```
 
@@ -32,17 +32,17 @@ tested is running the daemon itself on Node.
 
 ## Before you open a pull request
 
-- `bun run typecheck`, `bun test packages`, `bun run lint` — all three clean.
+- `bun run typecheck`, `bun run test`, `bun run lint` — all three clean.
 - New behaviour comes with a test that fails without it. A test that passes
   against the old code is describing a hope, not a change.
 - Security fixes come with an *adversarial* test: the attack, executed, refused.
   `packages/protocol/src/channel.test.ts` is the shape to copy.
 
-Some suites spawn a real agent process (the ACP pipeline, the workspace tests),
-and those are sensitive to where you run them from. If they fail in a fraction of
-a second while everything else passes, the agent is dying at spawn rather than
-failing a test — try `cd /tmp && bun test <repo>/packages` before concluding the
-tree is broken. CI runs them from a clean checkout and is the authority.
+Run the suite as `bun run test`, not as `bun test` with a path of your own. The
+argument list is load-bearing, and the `//test` note beside the script in
+`package.json` explains what breaks without it: a wider scan exhausts file
+descriptors, and the suites that spawn a real agent then fail in milliseconds
+with empty output while the code is fine.
 
 ## When CI does not run
 

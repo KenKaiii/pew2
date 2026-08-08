@@ -1,5 +1,10 @@
 import { expect, test } from "bun:test";
-import { projectLabel, projectsForProvider, sessionsInProject } from "./projects";
+import {
+  projectLabel,
+  projectsForProvider,
+  projectSourceKey,
+  sessionsInProject,
+} from "./projects";
 import type { Session } from "./useDaemon";
 
 function session(partial: Partial<Session> & { id: string }): Session {
@@ -101,4 +106,45 @@ test("no choice shows everything", () => {
 test("the control always has a label", () => {
   expect(projectLabel(undefined)).toBe("All projects");
   expect(projectLabel({ path: "/a/pew2", name: "pew2" })).toBe("pew2");
+});
+
+test("the memo key ignores a streamed chunk landing on a session's turns", () => {
+  // The exact case this exists for: a chunk arrives, the sessions array is
+  // rebuilt with new turns on the active session, and the project list is
+  // unaffected. A changed key here would put the sort back on every chunk.
+  const before = [session({ id: "1", cwd: "/a/pew2" })];
+  const after = [session({ id: "1", cwd: "/a/pew2", turns: [{ id: "t1" }] as never })];
+
+  expect(projectSourceKey(after, "claude-code")).toBe(projectSourceKey(before, "claude-code"));
+});
+
+test("the memo key changes when a session introduces a new project", () => {
+  const before = [session({ id: "1", cwd: "/a/pew2" })];
+  const after = [...before, session({ id: "2", cwd: "/a/site" })];
+
+  expect(projectSourceKey(after, "claude-code")).not.toBe(
+    projectSourceKey(before, "claude-code"),
+  );
+});
+
+test("the memo key is scoped to one agent", () => {
+  // Another agent's conversations cannot change this agent's project list, so
+  // they must not invalidate it either.
+  const sessions = [
+    session({ id: "1", cwd: "/a/pew2" }),
+    session({ id: "2", cwd: "/a/site", providerId: "codex" }),
+  ];
+
+  expect(projectSourceKey(sessions, "claude-code")).toBe(
+    projectSourceKey([sessions[0]!], "claude-code"),
+  );
+});
+
+test("the memo key separates fields so neighbouring values cannot merge", () => {
+  // Without a separator, {cwd:"/a", startedAt:11} and {cwd:"/a1", startedAt:1}
+  // would produce the same key and one would be silently skipped.
+  const a = [session({ id: "1", cwd: "/a", startedAt: 11 })];
+  const b = [session({ id: "1", cwd: "/a1", startedAt: 1 })];
+
+  expect(projectSourceKey(a, "claude-code")).not.toBe(projectSourceKey(b, "claude-code"));
 });

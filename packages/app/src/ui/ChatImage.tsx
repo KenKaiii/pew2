@@ -21,7 +21,7 @@ import {
   type ImageErrorEventData,
   type NativeSyntheticEvent,
 } from "react-native";
-import { Ionicons } from "@expo/vector-icons";
+import Ionicons from "@expo/vector-icons/Ionicons";
 import { theme } from "../theme";
 import { haptics } from "./haptics";
 import { ImageViewer } from "./ImageViewer";

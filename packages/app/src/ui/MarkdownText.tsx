@@ -1,5 +1,5 @@
-import { createElement, useEffect, useState } from "react";
-import { Ionicons } from "@expo/vector-icons";
+import { createElement, memo, useEffect, useMemo, useState } from "react";
+import Ionicons from "@expo/vector-icons/Ionicons";
 import * as Clipboard from "expo-clipboard";
 import { Linking, Platform, Pressable, StyleSheet, Text, View } from "react-native";
 import Markdown, {
@@ -13,6 +13,7 @@ import { isDisplayableImage } from "../images";
 import { writeCodeToClipboard } from "./codeBlockClipboard";
 import { fencedCodeContainerStyle, fencedCodeTextStyle } from "./markdownCodeStyles";
 import { boundedMarkdownParagraphStyle, boundedMarkdownRootStyle } from "./messageLayoutStyles";
+import { splitMarkdownBlocks } from "./markdownBlocks";
 
 export type MarkdownTone = "body" | "thought" | "system";
 
@@ -190,7 +191,12 @@ function stylesFor(
   lineHeight: number,
 ): Partial<MarkdownStyles> {
   return {
-    root: { ...boundedMarkdownRootStyle, marginBottom: -BLOCK_GAP },
+    // No negative margin here, unlike the single-render version this replaced.
+    // Each block now carries its own trailing `BLOCK_GAP`, and the cancellation
+    // that keeps a message from ending in dead space belongs once, on the
+    // wrapper around all of them — applied per block it would instead collapse
+    // the gap between every pair of paragraphs.
+    root: boundedMarkdownRootStyle,
     text: { color, fontSize, lineHeight },
     paragraph: {
       color,
@@ -350,7 +356,21 @@ function openLink(url: string): void {
     .catch(() => undefined);
 }
 
-export function MarkdownText({ text, tone = "body" }: { text: string; tone?: MarkdownTone }) {
+/**
+ * One top-level block.
+ *
+ * Memoised on its own source text, which is the entire point: while a reply
+ * streams, every block above the one being written is byte-identical from chunk
+ * to chunk, so this bails out before the renderer parses anything. Only the
+ * final block does real work per chunk.
+ */
+const MarkdownBlock = memo(function MarkdownBlock({
+  source,
+  tone,
+}: {
+  source: string;
+  tone: MarkdownTone;
+}) {
   return (
     <Markdown
       rules={markdownRules as RenderRules}
@@ -360,7 +380,52 @@ export function MarkdownText({ text, tone = "body" }: { text: string; tone?: Mar
       // rule, which is replaced above precisely because it cannot load a file
       // that lives on the desktop.
     >
-      {text}
+      {source}
     </Markdown>
   );
+});
+
+function MarkdownTextView({ text, tone = "body" }: { text: string; tone?: MarkdownTone }) {
+  // Splitting is a parse, so it is memoised too — but it is only the block
+  // tokeniser, not the inline pass or the element tree, and it is the one piece
+  // of work that unavoidably sees the whole message.
+  const blocks = useMemo(() => splitMarkdownBlocks(text), [text]);
+
+  return (
+    <View style={blockLayout.root}>
+      {blocks.map((source, index) => (
+        <MarkdownBlock
+          // Index, deliberately. Blocks are an ordered decomposition of one
+          // string: block 2 is always the third thing in this message, and
+          // during streaming it grows in place rather than being reordered or
+          // removed. Keying by content would instead throw away and remount the
+          // block being written on every single chunk — exactly the work this
+          // whole file is arranged to avoid — and would collapse the two
+          // identical paragraphs a message is perfectly entitled to contain.
+          key={index}
+          source={source}
+          tone={tone}
+        />
+      ))}
+    </View>
+  );
 }
+
+const blockLayout = StyleSheet.create({
+  root: {
+    // This wrapper now stands where the single Markdown root used to, so it has
+    // to keep that root's bounding. Without it a long code line has nothing to
+    // shrink against — a View defaults to `flexShrink: 0` — and would push the
+    // message wider than its rail.
+    ...boundedMarkdownRootStyle,
+    // The message ends flush: the last block contributes a trailing `BLOCK_GAP`
+    // like every other, and this takes exactly that back.
+    marginBottom: -BLOCK_GAP,
+  },
+});
+
+/**
+ * Memoised at the message level as well, so a turn that is merely re-rendered
+ * — a sibling streaming, the keyboard opening — does no markdown work at all.
+ */
+export const MarkdownText = memo(MarkdownTextView);

@@ -28,7 +28,7 @@
  */
 import { memo } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
-import { Ionicons } from "@expo/vector-icons";
+import Ionicons from "@expo/vector-icons/Ionicons";
 import { theme } from "../theme";
 import { touchSlop } from "./controls";
 import { changesAccessibilityLabel, changesLabel } from "../workspaceLabel";

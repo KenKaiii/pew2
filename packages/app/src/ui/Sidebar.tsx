@@ -23,7 +23,7 @@ import {
   View,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { Ionicons } from "@expo/vector-icons";
+import Ionicons from "@expo/vector-icons/Ionicons";
 import { theme } from "../theme";
 import { Orb } from "./Orb";
 import { touchSlop } from "./controls";
@@ -34,6 +34,7 @@ import { orderProvidersByRecency } from "../providerRecency";
 import { formatHistoryMetadata } from "../historyMetadata";
 import { recentSessionsForProvider } from "../sessionHistory";
 import { useReducedMotion } from "./useReducedMotion";
+import { useAppActive } from "./useAppActive";
 import { ProjectSelect } from "./ProjectSelect";
 import { ProjectMenu } from "./ProjectMenu";
 import { sessionsInProject, type Project } from "../projects";
@@ -105,16 +106,22 @@ function SessionStatus({
   busy,
   unread,
   reduceMotion,
+  paused,
 }: {
   busy: boolean;
   unread: boolean;
   reduceMotion: boolean;
+  /**
+   * The drawer is shut, or the app is not on screen. Rows stay mounted through
+   * both, so without this they keep pulsing where nobody can see them.
+   */
+  paused: boolean;
 }) {
   const pulse = useRef(new Animated.Value(1)).current;
 
   useEffect(() => {
     pulse.stopAnimation();
-    if (!busy || reduceMotion) {
+    if (!busy || reduceMotion || paused) {
       pulse.setValue(1);
       return;
     }
@@ -138,7 +145,7 @@ function SessionStatus({
     );
     loop.start();
     return () => loop.stop();
-  }, [busy, pulse, reduceMotion]);
+  }, [busy, pulse, reduceMotion, paused]);
 
   // Working outranks unread: a session that answered and was prompted again
   // from the desktop is, right now, working.
@@ -164,10 +171,20 @@ interface SessionRowProps {
   index: number;
   active: boolean;
   reduceMotion: boolean;
+  /** Nothing in this row should be animating: shut drawer, or app in the
+   *  background. */
+  paused: boolean;
   onOpen: () => void;
 }
 
-function SessionRow({ session, index, active, reduceMotion, onOpen }: SessionRowProps) {
+function SessionRow({
+  session,
+  index,
+  active,
+  reduceMotion,
+  paused,
+  onOpen,
+}: SessionRowProps) {
   // Only the initial viewport cascades. Rows virtualized in later should appear
   // immediately, rather than fading under the user's finger while they scroll.
   const shouldAnimate = !reduceMotion && index < MAX_STAGGERED_ROWS;
@@ -228,6 +245,7 @@ function SessionRow({ session, index, active, reduceMotion, onOpen }: SessionRow
             busy={session.busy === true}
             unread={session.unread === true}
             reduceMotion={reduceMotion}
+            paused={paused}
           />
         </View>
         {metadata ? (
@@ -260,6 +278,11 @@ function SidebarView({
   reduceMotion = false,
 }: SidebarProps) {
   const insets = useSafeAreaInsets();
+  const appActive = useAppActive();
+  // Nothing in a row should be animating when the drawer is shut behind the
+  // conversation, or when the app is not on screen at all. Resolved once here
+  // rather than per row, so the whole list shares one subscription.
+  const rowsStill = !open || !appActive;
   const [menuOpen, setMenuOpen] = useState(false);
   // Measured rather than computed: the chip row above scrolls horizontally and
   // the select row's own height comes from the type inside it, so the only
@@ -396,6 +419,9 @@ function SidebarView({
                     pressed && provider.available && styles.pressed,
                   ]}
                 >
+                  {/* Below MATRIX_MIN_SIZE, so this is the static silhouette —
+                      two plain views, nothing animating behind a closed
+                      drawer. */}
                   <Orb color={provider.color} size={18} />
                   <Text style={styles.agentChipText} numberOfLines={1}>
                     {provider.name}
@@ -471,6 +497,7 @@ function SidebarView({
                 index={index}
                 active={session.id === activeSessionId}
                 reduceMotion={reduceMotion}
+                paused={rowsStill}
                 onOpen={() => {
                   haptics.tap();
                   onOpenSession(session.id);

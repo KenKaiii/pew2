@@ -192,8 +192,22 @@ test.skipIf(platform() !== "darwin")("the generated plist parses as real XML", a
 
   // plutil is what launchd itself uses; a file it rejects will never load.
   const proc = Bun.spawn(["plutil", "-lint", path], { stdout: "pipe", stderr: "pipe" });
-  const code = await proc.exited;
-  expect(`${path}: ${await new Response(proc.stdout).text()}`.includes("OK")).toBe(true);
-  expect(code).toBe(0);
+
+  // The exit status and both pipes concurrently, rather than awaiting `exited`
+  // first: reading a pipe only after the process is gone depends on its buffer
+  // outliving it, and draining stderr alongside stdout is also what stops a
+  // command that fills one pipe from blocking on the other.
+  const [code, out, err] = await Promise.all([
+    proc.exited,
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ]);
+
+  // A clean lint exits 0 and says nothing on stderr. Both are asserted in one
+  // object so a rejected plist shows the reason it gave, instead of reporting
+  // "expected 0, received 1" and discarding the only useful detail.
+  expect({ code, err }).toEqual({ code: 0, err: "" });
+  // `plutil` prints `<path>: OK`, so its own output is the assertion.
+  expect(out).toContain("OK");
   expect(await readFile(path, "utf8")).toContain(LABEL);
 });

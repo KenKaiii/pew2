@@ -33,7 +33,7 @@ import Reanimated, {
   withTiming,
 } from "react-native-reanimated";
 import { StatusBar } from "expo-status-bar";
-import { Ionicons } from "@expo/vector-icons";
+import Ionicons from "@expo/vector-icons/Ionicons";
 import { theme } from "./src/theme";
 import { useDaemon, type Provider, type TurnFinished } from "./src/useDaemon";
 import { currentTool } from "./src/activity";
@@ -65,31 +65,45 @@ import { applyCommand, type SlashCommand } from "./src/slashCommands";
 import { CircleButton, Pill } from "./src/ui/controls";
 import { haptics } from "./src/ui/haptics";
 import { Sidebar, DRAWER_WIDTH } from "./src/ui/Sidebar";
-import { projectsForProvider } from "./src/projects";
+import { projectsForProvider, projectSourceKey } from "./src/projects";
 import { greetingFor, hashSeed } from "./src/greeting";
 import { showsStop } from "./src/composerState";
 import { ConfigPicker, summarise, valueName } from "./src/ui/ConfigPicker";
 import { useReducedMotion } from "./src/ui/useReducedMotion";
-import { ProgressiveBlur } from "./src/ui/ProgressiveBlur";
+import { CanvasCover } from "./src/ui/CanvasCover";
 import { withLayoutX, type PillX } from "./src/ui/pillAnchor";
 import { PairingScreen } from "./src/ui/PairingScreen";
 import { LaunchScreen } from "./src/ui/LaunchScreen";
 import { clearPairing, loadPairing, savePairing, type Pairing } from "./src/pairing";
+import * as SplashScreen from "expo-splash-screen";
 import { clearCrash, readCrash } from "./src/crashLog";
 import * as Clipboard from "expo-clipboard";
-import {
-  useFonts,
-  BitcountPropSingle_400Regular,
-  BitcountPropSingle_600SemiBold,
-  BitcountPropSingle_700Bold,
-} from "@expo-google-fonts/bitcount-prop-single";
+// `useFonts` from expo-font rather than the one the google-fonts package ships.
+// They look identical, but that one always starts at `false` and waits for an
+// effect, while this one seeds its state from `isLoaded` synchronously — so a
+// face already registered from an earlier mount is reported ready on the first
+// render instead of costing another frame.
+import { useFonts } from "expo-font";
+// The faces themselves come from their own subpaths rather than the package
+// root. The root barrel re-exports all nine weights, and because each one
+// `require`s its own .ttf, importing three through it bundled 3MB of font — six
+// faces the app never asks for. Deep imports bring in only what is named here.
+import { BitcountPropSingle_400Regular } from "@expo-google-fonts/bitcount-prop-single/400Regular";
+import { BitcountPropSingle_600SemiBold } from "@expo-google-fonts/bitcount-prop-single/600SemiBold";
+import { BitcountPropSingle_700Bold } from "@expo-google-fonts/bitcount-prop-single/700Bold";
 
 export default function App() {
-  const [fontsLoaded] = useFonts({
+  const [fontsLoaded, fontError] = useFonts({
     BitcountPropSingle_400Regular,
     BitcountPropSingle_600SemiBold,
     BitcountPropSingle_700Bold,
   });
+
+  // An error counts as settled. The faces load from the app bundle rather than
+  // the network, so this is quick, but the display font is not worth never
+  // opening the app over and the fallback is only a metrics difference. Without
+  // this a failed load holds the tree forever behind a splash that never lifts.
+  const fontsSettled = fontsLoaded || fontError != null;
 
   // What killed the app last time, if anything did.
   //
@@ -115,8 +129,9 @@ export default function App() {
 
   // Hold on the canvas colour rather than rendering with the fallback face:
   // the two have different metrics, so titles would visibly reflow the moment
-  // the display font arrives.
-  if (!fontsLoaded) {
+  // the display font arrives. The native splash is still up over this, so what
+  // the user sees is the splash rather than an empty rectangle.
+  if (!fontsSettled) {
     return (
       <SafeAreaProvider>
         <View style={{ flex: 1, backgroundColor: theme.color.bg }} />
@@ -184,6 +199,26 @@ function Root() {
       alive = false;
     };
   }, []);
+
+  // Lift the splash only once there is a real screen behind it.
+  //
+  // This is the first moment the app knows which screen it is: the conversation
+  // for a paired device, the launch screen otherwise. `index.ts` holds the
+  // splash from launch, and every path that sets `checked` — including the
+  // keychain failures above, which resolve to "not paired" rather than
+  // rejecting — arrives here, so there is no route that leaves it up.
+  //
+  // One frame later, not immediately: `hideAsync` takes effect straight away,
+  // and calling it during the commit that renders the first screen can uncover
+  // the window before that screen has been drawn into it — a flash of empty
+  // canvas, which is the exact thing the splash is being held to prevent.
+  useEffect(() => {
+    if (!checked) return;
+    const frame = requestAnimationFrame(() => {
+      void SplashScreen.hideAsync().catch(() => {});
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [checked]);
 
   const pair = useCallback((next: Pairing) => {
     // Connect regardless of whether the keychain accepted it. A locked or
@@ -437,6 +472,27 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
     },
   });
 
+  // Retry the socket the moment the app is back, rather than waiting out a
+  // backoff that was scheduled while nobody was holding the phone.
+  //
+  // Subscribed here rather than inside `useDaemon` because that module is
+  // reached by the daemon's own tests, and a `react-native` import there pulls
+  // RN's global types into the daemon's TypeScript program — where they redefine
+  // `setTimeout` and break every `.unref()` in it. `resumeNow` exists to keep
+  // that boundary while still letting this side drive the reconnect.
+  //
+  // A second listener rather than a branch in the one above: that one writes a
+  // ref during render-sensitive work, this one is idle until the app returns,
+  // and `AppState` is a plain emitter where the extra subscription costs
+  // nothing measurable.
+  const resumeDaemon = daemon.resumeNow;
+  useEffect(() => {
+    const subscription = AppState.addEventListener("change", (next) => {
+      if (next === "active") resumeDaemon();
+    });
+    return () => subscription.remove();
+  }, [resumeDaemon]);
+
   // Tell the notification layer which conversation is open, so a push that
   // arrives for the one already on screen is dropped instead of covering the
   // reply it is announcing. The daemon pushes without knowing what this phone is
@@ -541,9 +597,17 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
   // Projects the selected agent has worked in, and which one the drawer is
   // narrowed to. Derived here rather than in the drawer so both the list and
   // the empty state read from one answer.
+  //
+  // Keyed on the fields that can actually change the answer rather than on the
+  // sessions array itself, which is rebuilt on every streamed chunk. See
+  // `projectSourceKey`: `daemon.sessions` is still what the computation reads,
+  // but it is no longer what decides whether to run it.
+  const projectKey = projectSourceKey(daemon.sessions, active?.id);
   const projects = useMemo(
     () => projectsForProvider(daemon.projects[active?.id ?? ""], daemon.sessions, active?.id),
-    [daemon.projects, daemon.sessions, active?.id],
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `projectKey` stands
+    // in for `daemon.sessions` on purpose; including the array would defeat it.
+    [daemon.projects, projectKey, active?.id],
   );
   const selectedProjectPath = active ? daemon.projectPath[active.id] : undefined;
   const selectProject = useCallback(
@@ -1067,14 +1131,15 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
         </GestureDetector>
       )}
       {/* Full-bleed on both edges: the thread runs behind the status bar and
-          down to the home indicator, and a ProgressiveBlur covers each of those
-          regions, so content dissolves into frosted chrome at both ends rather
-          than meeting a solid band. The dock carries the bottom inset itself. */}
+          down to the home indicator, and a CanvasCover covers each of those
+          regions, so content fades out into the canvas colour at both ends
+          rather than meeting a solid band. The dock carries the bottom inset
+          itself. */}
       <SafeAreaView style={styles.paneInner} edges={[]}>
 
-      {/* Absolute over the thread: messages scroll beneath the nav and
-          dissolve into the ProgressiveBlur fade instead of hitting a panel
-          edge, so the conversation keeps the full screen height. */}
+      {/* Absolute over the thread: messages scroll beneath the nav and fade
+          out under the CanvasCover instead of hitting a panel edge, so the
+          conversation keeps the full screen height. */}
       <View
         style={[styles.topBar, styles.topBarOverlay, { top: insets.top }]}
         onLayout={(e) => setNavHeight(e.nativeEvent.layout.height)}
@@ -1169,7 +1234,7 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
           bottom edge and touches nothing below it. pointerEvents-none, so it
           never swallows a tap on a message or a pill. */}
       {navHeight > 0 && (
-        <ProgressiveBlur
+        <CanvasCover
           // From the very top edge to the nav's bottom edge. No tail.
           height={insets.top + navHeight}
           style={styles.navFade}
@@ -1265,7 +1330,7 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
             </CircleButton>
           </Animated.View>
           {dockHeight > 0 && (
-            <ProgressiveBlur edge="bottom" height={dockHeight} style={styles.dockCover} />
+            <CanvasCover edge="bottom" height={dockHeight} style={styles.dockCover} />
           )}
           <View
             style={[

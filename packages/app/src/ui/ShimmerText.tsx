@@ -18,6 +18,7 @@ import MaskedView from "@react-native-masked-view/masked-view";
 import { LinearGradient } from "expo-linear-gradient";
 import { theme } from "../theme";
 import { useReducedMotion } from "./useReducedMotion";
+import { useAppActive } from "./useAppActive";
 
 /**
  * Highlight that fades in and out of the base colour rather than replacing it.
@@ -67,10 +68,13 @@ function ShimmerTextView({
 }: ShimmerTextProps) {
   const sweep = useRef(new Animated.Value(0)).current;
   const reduceMotion = useReducedMotion();
+  const appActive = useAppActive();
   const [width, setWidth] = useState(0);
 
+  // Paused while backgrounded. This runs for as long as the agent is thinking,
+  // which is exactly when someone is most likely to have switched away.
   useEffect(() => {
-    if (reduceMotion || width === 0) return;
+    if (reduceMotion || !appActive || width === 0) return;
     const pass = Animated.timing(sweep, {
       toValue: 1,
       duration,
@@ -85,7 +89,7 @@ function ShimmerTextView({
     );
     loop.start();
     return () => loop.stop();
-  }, [duration, gap, reduceMotion, sweep, width]);
+  }, [duration, gap, reduceMotion, appActive, sweep, width]);
 
   // The mask only reads alpha, so this colour matters solely where a platform
   // has no mask (web): there the text is drawn directly, and naming the resting

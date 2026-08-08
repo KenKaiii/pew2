@@ -89,6 +89,40 @@ export function projectsForProvider(
 }
 
 /**
+ * The only parts of the session list that can change the project list.
+ *
+ * The sessions array is rebuilt on every streamed chunk — each one updates the
+ * mirror of turns hanging off the active session — so it takes a new identity
+ * many times a second while an agent is answering. Used directly as a memo
+ * dependency, that made `projectsForProvider` rebuild its Map and run a
+ * `localeCompare` sort on every chunk, for a drawer that is usually closed and
+ * whose contents had not changed.
+ *
+ * This is that list reduced to what the function above actually reads: `cwd`
+ * and `startedAt`, over the sessions belonging to this agent. Building it is a
+ * linear pass over values already in memory, cheaper than the sort it now
+ * nearly always avoids — and it is exact rather than a heuristic: if this
+ * string is unchanged, so is the list it would have produced. It errs toward
+ * including a session the caller later discards, never toward omitting one.
+ *
+ * The separators are control characters because a path may contain anything the
+ * filesystem allows, including whatever punctuation an ordinary delimiter would
+ * have picked.
+ */
+export function projectSourceKey(
+  sessions: Session[],
+  providerId: string | undefined,
+): string {
+  if (!providerId) return "";
+  let key = "";
+  for (const session of sessions) {
+    if (session.providerId !== providerId || !session.cwd) continue;
+    key += `${session.cwd}\u0000${session.startedAt}\u0001`;
+  }
+  return key;
+}
+
+/**
  * Does this conversation belong to the chosen project?
  *
  * `cwd` is the real answer, but a session this app started never had one: the

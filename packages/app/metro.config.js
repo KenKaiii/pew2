@@ -23,6 +23,33 @@ config.resolver.nodeModulesPaths = [
 config.resolver.disableHierarchicalLookup = true;
 
 /**
+ * Evaluate each module the first time it is actually used, not at startup.
+ *
+ * Metro's default hoists every `import` to the top of the module that declares
+ * it, so launching the app evaluated the entire reachable graph before the
+ * first frame — the camera, the image and media pickers, speech recognition,
+ * the notification stack, the markdown renderer — whether or not this session
+ * ever opens any of them. Inlining rewrites those into `require` calls at the
+ * point of use, so a screen nobody visits costs nothing to launch past.
+ *
+ * React Native's own metro-config ships this on; Expo leaves it off for
+ * compatibility with modules that depend on import side effects at load time.
+ * The one such module here is the crypto polyfill, which must install before
+ * anything asks for `crypto.getRandomValues`. It is a bare `import` for its
+ * side effect only and binds no names, so there is no reference for Metro to
+ * inline against and its position is preserved either way.
+ */
+config.transformer.getTransformOptions = async () => ({
+  transform: {
+    // Expo's own default, restated because replacing `getTransformOptions`
+    // replaces the whole object rather than merging into it. Dropping it here
+    // would quietly turn Metro's ESM handling back off.
+    experimentalImportSupport: true,
+    inlineRequires: true,
+  },
+});
+
+/**
  * Let the app import the shared protocol package.
  *
  * `@pew2/protocol` is TypeScript compiled under NodeNext, where a relative

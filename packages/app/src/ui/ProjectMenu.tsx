@@ -23,7 +23,7 @@ import {
   Text,
   View,
 } from "react-native";
-import { Ionicons } from "@expo/vector-icons";
+import Ionicons from "@expo/vector-icons/Ionicons";
 import { theme } from "../theme";
 import { Glass } from "./Glass";
 import { haptics } from "./haptics";
@@ -110,12 +110,14 @@ function ProjectMenuView({
         accessibilityLabel="Close project menu"
         onPress={onClose}
       />
+      {/* Scaled, never faded. Opacity below 1 on a view containing a blur
+          forces an offscreen composite and the material stops resolving for the
+          length of the animation; the scrim above carries the fade instead. */}
       <Animated.View
         style={[
           styles.card,
           {
             top,
-            opacity: progress,
             transformOrigin: "top",
             transform: [
               { scale: progress.interpolate({ inputRange: [0, 1], outputRange: [0.96, 1] }) },

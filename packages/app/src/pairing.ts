@@ -54,12 +54,18 @@ export async function deviceId(): Promise<string> {
  */
 export async function loadPairing(): Promise<Pairing | null> {
   try {
-    const stored = await SecureStore.getItemAsync(KEY);
+    // Both reads at once. They are independent keys, and this sits directly on
+    // the launch path: run in sequence, the app waited out two round trips to
+    // the keychain — with the splash held over both — before it could decide
+    // which screen to show. Asking for the device id even when nothing is
+    // stored costs a first-launch mint that the pairing screen would trigger
+    // moments later anyway, so the id is simply ready sooner.
+    const [stored, id] = await Promise.all([SecureStore.getItemAsync(KEY), deviceId()]);
     if (!stored) return null;
     // Stored with its fragment intact, because `parsePairing` strips the key out
     // of the URL it returns — keeping only that would lose the key on the first
     // reload, and the app would greet a paired user with the pairing screen.
-    const parsed = parsePairing(stored, await deviceId());
+    const parsed = parsePairing(stored, id);
     return parsed.ok ? parsed.pairing : null;
   } catch {
     // A locked or unavailable keychain must show the pairing screen, not crash.

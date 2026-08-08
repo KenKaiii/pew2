@@ -14,7 +14,7 @@
  */
 import { memo, useEffect, useRef } from "react";
 import { Animated, StyleSheet, Text, View } from "react-native";
-import { Ionicons } from "@expo/vector-icons";
+import Ionicons from "@expo/vector-icons/Ionicons";
 import { theme } from "../theme";
 import { currentTool, queuedTools, type Activity, type ToolKind } from "../activity";
 import { ShimmerText } from "./ShimmerText";

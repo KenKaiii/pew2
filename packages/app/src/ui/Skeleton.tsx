@@ -9,16 +9,22 @@ import { useEffect, useRef } from "react";
 import { Animated, StyleSheet, View, type ViewStyle } from "react-native";
 import { theme } from "../theme";
 import { useReducedMotion } from "./useReducedMotion";
+import { useAppActive } from "./useAppActive";
 
 /** One pulsing block. Compose these into the shape of the coming content. */
 export function Skeleton({ style }: { style?: ViewStyle | ViewStyle[] }) {
   const reduceMotion = useReducedMotion();
+  const appActive = useAppActive();
   const opacity = useRef(new Animated.Value(0.4)).current;
 
   useEffect(() => {
     // Pulsing is the only signal that this is a wait, not a blank. With reduced
     // motion a static block still reads as placeholder rather than content.
-    if (reduceMotion) return;
+    //
+    // Backgrounding stops it for the same reason it stops every other loop
+    // here: this is native-driven, so nothing else pauses it, and a wait the
+    // user has walked away from is the least worth animating of all.
+    if (reduceMotion || !appActive) return;
     const pulse = Animated.loop(
       Animated.sequence([
         Animated.timing(opacity, { toValue: 0.85, duration: 650, useNativeDriver: true }),
@@ -27,7 +33,7 @@ export function Skeleton({ style }: { style?: ViewStyle | ViewStyle[] }) {
     );
     pulse.start();
     return () => pulse.stop();
-  }, [opacity, reduceMotion]);
+  }, [opacity, reduceMotion, appActive]);
 
   return <Animated.View style={[styles.block, { opacity }, style]} />;
 }

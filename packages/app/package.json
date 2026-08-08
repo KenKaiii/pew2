@@ -30,6 +30,7 @@
     "expo-status-bar": "~3.0.9",
     "expo-system-ui": "~6.0.9",
     "expo-updates": "~29.0.19",
+    "markdown-it": "^14.1.0",
     "react": "19.1.0",
     "react-dom": "19.1.0",
     "react-native": "0.81.5",
@@ -43,6 +44,7 @@
   },
   "devDependencies": {
     "@expo/ngrok": "^4.1.0",
+    "@types/markdown-it": "^14.1.2",
     "@types/react": "~19.1.10",
     "sharp": "^0.35.2",
     "typescript": "~5.9.2"

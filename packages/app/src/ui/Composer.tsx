@@ -20,13 +20,18 @@ import { forwardRef, memo, useEffect, useImperativeHandle, useRef, useState } fr
 import {
   Animated,
   Easing,
-  LayoutAnimation,
   Pressable,
   StyleSheet,
   TextInput,
   View,
 } from "react-native";
-import { Ionicons } from "@expo/vector-icons";
+import Reanimated, {
+  Easing as ReanimatedEasing,
+  useAnimatedStyle,
+  useSharedValue,
+  withTiming,
+} from "react-native-reanimated";
+import Ionicons from "@expo/vector-icons/Ionicons";
 import { theme } from "../theme";
 import { touchSlop } from "./controls";
 import { haptics } from "./haptics";
@@ -174,18 +179,38 @@ function ComposerView({
     return () => animation.stop();
   }, [expanded, reduceMotion, textDrop]);
 
-  const setFocus = (next: boolean) => {
-    // Grow and shrink the surface on one fixed curve. Nothing here borrows the
-    // keyboard's timing: the dock this control sits in is already carried by the
-    // keyboard's own transaction, so a second animation would only fight it.
-    if (!reduceMotion) {
-      LayoutAnimation.configureNext({
-        duration: EXPAND_DURATION,
-        update: { duration: EXPAND_DURATION, type: "easeOut" },
-      });
-    }
-    setFocused(next);
-  };
+  // Grow and shrink the surface on one fixed curve. Nothing here borrows the
+  // keyboard's timing: the dock this control sits in is already carried by the
+  // keyboard's own transaction, so a second animation would only fight it.
+  //
+  // This replaced a `LayoutAnimation.configureNext` call. That API is global —
+  // it applies to the next layout pass of the *whole tree*, not to the view
+  // that asked for it — so focusing the input also swept the context row's
+  // unmount and the transcript's inset change onto this curve, in the middle of
+  // the keyboard's own transition. Three differently-timed animations across
+  // the same frames is what the first tap felt like. Scoped here, the box is
+  // the only thing that moves, and it moves on the UI thread.
+  //
+  // What animates is *how open the box is*, not its height directly. Only the
+  // open/close transition should ease: `expandedHeight` also grows as the draft
+  // wraps onto another line, and easing that would leave the box trailing 140ms
+  // behind the text being typed into it. Interpolating between the two heights
+  // keeps both — the transition eases, while a taller `expandedHeight` takes
+  // effect immediately, including partway through an open that is still
+  // running. The old imperative call got this for free by being fired from the
+  // focus handler and nowhere else.
+  const openness = useSharedValue(expanded ? 1 : 0);
+
+  useEffect(() => {
+    openness.value = withTiming(expanded ? 1 : 0, {
+      duration: reduceMotion ? 0 : EXPAND_DURATION,
+      easing: ReanimatedEasing.out(ReanimatedEasing.cubic),
+    });
+  }, [expanded, reduceMotion, openness]);
+
+  const surface = useAnimatedStyle(() => ({
+    height: COLLAPSED + (expandedHeight - COLLAPSED) * openness.value,
+  }));
 
   useEffect(() => {
     const animation = Animated.timing(sendIn, {
@@ -208,7 +233,7 @@ function ComposerView({
       )}
 
       <Glass radius={theme.radius.composer} tier="raised">
-        <View style={{ height: expanded ? expandedHeight : COLLAPSED }}>
+        <Reanimated.View style={surface}>
           <Animated.View
             style={[
               styles.inputWrap,
@@ -232,8 +257,8 @@ function ComposerView({
               onChangeText={(text) =>
                 onChangeText(split ? `${split.command} ${text}` : text)
               }
-              onFocus={() => setFocus(true)}
-              onBlur={() => setFocus(false)}
+              onFocus={() => setFocused(true)}
+              onBlur={() => setFocused(false)}
               onContentSizeChange={(event) =>
                 setContentHeight(event.nativeEvent.contentSize.height)
               }
@@ -383,7 +408,7 @@ function ComposerView({
               </Animated.View>
             </View>
           </View>
-        </View>
+        </Reanimated.View>
       </Glass>
     </View>
   );

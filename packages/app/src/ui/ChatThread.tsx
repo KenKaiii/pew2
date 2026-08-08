@@ -33,6 +33,7 @@ import { Turn } from "./Turn";
 import { ActivityLine } from "./ActivityLine";
 import { TurnReceipt } from "./TurnReceipt";
 import { useReducedMotion } from "./useReducedMotion";
+import { useAppActive } from "./useAppActive";
 import { currentTool, type Activity, type TurnReceipt as Receipt } from "../activity";
 import type { Turn as TurnData } from "../useDaemon";
 
@@ -300,9 +301,13 @@ function Working() {
   const two = useRef(new Animated.Value(0.25)).current;
   const three = useRef(new Animated.Value(0.25)).current;
   const reduceMotion = useReducedMotion();
+  const appActive = useAppActive();
 
+  // Stopped while backgrounded. Three native-driven loops that run for exactly
+  // as long as an agent is thinking — which is when someone is most likely to
+  // have switched away and left them turning.
   useEffect(() => {
-    if (reduceMotion) return;
+    if (reduceMotion || !appActive) return;
     const dots = [one, two, three];
     const loops = dots.map((dot, index) =>
       Animated.loop(
@@ -316,7 +321,7 @@ function Working() {
     );
     loops.forEach((loop) => loop.start());
     return () => loops.forEach((loop) => loop.stop());
-  }, [reduceMotion, one, two, three]);
+  }, [reduceMotion, appActive, one, two, three]);
 
   return (
     // `accessible` groups the dots into one node; without it the label is

@@ -30,7 +30,7 @@ import {
   View,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { Ionicons } from "@expo/vector-icons";
+import Ionicons from "@expo/vector-icons/Ionicons";
 import { theme } from "../theme";
 import { haptics } from "./haptics";
 import type { ConfigOption } from "../useDaemon";
@@ -127,14 +127,21 @@ function ConfigPickerView({
   if (!visible) return null;
 
   return (
-    <Animated.View
-      style={[
-        styles.host,
-        { paddingTop: menuTop },
-        { paddingLeft: menuLayout.left },
-        { opacity: progress },
-      ]}
+    <View
+      style={[styles.host, { paddingTop: menuTop }, { paddingLeft: menuLayout.left }]}
     >
+      {/*
+       * The scrim fades, the card does not. Opacity below 1 on a view that owns
+       * or contains a blur forces an offscreen composite and the material stops
+       * resolving for the length of the animation — which is why this menu used
+       * to open transparent and look correct only on the second try. Fading the
+       * backdrop separately keeps the arrival soft while the card itself is only
+       * ever scaled, which blur surfaces tolerate.
+       */}
+      <Animated.View
+        style={[StyleSheet.absoluteFill, styles.scrim, { opacity: progress }]}
+        pointerEvents="none"
+      />
       <Pressable
         style={StyleSheet.absoluteFill}
         accessibilityRole="button"
@@ -220,7 +227,7 @@ function ConfigPickerView({
         </ScrollView>
         </Glass>
       </Animated.View>
-    </Animated.View>
+    </View>
   );
 }
 
@@ -230,13 +237,22 @@ const styles = StyleSheet.create({
     // Above the conversation pane (1), its nav (2) and the composer dock (3),
     // since this opens on top of all of them.
     zIndex: 10,
-    backgroundColor: "rgba(0,0,0,0.55)",
     // Anchored to the pill that opens it; the gutter is the default.
     alignItems: "flex-start",
   },
+  scrim: { backgroundColor: "rgba(0,0,0,0.55)" },
   card: {
     // Width and height are fitted against the live viewport before paint.
     alignSelf: "flex-start",
+    // Opaque disc behind the glass, for the same reason the project menu has
+    // one: glass is translucent by definition, and this opens directly over the
+    // conversation, so without a fill the transcript reads straight through the
+    // model names. It is also what makes the menu degrade to a solid panel
+    // rather than to nothing on the first open, before the blur has drawn.
+    // The radius is repeated here because the fill is *behind* the material
+    // that clips, not inside it.
+    backgroundColor: theme.color.surfaceRaised,
+    borderRadius: theme.radius.lg,
   },
   cardGlass: { width: "100%", flexShrink: 1 },
   scroll: { flexGrow: 0 },

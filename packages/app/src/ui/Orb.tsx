@@ -19,6 +19,7 @@ import { memo, useEffect, useMemo, useRef } from "react";
 import { Animated, Easing, StyleSheet, View } from "react-native";
 import { theme, shade } from "../theme";
 import { useReducedMotion } from "./useReducedMotion";
+import { useAppActive } from "./useAppActive";
 import {
   gridForSize,
   MATRIX_MIN_SIZE,
@@ -136,6 +137,9 @@ function Matrix({
   const pitch = size / grid;
   const drift = useRef(new Animated.Value(0)).current;
   const sweep = useRef(new Animated.Value(0)).current;
+  const appActive = useAppActive();
+  // Both reasons to hold still, in one word.
+  const animate = appActive && !reduceMotion;
 
   // The whole orbit, precomputed once per grid: relighting a sphere is real
   // arithmetic, and doing it per frame would put it on the JS thread behind a
@@ -148,10 +152,15 @@ function Matrix({
     [],
   );
 
+  // Stopped while the app is backgrounded. This loop is native-driven, so being
+  // backgrounded does not pause it on its own, and the orbit is the most
+  // expensive animation in the app: a few hundred animated nodes turning for a
+  // screen nobody is looking at. It resumes on return, and because an orbit is
+  // a loop rather than a sequence there is no position worth preserving.
   useEffect(() => {
-    if (reduceMotion) {
+    if (!animate) {
       drift.stopAnimation();
-      drift.setValue(0);
+      if (reduceMotion) drift.setValue(0);
       return;
     }
     const loop = Animated.loop(
@@ -166,10 +175,10 @@ function Matrix({
     );
     loop.start();
     return () => loop.stop();
-  }, [reduceMotion, drift]);
+  }, [animate, reduceMotion, drift]);
 
   useEffect(() => {
-    if (!busy || reduceMotion) {
+    if (!busy || !animate) {
       sweep.stopAnimation();
       sweep.setValue(0);
       return;
@@ -186,9 +195,11 @@ function Matrix({
     );
     loop.start();
     return () => loop.stop();
-  }, [busy, reduceMotion, sweep]);
+  }, [busy, animate, sweep]);
 
-  const scanning = busy && !reduceMotion;
+  // Also drops the interpolation nodes entirely while held still, rather than
+  // leaving a column's worth of them attached to a value nothing is driving.
+  const scanning = busy && animate;
 
   // One node per column carries the scan, so the band costs thirteen animated
   // values rather than one per dot.

@@ -6,9 +6,8 @@
  * platforms retain a restrained blur fallback with a directional highlight and
  * material rim instead of imitating glass with an opaque grey rectangle.
  */
-import { type ReactNode, useEffect, useState } from "react";
+import { type ReactNode } from "react";
 import {
-  AccessibilityInfo,
   Platform,
   StyleSheet,
   View,
@@ -19,6 +18,7 @@ import { BlurView } from "expo-blur";
 import { GlassView, isLiquidGlassAvailable } from "expo-glass-effect";
 import { LinearGradient } from "expo-linear-gradient";
 import { theme } from "../theme";
+import { useReduceTransparency } from "./accessibilityState";
 
 interface GlassProps {
   children: ReactNode;
@@ -35,17 +35,60 @@ interface GlassProps {
   tier?: "control" | "raised";
 }
 
+/**
+ * Resolved on first render rather than at module evaluation.
+ *
+ * The probe calls into a native module, and asking for it while the bundle is
+ * still evaluating is exactly when a stale dev client has not registered it yet
+ * — a throw there used to be cached as `false` for the entire session, silently
+ * dropping every surface in the app to the more expensive blur fallback with no
+ * way to recover. Deferring to first render asks once the native side is up,
+ * and `undefined` (rather than `false`) as the empty state means a throw is
+ * retried on the next render instead of being remembered as an answer.
+ */
+let nativeLiquidGlass: boolean | undefined;
+
 function hasNativeLiquidGlass(): boolean {
-  if (Platform.OS !== "ios") return false;
+  if (nativeLiquidGlass !== undefined) return nativeLiquidGlass;
+  if (Platform.OS !== "ios") {
+    nativeLiquidGlass = false;
+    return false;
+  }
   try {
-    return isLiquidGlassAvailable();
+    nativeLiquidGlass = isLiquidGlassAvailable();
+    return nativeLiquidGlass;
   } catch {
-    // A stale Expo Go/dev client can load the JS before it has the native module.
+    // A stale Expo Go/dev client can load the JS before it has the native
+    // module. Left unset, so a later render asks again.
     return false;
   }
 }
 
-const nativeLiquidGlassAvailable = hasNativeLiquidGlass();
+/**
+ * Hoisted per tier. Recreating these arrays in render pushed new props to the
+ * native gradient on every keystroke, because the composer's glass re-renders
+ * with the draft. There are only two tiers, so both variants are cheaper to
+ * spell out than to build.
+ */
+const HIGHLIGHT: Record<"control" | "raised", readonly [string, string, string]> = {
+  raised: ["rgba(255,255,255,0.22)", "rgba(255,255,255,0.025)", "rgba(255,255,255,0)"],
+  control: ["rgba(255,255,255,0.14)", "rgba(255,255,255,0.025)", "rgba(255,255,255,0)"],
+};
+const BLUR_HIGHLIGHT: Record<"control" | "raised", readonly [string, string, string]> = {
+  raised: ["rgba(255,255,255,0.22)", "rgba(255,255,255,0.035)", "rgba(255,255,255,0)"],
+  control: ["rgba(255,255,255,0.14)", "rgba(255,255,255,0.035)", "rgba(255,255,255,0)"],
+};
+const NATIVE_RIM: Record<"control" | "raised", string> = {
+  raised: "rgba(255,255,255,0.34)",
+  control: "rgba(255,255,255,0.28)",
+};
+const ACCESSIBLE_FILL: Record<"control" | "raised", string> = {
+  raised: "rgba(47,47,52,0.98)",
+  control: "rgba(35,35,39,0.96)",
+};
+const HIGHLIGHT_LOCATIONS = [0, 0.42, 1] as const;
+const HIGHLIGHT_START = { x: 0, y: 0 } as const;
+const HIGHLIGHT_END = { x: 0.9, y: 1 } as const;
 
 export function Glass({
   children,
@@ -55,26 +98,10 @@ export function Glass({
   interactive = false,
   tier = "control",
 }: GlassProps) {
-  const [reduceTransparency, setReduceTransparency] = useState(false);
+  const reduceTransparency = useReduceTransparency();
   const { fill, rim } = theme.glass[tier];
-  const highlight =
-    tier === "raised" ? "rgba(255,255,255,0.22)" : "rgba(255,255,255,0.14)";
-  const nativeRim =
-    tier === "raised" ? "rgba(255,255,255,0.34)" : "rgba(255,255,255,0.28)";
 
-  useEffect(() => {
-    // Optional-called: `isReduceTransparencyEnabled` is an iOS API, and a
-    // platform without it (react-native-web) otherwise throws during mount and
-    // takes the whole tree down — a blank screen rather than a missing blur.
-    void AccessibilityInfo.isReduceTransparencyEnabled?.().then(setReduceTransparency);
-    const subscription = AccessibilityInfo.addEventListener(
-      "reduceTransparencyChanged",
-      setReduceTransparency,
-    );
-    return () => subscription.remove();
-  }, []);
-
-  if (nativeLiquidGlassAvailable && !reduceTransparency) {
+  if (hasNativeLiquidGlass() && !reduceTransparency) {
     return (
       <GlassView
         glassEffectStyle="regular"
@@ -83,13 +110,13 @@ export function Glass({
         // child own hit-testing; otherwise UIVisualEffectView can swallow taps.
         isInteractive={interactive}
         pointerEvents="box-none"
-        style={[styles.material, { borderRadius: radius, borderColor: nativeRim }, style]}
+        style={[styles.material, { borderRadius: radius, borderColor: NATIVE_RIM[tier] }, style]}
       >
         <LinearGradient
-          colors={[highlight, "rgba(255,255,255,0.025)", "rgba(255,255,255,0)"]}
-          locations={[0, 0.42, 1]}
-          start={{ x: 0, y: 0 }}
-          end={{ x: 0.9, y: 1 }}
+          colors={HIGHLIGHT[tier]}
+          locations={HIGHLIGHT_LOCATIONS}
+          start={HIGHLIGHT_START}
+          end={HIGHLIGHT_END}
           style={StyleSheet.absoluteFill}
           pointerEvents="none"
         />
@@ -97,9 +124,6 @@ export function Glass({
       </GlassView>
     );
   }
-
-  const accessibleFill =
-    tier === "raised" ? "rgba(47,47,52,0.98)" : "rgba(35,35,39,0.96)";
 
   return (
     <View style={[styles.material, { borderRadius: radius, borderColor: rim }, style]}>
@@ -114,17 +138,17 @@ export function Glass({
       <View
         style={[
           StyleSheet.absoluteFill,
-          { backgroundColor: reduceTransparency ? accessibleFill : fill },
+          { backgroundColor: reduceTransparency ? ACCESSIBLE_FILL[tier] : fill },
         ]}
         pointerEvents="none"
       />
       {!reduceTransparency && (
         <>
           <LinearGradient
-            colors={[highlight, "rgba(255,255,255,0.035)", "rgba(255,255,255,0)"]}
-            locations={[0, 0.42, 1]}
-            start={{ x: 0, y: 0 }}
-            end={{ x: 0.9, y: 1 }}
+            colors={BLUR_HIGHLIGHT[tier]}
+            locations={HIGHLIGHT_LOCATIONS}
+            start={HIGHLIGHT_START}
+            end={HIGHLIGHT_END}
             style={StyleSheet.absoluteFill}
             pointerEvents="none"
           />
@@ -135,6 +159,7 @@ export function Glass({
     </View>
   );
 }
+
 
 const styles = StyleSheet.create({
   /**

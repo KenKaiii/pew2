@@ -9,7 +9,8 @@
     "bun": ">=1.2.0"
   },
   "scripts": {
-    "test": "bun test packages",
+    "//test": "Listed one source root at a time, and NOT as `bun test packages`, which is broken here. Scanning a directory holds a descriptor per directory found, and this tree has 13,414 of them -- roughly 10,280 inside node_modules alone. That pushes fd numbering past Darwin's 10240 OPEN_MAX, after which a spawned child's piped stdout reads back empty with exit 0 instead of failing: 13 tests went red (the 12 that spawn the echo ACP agent, plus the launchd plist lint) while the code under test was correct all along. Bun issue #32067. Narrowing the scan below the limit is the actual fix -- `bun test ./packages` still fails, so the leading ./ is only there to guarantee each argument is taken as a path rather than a name filter. Keep this list in step with the packages that hold tests; a new one added here without a matching root simply never runs.",
+    "test": "bun test ./packages/app/src ./packages/daemon/src ./packages/protocol/src ./packages/relay/src",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p packages/relay/tsconfig.json && (cd packages/app && tsc --noEmit)",
     "lint": "eslint .",
     "relay:dev": "cd packages/relay && wrangler dev --port 8799",
