@@ -26,6 +26,7 @@
         "expo-blur": "~15.0.8",
         "expo-camera": "~17.0.10",
         "expo-clipboard": "~8.0.8",
+        "expo-constants": "~18.0.13",
         "expo-crypto": "~15.0.9",
         "expo-document-picker": "~14.0.8",
         "expo-file-system": "~19.0.23",
@@ -64,7 +65,7 @@
     },
     "packages/daemon": {
       "name": "@pew2/daemon",
-      "version": "0.9.11",
+      "version": "0.9.13",
       "bin": {
         "pew2": "./src/cli/index.ts",
       },

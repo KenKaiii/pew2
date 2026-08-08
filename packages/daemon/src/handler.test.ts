@@ -49,11 +49,17 @@ function stubbed() {
   return { daemon, started, resumed, listed };
 }
 
-/** Collect what one message produces, ignoring which way it went out. */
-async function send(daemon: Daemon, message: unknown) {
+/**
+ * Collect what one message produces, ignoring which way it went out.
+ *
+ * `deviceId` mirrors the transports, which set it only once a `hello` has been
+ * verified — so leaving it off is how an unidentified frame is simulated.
+ */
+async function send(daemon: Daemon, message: unknown, deviceId?: string) {
   const out: any[] = [];
   await handleMessage(JSON.stringify(message), {
     daemon,
+    deviceId,
     reply: (m) => out.push(m),
     broadcast: (m) => out.push(m),
     cwd: "/Users/someone/default",
@@ -155,4 +161,56 @@ test("resuming falls back instead of refusing an unrecognised directory", async 
     agentSessionId: "agent-2",
     cwd: "/Users/someone/code/api",
   });
+});
+
+test("a push token is kept against the device that proved who it was", async () => {
+  const { daemon } = stubbed();
+
+  const out = await send(
+    daemon,
+    { t: "app.push", token: "ExponentPushToken[abc123]", platform: "ios" },
+    "phone-1",
+  );
+
+  expect(out).toEqual([]);
+  expect(daemon.pushTargets.list()).toEqual([
+    { token: "ExponentPushToken[abc123]", platform: "ios" },
+  ]);
+});
+
+test("a push token from an unidentified sender is refused", async () => {
+  // Before `hello`, a frame cannot say whose phone it is. Storing it anyway
+  // would let one connection redirect another device's notifications.
+  const { daemon } = stubbed();
+
+  const out = await send(daemon, {
+    t: "app.push",
+    token: "ExponentPushToken[abc123]",
+    platform: "ios",
+  });
+
+  expect(daemon.pushTargets.size).toBe(0);
+  expect(out[0]?.t).toBe("error");
+  expect(out[0]?.code).toBe("push_unidentified");
+});
+
+test("a token that is not an Expo push token is refused out loud", async () => {
+  // Silently dropping it looks exactly like success until someone waits for a
+  // notification that never arrives.
+  const { daemon } = stubbed();
+
+  const out = await send(daemon, { t: "app.push", token: "abc123", platform: "ios" }, "phone-1");
+
+  expect(daemon.pushTargets.size).toBe(0);
+  expect(out[0]?.code).toBe("push_token_invalid");
+});
+
+test("reconnecting with a rotated token replaces the old one", async () => {
+  // Otherwise every app restart costs another copy of every banner.
+  const { daemon } = stubbed();
+
+  await send(daemon, { t: "app.push", token: "ExponentPushToken[old]", platform: "ios" }, "phone-1");
+  await send(daemon, { t: "app.push", token: "ExponentPushToken[new]", platform: "ios" }, "phone-1");
+
+  expect(daemon.pushTargets.list()).toEqual([{ token: "ExponentPushToken[new]", platform: "ios" }]);
 });

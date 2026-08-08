@@ -5,3 +5,6 @@ export * as wire from "./wire.js";
 // call sites most worth being able to audit at a glance.
 export * as e2e from "./crypto.js";
 export { SecureChannel, envelopeHeader, type ChannelRole } from "./channel.js";
+// Shared by the app (local banner) and the daemon (remote push), so one
+// finished turn reads identically however it reached the phone.
+export { summarise, noticeTitle, noticeBody, type NoticeOrigin } from "./notice.js";

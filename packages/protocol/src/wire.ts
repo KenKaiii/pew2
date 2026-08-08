@@ -516,6 +516,43 @@ export const SessionIdle = z.object({
 });
 
 /**
+ * App -> daemon. Where to push when this phone is not listening.
+ *
+ * The local banner can only fire while the app's JavaScript is running, and iOS
+ * suspends that within seconds of the app leaving the screen — so the one case
+ * notifications exist for, a long turn landing while the phone is in a pocket,
+ * is the exact case it could not cover. The turn was announced minutes late, on
+ * reopening, when the socket came back and `session.idle` finally arrived.
+ *
+ * A remote push has to come from something still awake, which is the daemon.
+ * This is how it learns where to send one.
+ *
+ * Travels sealed like every other post-handshake frame, so the relay never sees
+ * the token. The relay is otherwise not involved: the desktop has internet and
+ * calls the push service itself, which keeps the relay a dumb pipe that stores
+ * nothing.
+ *
+ * Sent on every connect, because push tokens rotate.
+ *
+ * Deliberately not a `WIRE_VERSION` bump. A new message type is additive: a
+ * daemon that predates it answers `unknown_message` and the app keeps its
+ * local-only banners, which is exactly the behaviour it had before. Bumping
+ * would instead refuse the connection outright and take working sessions down
+ * to deliver a notification improvement.
+ */
+export const PushRegister = z.object({
+  t: z.literal("app.push"),
+  /**
+   * An Expo push token (`ExponentPushToken[...]`).
+   *
+   * Not a bare APNs/FCM token: sending to those needs signing credentials, which
+   * live in EAS and must not ship inside a daemon anyone can read the source of.
+   */
+  token: z.string().min(1),
+  platform: z.enum(["ios", "android"]),
+});
+
+/**
  * Daemon -> every other client, when one of them says `hello`.
  *
  * The daemon is the only party that sees arrivals on both transports, so it is
@@ -576,6 +613,7 @@ export const ClientMessage = z.discriminatedUnion("t", [
   ImageRequest,
   WorkspaceRequest,
   WorkspacesRequest,
+  PushRegister,
 ]);
 
 export const ServerMessage = z.discriminatedUnion("t", [
@@ -618,6 +656,7 @@ export type WorkspaceRequest = z.output<typeof WorkspaceRequest>;
 export type Workspace = z.output<typeof Workspace>;
 export type SessionEvent = z.output<typeof SessionEvent>;
 export type SessionIdle = z.output<typeof SessionIdle>;
+export type PushRegister = z.output<typeof PushRegister>;
 export type DeviceJoined = z.output<typeof DeviceJoined>;
 export type WorkspaceEntry = z.output<typeof WorkspaceEntry>;
 export type Workspaces = z.output<typeof Workspaces>;

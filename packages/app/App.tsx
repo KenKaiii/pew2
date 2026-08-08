@@ -43,8 +43,10 @@ import {
   ensureNotificationPermission,
   notify,
   onNotificationChoice,
+  setOpenConversation,
   type NotificationChoice,
 } from "./src/ui/notifier";
+import { pushAddress } from "./src/ui/push";
 import { Orb } from "./src/ui/Orb";
 import { Composer, type ComposerHandle } from "./src/ui/Composer";
 import { ChatThread, type ChatThreadRef } from "./src/ui/ChatThread";
@@ -401,8 +403,22 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
    * backgrounded or looking at another project, so without this a finished
    * five-minute turn is only discovered by going back to check.
    */
+  // Whether the daemon has somewhere to push. Set once a token is handed over,
+  // and what stops a backgrounded Android phone showing the same turn twice —
+  // there the socket outlives the app leaving the screen, so both routes fire.
+  const pushExpected = useRef(false);
+  const registerPush = useCallback(async () => {
+    const address = await pushAddress();
+    pushExpected.current = address !== undefined;
+    return address;
+  }, []);
+
   const announceTurn = useCallback((turn: TurnFinished) => {
-    const notice = finishedNotice({ ...turn, foreground: foreground.current });
+    const notice = finishedNotice({
+      ...turn,
+      foreground: foreground.current,
+      pushExpected: pushExpected.current,
+    });
     if (notice) void notify(notice);
   }, []);
 
@@ -410,7 +426,19 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
   // the stored pairing URL or the two look like different clients.
   const daemon = useDaemon(pairing.url, pairing.deviceId, pairing.key, {
     onTurnFinished: announceTurn,
+    // Supplied from here because obtaining it calls into the Expo SDK, which
+    // `useDaemon` deliberately stays clear of. What it buys: the daemon can
+    // announce a finished turn even after iOS has suspended this app and taken
+    // its socket with it — previously that banner waited for the app to be
+    // reopened, which is minutes too late to be worth anything.
+    pushAddress: registerPush,
   });
+
+  // Tell the notification layer which conversation is open, so a push that
+  // arrives for the one already on screen is dropped instead of covering the
+  // reply it is announcing. The daemon pushes without knowing what this phone is
+  // showing — only this side can know that.
+  useEffect(() => setOpenConversation(daemon.sessionId), [daemon.sessionId]);
   const [draft, setDraft] = useState("");
   // Files staged for the next message. Cleared with the draft on send, because
   // the two are one message.

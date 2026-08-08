@@ -324,6 +324,11 @@ export class RelayClient {
 
       void handleMessage(JSON.stringify(message), {
         daemon: this.options.daemon,
+        // The relay stamps each sealed frame with the sending socket's device
+        // id, and `open` above only succeeded because that id's channel state
+        // decrypted it — so this is the sender the frame was actually verified
+        // against, not a label it chose for itself.
+        deviceId: sender,
         // Over the relay there is no per-client socket to reply to: the relay
         // fans out to whichever apps are attached to this pairing. Both paths
         // therefore go back the same way.

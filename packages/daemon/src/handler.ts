@@ -18,6 +18,7 @@ import { workspaceStatus } from "./git.js";
 import { resolveWorkspace } from "./workspace.js";
 import { discoverRepos, listDirectory } from "./workspaces.js";
 import { wire } from "@pew2/protocol";
+import { pushFinishedTurn } from "./push.js";
 
 export interface HandlerContext {
   daemon: Daemon;
@@ -27,6 +28,15 @@ export interface HandlerContext {
   broadcast: (message: unknown) => void;
   /** Default working directory when a client does not name one. */
   cwd?: string;
+  /**
+   * Which paired device sent this frame, as proved during its `hello`.
+   *
+   * Only set once that handshake has completed, so a message arriving before it
+   * cannot claim to be from anyone. Used to key the push registry: it is the one
+   * identifier that survives the socket the token arrived on, which by the time
+   * a push is needed has usually closed.
+   */
+  deviceId?: string;
 }
 
 /**
@@ -260,13 +270,52 @@ export async function handleMessage(raw: string, ctx: HandlerContext): Promise<v
           // Carries the project and agent so a client can announce a session it
           // is not showing — the phone is usually elsewhere by the time a long
           // turn ends, and only this machine knows the path.
-          .finally(() =>
+          .finally(() => {
             broadcast({
               t: "session.idle",
               sessionId,
               ...daemon.sessionOrigin(sessionId),
-            }),
-          );
+            });
+            // And again, out of band, to phones whose sockets are asleep.
+            //
+            // Sent unconditionally rather than only when no app is attached.
+            // Knowing that would mean trusting the relay's account of who is
+            // connected, and the relay is the one party in this system that is
+            // assumed hostile. It is also unreliable: a backgrounded iOS app
+            // holds a socket that looks alive for a while after its JavaScript
+            // has stopped, so "attached" does not mean "will show a banner".
+            //
+            // Duplicates are handled where the information actually exists —
+            // on the device, which knows whether it is foreground and which
+            // conversation is on screen. That is the same rule the local
+            // banner already applies, so there is one decision, not two.
+            //
+            // Not awaited: a turn is over, and the push service must never be
+            // able to hold a session open or fail it.
+            void pushFinishedTurn(daemon.pushTargets, {
+              sessionId,
+              ...daemon.sessionNotice(sessionId),
+            });
+          });
+        break;
+      }
+
+      case "app.push": {
+        // `deviceId` comes from the `hello` on this connection, so a phone that
+        // reconnects with a rotated token replaces its own entry rather than
+        // adding a second one — otherwise every app restart would cost another
+        // copy of every banner.
+        const deviceId = ctx.deviceId;
+        if (!deviceId) {
+          reply(errorMessage("push_unidentified", "Say hello before registering for push."));
+          break;
+        }
+        if (!daemon.pushTargets.register(deviceId, message.token, message.platform)) {
+          // Said out loud rather than ignored: a silently rejected token looks
+          // exactly like a working one until someone waits for a notification
+          // that never comes.
+          reply(errorMessage("push_token_invalid", "That is not an Expo push token."));
+        }
         break;
       }
 

@@ -437,9 +437,28 @@ function capTurns(turns: Turn[]): Turn[] {
   return turns.length > MAX_TURNS ? turns.slice(turns.length - MAX_TURNS) : turns;
 }
 
+/** Where the daemon should push when this phone's app is asleep. */
+export interface PushAddress {
+  token: string;
+  platform: "ios" | "android";
+}
+
 interface DaemonOptions {
   /** Called once per finished turn, for any session — not just the open one. */
   onTurnFinished?: (turn: TurnFinished) => void;
+  /**
+   * This device's push address, asked for once the channel is up.
+   *
+   * Injected rather than imported because obtaining it means calling into Expo
+   * and React Native, and this module is deliberately platform-free — the
+   * daemon's own test suite imports app sources directly, so an SDK import here
+   * drags React Native's globals into a Node typecheck and breaks it. The screen
+   * supplies the platform half; this file only puts it on the wire.
+   *
+   * Resolves undefined when there can be no push: a simulator, a fresh clone
+   * with no EAS project, or a refused permission.
+   */
+  pushAddress?: () => Promise<PushAddress | undefined>;
 }
 
 /**
@@ -585,6 +604,11 @@ export function useDaemon(
     onTurnFinished.current = options.onTurnFinished;
   }, [options.onTurnFinished]);
 
+  // Same reason, for the rest of the options: the socket effect reads them when
+  // it needs them rather than depending on them.
+  const optionsRef = useRef(options);
+  optionsRef.current = options;
+
   // What each session's agent has said during its current turn, keyed by
   // session, so a notification can quote a conversation that is not on screen.
   //
@@ -592,6 +616,13 @@ export function useDaemon(
   // anything, and it is written from the socket handler where an updater's
   // "may run twice" rule would corrupt an accumulation.
   const turnText = useRef(new Map<string, string>());
+
+  // Whether this connection has already told the daemon where to push.
+  //
+  // Reset when the socket is replaced, because a reconnection is exactly when
+  // it is worth sending again: a token can rotate while the app is away, and a
+  // daemon that restarted has forgotten every token it held.
+  const pushRegistered = useRef(false);
 
   // The agent this device used last, read once from storage.
   //
@@ -657,6 +688,9 @@ export function useDaemon(
 
       const ws = new WebSocket(url);
       socket.current = ws;
+      // A new socket has told nobody anything yet, and the daemon on the far
+      // end may be a restarted process holding no tokens at all.
+      pushRegistered.current = false;
       // Fresh per connection: the counters that make replay detectable are only
       // meaningful within one socket, so carrying them across a reconnect would
       // make the new connection's first frames look like replays.
@@ -952,6 +986,27 @@ export function useDaemon(
         // from the agent, so an app that updates its model line-up is reflected
         // without changing anything here.
         if (message.t === "providers") {
+          // Hand the daemon somewhere to push, once per connection.
+          //
+          // Here rather than beside `hello` because `hello` is cleartext and
+          // this must be sealed: a push token identifies this phone, and the
+          // relay is not entitled to it. `providers` is the daemon's first
+          // sealed reply, so its arrival is the proof the channel is up.
+          //
+          // Re-sent on every reconnection, not cached, because tokens rotate;
+          // the daemon keys them by device, so repeats replace rather than
+          // accumulate. Failure is silent by design — a simulator, a fresh
+          // clone with no EAS project, or a refused permission all land here,
+          // and each one simply leaves the app with the local-only banners it
+          // had before.
+          const askPush = optionsRef.current.pushAddress;
+          if (askPush && !pushRegistered.current) {
+            pushRegistered.current = true;
+            void askPush().then((address) => {
+              if (!address || ws.readyState !== WebSocket.OPEN) return;
+              ws.send(JSON.stringify(secure.seal({ t: "app.push", ...address })));
+            });
+          }
           if (Array.isArray(message.activeSessions)) {
             liveSessions.current = new Set<string>(message.activeSessions);
             // The conversation on screen may have died with a previous daemon

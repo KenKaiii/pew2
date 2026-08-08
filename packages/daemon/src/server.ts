@@ -314,6 +314,7 @@ const server = Bun.serve({
       // one path and not the other.
       await handleMessage(JSON.stringify(message), {
         daemon,
+        deviceId: client.deviceId,
         reply: (reply) => send(ws, reply),
         broadcast: (event) => {
           broadcast(event, envelopeHeader(event));

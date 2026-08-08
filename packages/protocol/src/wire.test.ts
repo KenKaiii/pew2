@@ -168,3 +168,27 @@ test("a message missing what the daemon will use is refused", () => {
     });
   }
 });
+
+test("a push registration is a client message, and needs a real platform", () => {
+  // Additive rather than a `WIRE_VERSION` bump: an older daemon answers
+  // `unknown_message` and the app keeps its local-only banners, instead of the
+  // connection being refused and working sessions going down over a
+  // notification improvement.
+  expect(
+    ClientMessage.safeParse({
+      t: "app.push",
+      token: "ExponentPushToken[abc123]",
+      platform: "ios",
+    }).success,
+  ).toBe(true);
+
+  // The daemon branches on this to decide whether to name an Android channel,
+  // and naming one the device never created means nothing is shown at all.
+  expect(
+    ClientMessage.safeParse({ t: "app.push", token: "ExponentPushToken[abc]", platform: "web" })
+      .success,
+  ).toBe(false);
+
+  // An empty token would be sent to Expo on every finished turn for nothing.
+  expect(ClientMessage.safeParse({ t: "app.push", token: "", platform: "ios" }).success).toBe(false);
+});

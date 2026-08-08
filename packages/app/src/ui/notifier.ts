@@ -1,37 +1,100 @@
 /**
  * The system notification binding.
  *
- * Local notifications only — scheduled by this app, from a socket message it
- * received itself. That is deliberate for now: it needs no push credentials, no
- * device registry in the relay, and works in Expo Go, where remote push does
- * not. The limit is honest and worth knowing: JavaScript is suspended some
- * seconds after the app leaves the screen, and the socket dies with it, so a
- * turn that lands long after the phone was locked cannot be announced this way.
- * Covering that needs the relay to send a real push while no app socket is
- * attached — a strictly larger change on top of this same event.
+ * A finished turn reaches the phone by two routes, and this module is where they
+ * are reconciled:
  *
- * Expo-only. The decision of whether and what to announce lives in
- * `notificationPolicy.ts`, which stays importable by `bun test`.
+ * - **Local**, scheduled here from a `session.idle` that arrived on the socket.
+ *   Instant, private, and only possible while this app's JavaScript is running.
+ * - **Remote**, pushed by the daemon (`daemon/src/push.ts`). The only route that
+ *   works once iOS has suspended us, which it does within seconds of the app
+ *   leaving the screen — the case the whole feature exists for, and the one the
+ *   local route could never cover. Before it, a turn that finished while the
+ *   phone was in a pocket announced itself on reopening, minutes late.
+ *
+ * The daemon pushes unconditionally, because it cannot know what this phone is
+ * doing (see the note at the `session.idle` broadcast). So both routes can fire
+ * for one turn, and deciding between them belongs here: this is the only place
+ * that knows whether the app is on screen and which conversation is open.
+ *
+ * Expo-only. What a banner *says*, and whether a turn deserves one at all, lives
+ * in `notificationPolicy.ts`, which stays importable by `bun test`.
  */
 import { Platform } from "react-native";
 import * as Notifications from "expo-notifications";
 import type { Notice } from "../notificationPolicy";
+import { duplicatePush } from "../notificationPolicy";
 
 /**
- * Show the banner even while the app is in the foreground.
+ * The conversation currently open, as far as an arriving push is concerned.
  *
- * A finished turn is only ever announced for a conversation the user is *not*
- * looking at (see `finishedNotice`), so suppressing it in the foreground would
- * silence exactly the case this exists for: switching to another project while
- * the first one works.
+ * Module state rather than a hook because `setNotificationHandler` is a global
+ * registered once at import, long before any component exists, and it runs for
+ * notifications that arrive at arbitrary moments.
+ */
+let onScreenSessionId: string | undefined;
+
+/** Told by the screen, so an arriving push knows what the user can already see. */
+export function setOpenConversation(sessionId: string | undefined): void {
+  onScreenSessionId = sessionId;
+}
+
+/**
+ * Turns this app has already raised a local banner for, and when.
+ *
+ * The window that follows is short because these two routes race by design: the
+ * socket message and the push are sent by the same daemon at the same moment,
+ * and differ only by the trip through Apple or Google.
+ */
+const announcedAt = new Map<string, number>();
+
+/**
+ * Long enough to cover a push crossing the internet, short enough that a genuine
+ * second turn in the same conversation is never swallowed. Agents do not finish
+ * twice in ten seconds.
+ */
+const DUPLICATE_WINDOW_MS = 10_000;
+
+function rememberAnnounced(sessionId: string): void {
+  const now = Date.now();
+  announcedAt.set(sessionId, now);
+  // Bounded without a timer: a map keyed by session would otherwise grow for
+  // the life of the process, and this path runs on every finished turn.
+  for (const [id, at] of announcedAt) {
+    if (now - at > DUPLICATE_WINDOW_MS) announcedAt.delete(id);
+  }
+}
+
+/**
+ * Whether to show a notification that has arrived while the app is awake.
+ *
+ * Only ever consulted in the foreground: once iOS suspends this app the system
+ * presents pushes without asking, which is the entire point of them.
+ *
+ * Locally scheduled banners are shown unconditionally, because `finishedNotice`
+ * already decided they were worth showing — re-judging them here would apply the
+ * same rule twice and get it wrong the second time.
  */
 Notifications.setNotificationHandler({
-  handleNotification: async () => ({
-    shouldShowBanner: true,
-    shouldShowList: true,
-    shouldPlaySound: false,
-    shouldSetBadge: false,
-  }),
+  handleNotification: async (notification) => {
+    const data = notification.request.content.data as
+      | { sessionId?: unknown; local?: unknown }
+      | undefined;
+    const suppressed = duplicatePush({
+      local: data?.local === true,
+      sessionId: typeof data?.sessionId === "string" ? data.sessionId : undefined,
+      openSessionId: onScreenSessionId,
+      announcedAt: typeof data?.sessionId === "string" ? announcedAt.get(data.sessionId) : undefined,
+      now: Date.now(),
+      windowMs: DUPLICATE_WINDOW_MS,
+    });
+    return {
+      shouldShowBanner: !suppressed,
+      shouldShowList: !suppressed,
+      shouldPlaySound: false,
+      shouldSetBadge: false,
+    };
+  },
 });
 
 /** Android requires a channel before anything is delivered. */
@@ -123,13 +186,19 @@ export function ensureNotificationPermission(): Promise<boolean> {
 export async function notify(notice: Notice): Promise<void> {
   try {
     if (!(await ensureNotificationPermission())) return;
+    // Recorded before the await that presents it: the daemon's push for this
+    // same turn is in flight right now, and marking this late would let it
+    // through as a second banner.
+    rememberAnnounced(notice.sessionId);
     await Notifications.scheduleNotificationAsync({
       content: {
         title: notice.title,
         body: notice.body,
         // Read back on tap to open the right conversation, and on a reply to
-        // address the right agent.
-        data: { sessionId: notice.sessionId },
+        // address the right agent. `local` marks who scheduled it, so the
+        // handler above can tell this banner from the daemon's push for the
+        // same turn and drop the loser rather than showing both.
+        data: { sessionId: notice.sessionId, local: true },
         // What attaches the inline reply box.
         categoryIdentifier: CATEGORY,
         ...(Platform.OS === "android" ? { channelId: CHANNEL } : null),

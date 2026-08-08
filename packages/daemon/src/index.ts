@@ -23,6 +23,7 @@ import { SessionLog } from "./session/log.js";
 import { readDisabled } from "./providers/enabled.js";
 import { discardAttachments, storeAttachments } from "./attachments.js";
 import { folderName, resolveWorkspace } from "./workspace.js";
+import { PushRegistry } from "./push.js";
 import { readProbeCache, writeProbeCache } from "./probe-cache.js";
 import { hydrateMessageCounts } from "./acp/messageCounts.js";
 import { sessionsInProject, type AgentProject } from "./projects.js";
@@ -79,6 +80,18 @@ interface ActiveSession {
    * the flag that keeps the reaper off a running turn.
    */
   working?: boolean;
+  /**
+   * What the agent has said so far in the current turn.
+   *
+   * Only the daemon can supply the body of a push notification: by the time a
+   * long turn ends, the phone's JavaScript has been suspended for minutes and
+   * it has received none of these chunks. Kept per session and reset at the
+   * start of each turn, so a push always quotes the reply it is announcing
+   * rather than the previous one.
+   *
+   * Capped, because a turn can emit megabytes and a banner shows one line.
+   */
+  turnText?: string;
   /** Resume history is frame-batched until loading completes. */
   streamingReplay?: boolean;
   pendingReplay?: wire.SessionEvent[];
@@ -149,6 +162,53 @@ const PROJECT_SESSION_LIMIT = SESSION_HISTORY_LIMIT;
 
 const REPLAY_BATCH_SIZE = 64;
 
+/**
+ * How much of a turn's reply is kept for the notification body.
+ *
+ * A banner shows about one line; `summarise` takes the first readable one. This
+ * only has to be long enough to contain that line after markdown headings and
+ * blank lines are skipped, and short enough that a turn emitting megabytes of
+ * output does not have all of it retained per session for the sake of a banner.
+ */
+const TURN_TEXT_LIMIT = 2000;
+
+/**
+ * Accumulate what the agent says, for the push notification sent when the turn
+ * ends.
+ *
+ * Reads the same ACP shape the app's `readChunk` does. It is deliberately a
+ * sniff rather than a parse: this must never be able to throw on an unexpected
+ * payload, because it sits directly in the path of every event a session emits.
+ */
+function rememberTurnText(session: ActiveSession, payload: unknown): void {
+  if ((session.turnText?.length ?? 0) >= TURN_TEXT_LIMIT) return;
+  const update = (payload as { update?: { sessionUpdate?: unknown; content?: unknown } })?.update;
+  if (update?.sessionUpdate !== "agent_message_chunk") return;
+  // Thoughts are excluded by that check on purpose: announcing an agent's
+  // reasoning rather than its answer would put the least useful sentence of the
+  // turn on the lock screen.
+
+  // A text block, as ACP sends them. Narrowed to `string` rather than left as
+  // `unknown`: an agent that puts a non-string in `text` would otherwise be
+  // stringified into the banner as "[object Object]".
+  const blockText = (block: unknown): string => {
+    const typed = block as { type?: unknown; text?: unknown } | null;
+    return typed?.type === "text" && typeof typed.text === "string" ? typed.text : "";
+  };
+  const content = update.content;
+  // Mirrors the app's `readText`: a lone block is trusted to be text, because
+  // that is the only shape ACP sends outside an array, while inside an array the
+  // `type` has to be checked — an image block there carries no readable text.
+  const single = (content as { text?: unknown } | null)?.text;
+  const text = Array.isArray(content)
+    ? content.map(blockText).join("")
+    : typeof single === "string"
+      ? single
+      : "";
+  if (text.length === 0) return;
+  session.turnText = `${session.turnText ?? ""}${text}`.slice(0, TURN_TEXT_LIMIT);
+}
+
 export class Daemon {
   private providers: LoadedProvider[] = [];
   private readonly sessions = new Map<string, ActiveSession>();
@@ -184,6 +244,18 @@ export class Daemon {
    * session *adopts* this process instead of paying the spawn again. A spare
    * idles out after `SPARE_TTL_MS` so an unused agent does not run forever.
    */
+  /**
+   * Phones to notify when a turn ends while their app is asleep.
+   *
+   * Owned by the daemon rather than by a connection, and that is the point: the
+   * socket a token arrived on is usually gone by the time it is needed — the app
+   * was backgrounded, which is the whole reason a push is being sent. Both
+   * transports share it for the same reason `handleMessage` is shared, so a
+   * phone that paired over the LAN and later reconnects through the relay does
+   * not have to be told twice.
+   */
+  readonly pushTargets = new PushRegistry();
+
   private readonly spares = new Map<
     // Keyed by provider *and* directory. `cwd` is part of a spare's identity
     // rather than a note about it: some agents ignore ACP's per-session `cwd`
@@ -939,6 +1011,7 @@ export class Daemon {
    * `markLive` and the reconnect replay both see the complete history.
    */
   private record(session: ActiveSession, payload: unknown) {
+    rememberTurnText(session, payload);
     const event = session.log.append(payload);
     if (!session.live) return;
     if (!session.streamingReplay) {
@@ -1391,6 +1464,9 @@ export class Daemon {
     // touch — the exact leak this flag exists to bound.
     session.lastUsedAt = Date.now();
     session.working = true;
+    // A new turn, so the previous turn's closing words must not be what the
+    // push notification for this one quotes.
+    session.turnText = undefined;
     try {
       // Written before the echo: an attachment that cannot be stored (over the
       // limits, disk full) must fail the whole prompt rather than leave a turn on
@@ -1458,6 +1534,25 @@ export class Daemon {
     const session = this.sessions.get(sessionId);
     if (!session) return {};
     return { providerId: session.providerId, folder: folderName(session.cwd) };
+  }
+
+  /**
+   * Everything a push notification for a finished turn needs to say.
+   *
+   * Separate from `sessionOrigin` because the two have different audiences. That
+   * one feeds `session.idle` on the wire, where the app resolves `providerId`
+   * against the provider list it already holds. A push has no app to resolve
+   * anything: the text is rendered by iOS with no JavaScript running, so the
+   * agent's display name has to be looked up here.
+   */
+  sessionNotice(sessionId: string): { folder?: string; agentName?: string; lastText?: string } {
+    const session = this.sessions.get(sessionId);
+    if (!session) return {};
+    return {
+      folder: folderName(session.cwd),
+      agentName: this.providers.find((p) => p.manifest.id === session.providerId)?.manifest.name,
+      lastText: session.turnText,
+    };
   }
 
   /** Replay everything a reconnecting client has not seen yet. */
