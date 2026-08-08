@@ -141,7 +141,10 @@ export async function handleMessage(raw: string, ctx: HandlerContext): Promise<v
         // for? Both come from the agent itself, so the reply reflects the
         // installed version rather than anything baked into pew2.
         const providerId = message.providerId;
-        const capabilities = await daemon.probeProvider(providerId, {
+        // `capabilitiesFor`, not `probeProvider`: the probe is the agent's own
+        // answer, and what the app has to render is the state a new session will
+        // actually open in — the agent's list at this user's remembered values.
+        const capabilities = await daemon.capabilitiesFor(providerId, {
           refresh: message.refresh === true,
         });
         reply({ t: "provider.capabilities", providerId, ...capabilities });

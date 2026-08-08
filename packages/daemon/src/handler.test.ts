@@ -37,7 +37,13 @@ function stubbed() {
       listed.push(cwd);
       return [];
     },
+    // `provider.sessions` asks the probe for `canResume`, which no preference
+    // affects.
     probeProvider: async () => ({ canResume: true, configOptions: [], sessions: [] }),
+    // `provider.capabilities` is answered through this instead: it is the probe
+    // with the user's stored selectors folded over it. Stubbed at that seam
+    // rather than under it, so a handler test never reads the real `~/.pew2`.
+    capabilitiesFor: async () => ({ canResume: true, configOptions: [], sessions: [] }),
     lastWorkspace: async () => "/Users/someone/fallback",
     configOptions: () => [],
     agentSessionId: () => undefined,

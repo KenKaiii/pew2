@@ -29,6 +29,23 @@ function daemonWithCollector() {
   return { daemon, sent };
 }
 
+/**
+ * Wait for a message to appear, rather than for a number of milliseconds.
+ *
+ * The announcements under test are fired beside a write instead of being
+ * awaited by their caller — a client learning about a preference must not hold
+ * up the reply to the tap that set it — so "has it happened yet" is the only
+ * honest question, and a fixed sleep is a flake waiting for a slow disk.
+ */
+async function until<T>(read: () => T | undefined, what: string): Promise<T> {
+  for (let attempt = 0; attempt < 200; attempt++) {
+    const value = read();
+    if (value !== undefined) return value;
+    await Bun.sleep(1);
+  }
+  throw new Error(`timed out waiting for ${what}`);
+}
+
 /** Register a session without spawning an agent: the mechanism is what matters. */
 function plantSession(daemon: Daemon, sessionId: string) {
   const session = {
@@ -294,9 +311,10 @@ test("resume history streams after announcement and ends with a completion frame
   });
 });
 
-test("a probe reports the remembered value, not the agent's default", () => {
+test("a capability answer carries the remembered value, not the agent's default", () => {
   // The pills read this before any session exists. Reporting the agent's own
-  // default here is what showed "Default" until the first prompt landed.
+  // default showed "Default" until the first prompt landed. Folded in per
+  // answer rather than into the probe — see the test below for why.
   const options = [
     {
       id: "__acp_model",
@@ -326,6 +344,96 @@ test("a preference the agent no longer offers is ignored", () => {
   ];
 
   expect(withStoredPrefs(options, { __acp_model: "gone" })[0]?.currentValue).toBe("sonnet");
+});
+
+test("a model chosen in a conversation moves what the next one will open with", async () => {
+  // The dangerous version of this bug: the pill said "Opus", the prompt ran on
+  // the remembered model, and nothing on screen ever admitted the difference.
+  // A choice made inside a conversation is recorded against the provider too, so
+  // every client's empty state has to be told — that announcement is the only
+  // thing that can describe what the next prompt will actually use.
+  const { daemon, sent } = daemonWithCollector();
+  const session: any = plantSession(daemon, "live-model");
+  const opus = [
+    {
+      id: "__acp_model",
+      name: "Model",
+      type: "select",
+      currentValue: "opus",
+      options: [
+        { value: "sonnet", name: "Sonnet" },
+        { value: "opus", name: "Opus" },
+      ],
+    },
+  ];
+  session.handle = {
+    configOptions: opus,
+    setConfigOption: async () => opus,
+  } as unknown as AcpSessionHandle;
+
+  const home = process.env.PEW2_HOME;
+  process.env.PEW2_HOME = await mkdtemp(join(tmpdir(), "pew2-provider-config-"));
+  try {
+    await daemon.setConfigOption("live-model", "__acp_model", "opus");
+
+    const announced: any = await until(
+      () => sent.findLast((m: any) => m.t === "provider.config"),
+      "the provider-level announcement",
+    );
+    expect(announced.providerId).toBe("test");
+    expect(announced.configOptions[0].currentValue).toBe("opus");
+  } finally {
+    if (home === undefined) delete process.env.PEW2_HOME;
+    else process.env.PEW2_HOME = home;
+  }
+});
+
+test("capabilities are answered at the values in force now, not the ones probed", async () => {
+  // The probe is cached for the daemon's lifetime, so a preference folded into it
+  // once is reported for ever: pick a model, and the empty state goes on naming
+  // whichever one was current when the agent was first asked.
+  const { daemon, sent } = daemonWithCollector();
+  (daemon as any).probes.set(
+    "test",
+    Promise.resolve({
+      configOptions: [
+        {
+          id: "__acp_model",
+          name: "Model",
+          type: "select",
+          currentValue: "sonnet",
+          options: [
+            { value: "sonnet", name: "Sonnet" },
+            { value: "opus", name: "Opus" },
+          ],
+        },
+      ],
+      sessions: [],
+      canResume: false,
+    }),
+  );
+
+  const home = process.env.PEW2_HOME;
+  process.env.PEW2_HOME = await mkdtemp(join(tmpdir(), "pew2-capabilities-prefs-"));
+  try {
+    const first = await daemon.capabilitiesFor("test");
+    expect(first.configOptions[0]?.currentValue).toBe("sonnet");
+
+    await daemon.rememberConfigOption("test", "__acp_model", "opus");
+    // The same choice made from the empty state, which has no session to set it
+    // on: awaited here both to cover that announcement and so the write is
+    // certainly on disk before the second read below.
+    const announced: any = await until(
+      () => sent.findLast((m: any) => m.t === "provider.config"),
+      "the announcement that a provider-level choice changed",
+    );
+    expect(announced.configOptions[0].currentValue).toBe("opus");
+
+    expect((await daemon.capabilitiesFor("test")).configOptions[0]?.currentValue).toBe("opus");
+  } finally {
+    if (home === undefined) delete process.env.PEW2_HOME;
+    else process.env.PEW2_HOME = home;
+  }
 });
 
 test("a selector the agent changes by itself reaches the app", async () => {

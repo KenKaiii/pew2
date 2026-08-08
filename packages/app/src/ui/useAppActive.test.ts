@@ -17,7 +17,10 @@ type Status = "active" | "inactive" | "background";
  */
 let registered: ((next: Status) => void) | undefined;
 
-mock.module("react-native", () => ({
+// `void`: this returns a promise the linter insists on, and the module registry
+// is populated synchronously — awaiting at the top level would be the only
+// statement in the file that needs the suite to be async.
+void mock.module("react-native", () => ({
   AppState: {
     currentState: "active",
     addEventListener: (event: string, handler: (next: Status) => void) => {

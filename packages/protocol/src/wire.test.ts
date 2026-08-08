@@ -131,6 +131,32 @@ test("every message the app actually sends is accepted", () => {
   }
 });
 
+test("provider.config is one name for two shapes, one per direction", () => {
+  // The app names a single choice; the daemon answers with the whole set a new
+  // conversation will open with — the same split `session.config` already has.
+  // Both halves have to validate in their own direction, or the empty state
+  // either cannot set a model or is never told what the next prompt will use —
+  // and the second of those is a pill naming a model that is not running.
+  const chosen = {
+    t: "provider.config",
+    providerId: "claude-code",
+    configId: "model",
+    value: "opus",
+  };
+  const announced = {
+    t: "provider.config",
+    providerId: "claude-code",
+    configOptions: [{ id: "model", name: "Model", type: "select", currentValue: "opus" }],
+  };
+
+  expect(ClientMessage.safeParse(chosen).success).toBe(true);
+  expect(ServerMessage.safeParse(announced).success).toBe(true);
+  // Neither passes as the other: a daemon that took an announcement for a choice
+  // would write a preference with no value in it.
+  expect(ServerMessage.safeParse(chosen).success).toBe(false);
+  expect(ClientMessage.safeParse(announced).success).toBe(false);
+});
+
 test("a prompt keeps its attachments and defaults them when absent", () => {
   // The one field carrying bytes to disk. If validation dropped or reshaped it,
   // a prompt that says "look at the screenshot" would arrive without one.

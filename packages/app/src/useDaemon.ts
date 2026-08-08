@@ -12,6 +12,7 @@ import { SecureChannel, e2e, envelopeHeader, wire } from "@pew2/protocol";
 const { WIRE_VERSION } = wire;
 import { USE_FIXTURES, isFixtureSession, sampleSessions } from "./fixtures";
 import { mergeAgentSessions, needsResume, replaceAgentSessionStub } from "./agentHistory";
+import { rememberConfigs, visibleConfigs, withChoice } from "./configTruth";
 import {
   beginActivity,
   foldActivity,
@@ -323,23 +324,6 @@ interface State {
    * landed, which is the flash this exists to prevent.
    */
   loadingProject?: string;
-}
-
-/**
- * Last-known selectors per provider.
- *
- * A session only reports its options once it exists, but the model selector has
- * to be usable on an empty screen — choosing a model is part of composing the
- * first prompt. Remembering the last set an agent advertised lets the picker
- * appear immediately, and the live session overwrites it as soon as it opens.
- */
-function rememberConfigs(
-  known: Record<string, ConfigOption[]>,
-  providerId: string | undefined,
-  options: ConfigOption[],
-): Record<string, ConfigOption[]> {
-  if (!providerId || options.length === 0) return known;
-  return { ...known, [providerId]: options };
 }
 
 /**
@@ -969,21 +953,33 @@ export function useDaemon(
           liveSessions.current = new Set(liveSessions.current ?? []).add(message.sessionId);
         }
 
-        // Cache selectors against the provider so they survive the session and
-        // are available before the next one starts. `provider.capabilities` is
-        // the same data probed ahead of a session, so the empty state can offer
-        // a real model list rather than nothing.
-        if (
-          message.t === "session.started" ||
-          message.t === "session.config" ||
-          message.t === "provider.capabilities"
-        ) {
+        // What a *new* conversation with this agent will open with, held per
+        // provider so the empty state can show it before any session exists.
+        //
+        // Only the two messages that actually describe that: the daemon's
+        // capability reply, and its announcement that a provider-level choice
+        // changed. Deliberately *not* fed from `session.started` or
+        // `session.config` — those describe one conversation, and a resumed one
+        // comes back at the selectors it was last held at rather than the ones
+        // the next prompt would use. Folding them in here is what put "Opus" in
+        // the pill and then ran the prompt on the remembered model instead.
+        if (message.t === "provider.capabilities" || message.t === "provider.config") {
           const advertised: ConfigOption[] = message.configOptions ?? [];
           if (advertised.length > 0) {
             setKnownConfigs((known) =>
               rememberConfigs(known, message.providerId ?? providerRef.current, advertised),
             );
           }
+        }
+
+        // Slash commands, by contrast, are a property of the agent and the
+        // project rather than of one conversation, so every message that carries
+        // them is a fair source.
+        if (
+          message.t === "session.started" ||
+          message.t === "session.config" ||
+          message.t === "provider.capabilities"
+        ) {
           // Learned from the probe session, so the sheet works in the empty
           // state — before a prompt has created a session to ask. Held per
           // provider, since every available agent is probed at startup and the
@@ -1741,6 +1737,17 @@ export function useDaemon(
       /** Change a model, thinking level or mode on the open session. */
       setConfig: (configId: string, value: string | boolean) => {
         const sessionId = sessionRef.current;
+        const providerId = providerRef.current ?? targetProviderRef.current;
+        // Chosen in a live conversation or in the empty state, this is now what
+        // the *next* conversation opens with too: the daemon records either
+        // against the provider. Applied locally so the empty state is already
+        // right the moment you leave this one, rather than a round trip later.
+        if (providerId) {
+          setKnownConfigs((known) => ({
+            ...known,
+            [providerId]: withChoice(known[providerId] ?? [], configId, value),
+          }));
+        }
         if (sessionId) {
           post({ t: "session.config", sessionId, configId, value });
           return;
@@ -1751,17 +1758,8 @@ export function useDaemon(
         // provider and the new session opens with it applied. Without this the
         // pill in the empty state silently did nothing until you had sent a
         // message — the one moment you are most likely to be choosing a model.
-        const providerId = providerRef.current ?? targetProviderRef.current;
         if (!providerId) return;
         post({ t: "provider.config", providerId, configId, value });
-        // Reflected locally: with no session there is no `session.config` echo
-        // coming back, and the pill has to show what was picked.
-        setKnownConfigs((known) => ({
-          ...known,
-          [providerId]: (known[providerId] ?? []).map((option) =>
-            option.id === configId ? { ...option, currentValue: value } : option,
-          ),
-        }));
       },
 
       /** Reopen a past conversation from the sidebar. */
@@ -2029,10 +2027,16 @@ export function useDaemon(
   // this launch, the composer already targets the remembered agent, so the
   // selector has to describe that same agent rather than nothing.
   const effectiveProviderId = state.activeProviderId ?? fallbackProviderId;
-  const configOptions =
-    state.configOptions.length > 0
-      ? state.configOptions
-      : (effectiveProviderId ? knownConfigs[effectiveProviderId] : undefined) ?? [];
+  const configOptions = visibleConfigs({
+    session: state.configOptions,
+    provider: effectiveProviderId ? knownConfigs[effectiveProviderId] : undefined,
+    // An open conversation is the one case where the provider's list is not the
+    // answer: a restored one comes back at the selectors it was last used with,
+    // which need not be the remembered ones, and they arrive a moment after the
+    // session does. A guess about which model is answering is the one thing this
+    // pill must never be — so it shows nothing until the session says.
+    inConversation: state.sessionId !== undefined || state.loadingSession,
+  });
   // The live session's own list wins; otherwise the provider's, which is what
   // agents that never send the notification rely on entirely.
   const commands =

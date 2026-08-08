@@ -267,6 +267,26 @@ export const SetProviderConfig = z.object({
   value: z.union([z.string(), z.boolean()]),
 });
 
+/**
+ * Daemon -> app. What a *new* session on this provider will open with.
+ *
+ * The same `t` in the other direction, exactly as `session.config` already
+ * works: the app names a choice, the daemon answers with the resulting set.
+ *
+ * Broadcast rather than replied to, and sent for a change made anywhere —
+ * including one made inside a live conversation, which the daemon also records
+ * against the provider. Without it the empty state kept showing whichever
+ * selectors the last conversation happened to hold, while the next prompt
+ * opened at the remembered ones: a pill naming a model that was not the model
+ * about to run. Two devices make that worse, since a choice at the desk moves
+ * what the phone's next prompt will use.
+ */
+export const ProviderConfig = z.object({
+  t: z.literal("provider.config"),
+  providerId: z.string(),
+  configOptions: z.array(ConfigOption),
+});
+
 /** App -> daemon. Reopen one of the agent's own past conversations. */
 export const ResumeSession = z.object({
   t: z.literal("session.resume"),
@@ -625,6 +645,7 @@ export const ServerMessage = z.discriminatedUnion("t", [
   Envelope,
   ProviderAnnounce,
   ProviderCapabilities,
+  ProviderConfig,
   ProviderSessions,
   SessionEvent,
   SessionIdle,
@@ -646,6 +667,7 @@ export type AgentSession = z.output<typeof AgentSession>;
 export type ResumeSession = z.output<typeof ResumeSession>;
 export type ProviderCapabilitiesRequest = z.output<typeof ProviderCapabilitiesRequest>;
 export type ProviderCapabilities = z.output<typeof ProviderCapabilities>;
+export type ProviderConfig = z.output<typeof ProviderConfig>;
 export type AgentProject = z.output<typeof AgentProject>;
 export type ProviderSessionsRequest = z.output<typeof ProviderSessionsRequest>;
 export type ProviderSessions = z.output<typeof ProviderSessions>;

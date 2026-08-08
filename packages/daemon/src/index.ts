@@ -347,7 +347,10 @@ export class Daemon {
    * A failed refresh is silent: the cached answer stays in place.
    */
   private async revalidate(providerId: string) {
-    const fresh = await this.probeProvider(providerId, { refresh: true });
+    // Corrected on the way out, like every other capability answer: the refresh
+    // reports the agent's defaults, and pushing those would overwrite a correct
+    // pill with "Default" seconds after the app opened.
+    const fresh = await this.capabilitiesFor(providerId, { refresh: true });
     if (fresh === EMPTY_CAPABILITIES) return;
     // The app folds this into the drawer exactly like an answer to its own
     // request, so a stale list corrects itself moments after opening.
@@ -1261,10 +1264,12 @@ export class Daemon {
         // is answered from disk rather than waiting on the background reprobe.
         if (disk.allSessions?.length) this.projectHistory.set(providerId, disk.allSessions);
         const served = Promise.resolve<ProviderCapabilities>({
-          // Same correction as the live probe: the cache holds whatever the
-          // agent reported when it was written, which predates any preference
-          // chosen since.
-          configOptions: withStoredPrefs(disk.configOptions, await readConfigPrefs(providerId)),
+          // The agent's own values, uncorrected. Preferences are applied when a
+          // caller is answered (`capabilitiesFor`), never baked in here: this
+          // promise is cached for the daemon's lifetime, so a value folded in
+          // now would still be reported after the user picked something else —
+          // the pill would name a model the next prompt was not going to use.
+          configOptions: disk.configOptions,
           sessions: disk.sessions,
           canResume: disk.canResume,
           // A cache from an older daemon has neither; the background refresh
@@ -1300,9 +1305,6 @@ export class Daemon {
           onPermissionRequest: () => {},
         });
         const booted = handle;
-        // Read once, before the awaits below, so the reply describes the same
-        // settings the session this probe warms will actually open with.
-        const storedPrefs = await readConfigPrefs(providerId);
         // Published before the history below, which is the slow half: listing
         // sessions and counting each one's messages is seconds of disk work,
         // and a new conversation needs none of it. Whoever adopts this calls
@@ -1322,11 +1324,12 @@ export class Daemon {
         this.projectHistory.set(providerId, all);
 
         const capabilities: ProviderCapabilities = {
-          // The user's remembered choices, not the agent's defaults. The probe
-          // session is a throwaway that never had preferences applied, so
-          // reporting its own values showed "Default" in the pills right up
-          // until the first prompt created a real session and corrected them.
-          configOptions: withStoredPrefs(booted.configOptions, storedPrefs),
+          // The agent's own list, at the agent's own values. `capabilitiesFor`
+          // is what folds the user's remembered choices over it, so that the
+          // correction happens per answer rather than once per daemon lifetime —
+          // and so what lands in the probe cache stays the agent's answer,
+          // which is the one thing that file is documented to hold.
+          configOptions: booted.configOptions,
           // The agent's own history, including everything started at the desk.
           sessions,
           canResume: booted.canLoadSession,
@@ -1372,6 +1375,57 @@ export class Daemon {
 
     this.probes.set(providerId, probe);
     return probe;
+  }
+
+  /**
+   * Capabilities as a client must see them: the agent's list, at the values the
+   * next session will really open with.
+   *
+   * The probe reports the agent's defaults, and a new session has this user's
+   * remembered choices applied to it on connect — so an uncorrected reply
+   * describes a state that never reaches the screen. Applied here, on every
+   * answer, because the probe behind it is cached for the daemon's lifetime
+   * while a preference changes whenever someone taps a pill.
+   */
+  async capabilitiesFor(
+    providerId: string,
+    { refresh = false } = {},
+  ): Promise<ProviderCapabilities> {
+    const probed = await this.probeProvider(providerId, { refresh });
+    if (probed === EMPTY_CAPABILITIES) return probed;
+    return {
+      ...probed,
+      // Ambient env, like every other preference read here: `this.env` is fixed
+      // at construction for the probe cache's sake, and prefs are written
+      // through the ambient one.
+      configOptions: withStoredPrefs(probed.configOptions, await readConfigPrefs(providerId)),
+    };
+  }
+
+  /**
+   * Tell every client what a new conversation with this provider will now use.
+   *
+   * Sent whenever a provider-level preference is written — from the empty state
+   * *and* from inside a live session, since a choice made mid-conversation is
+   * recorded against the provider too. The empty state has no session to read
+   * selectors from, so without this it fell back to whatever the last
+   * conversation was holding: reopening an old chat on Opus and then starting a
+   * new one showed "Opus" while the prompt actually ran on the remembered
+   * model. A pill that names the wrong model is worse than no pill.
+   *
+   * `fallback` is the live session's own list, used when this provider has no
+   * probe to name its options — an agent that never probed cleanly can still be
+   * configured, and the answer must not be silence.
+   */
+  private async publishProviderConfig(providerId: string, fallback?: ConfigOption[]) {
+    const probed = await this.probes.get(providerId);
+    const base = probed?.configOptions.length ? probed.configOptions : fallback;
+    if (!base?.length) return;
+    this.send({
+      t: "provider.config",
+      providerId,
+      configOptions: withStoredPrefs(base, await readConfigPrefs(providerId)),
+    });
   }
 
   /** Begin restoring immediately; callers can announce before the agent is ready. */
@@ -1427,6 +1481,9 @@ export class Daemon {
    */
   async rememberConfigOption(providerId: string, configId: string, value: string | boolean) {
     await writeConfigPref(providerId, configId, value);
+    // Every other client is looking at the same empty state, and one of them
+    // just changed what its next prompt will run on.
+    void this.publishProviderConfig(providerId).catch(() => {});
   }
 
   async setConfigOption(sessionId: string, configId: string, value: string | boolean) {
@@ -1448,6 +1505,10 @@ export class Daemon {
         () => {},
       );
     }
+    // The provider record above is what the *next* conversation opens with, so
+    // the empty state has to move with it. Otherwise leaving this conversation
+    // showed the selectors it was holding while the next prompt used these.
+    void this.publishProviderConfig(session.providerId, updated).catch(() => {});
     return updated;
   }
 
