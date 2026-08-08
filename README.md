@@ -165,10 +165,13 @@ npm run relay:deploy
 pew2 relay wss://your-worker.workers.dev
 ```
 
-Straight about the limits: your pairing key is a bearer secret with no expiry.
-Anyone holding it can drive the agents on your machine, so treat it like an SSH
-key, and run `pew2 pair --rotate` if it ever ends up somewhere it should not be.
-Full detail in [SECURITY.md](SECURITY.md).
+Straight about the limits: your pairing key never expires, which is what lets
+your phone reconnect after a reboot without scanning anything. It admits one
+device — the first to use it — so a code caught in a screenshot or a video is
+worthless once your phone has paired. Until then it is a bearer secret: anyone
+holding it can drive the agents on your machine. Run `pew2 pair --rotate` if a
+code ends up somewhere it should not be, and rotate rather than re-scan when it
+leaked before you first used it. Full detail in [SECURITY.md](SECURITY.md).
 
 ---
 
@@ -176,7 +179,7 @@ Full detail in [SECURITY.md](SECURITY.md).
 
 ```bash
 pew2 setup             # find agents, start the service, show the QR
-pew2 pair              # pair another phone
+pew2 pair              # pair another phone (unpairs the current one)
 pew2 doctor            # what is broken, and how to fix it
 pew2 providers list    # what is installed and what is missing
 pew2 registry sync     # add every agent in the public ACP registry

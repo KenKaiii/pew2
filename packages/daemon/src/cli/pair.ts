@@ -208,6 +208,33 @@ export function deviceLabel(deviceId: string): string {
   return trimmed.replace(/[-_]?[0-9a-f]{8}-[0-9a-f-]{20,}$/i, "") || trimmed;
 }
 
+/**
+ * Whether printing a code should also re-mint it, and what that supersedes.
+ *
+ * A claimed pairing is re-minted without being asked, because in that state
+ * there is nobody left for the old code to serve. A phone that already holds it
+ * never needs to scan again — it reconnects on its own — so anyone reading this
+ * screen is either onboarding a different phone or has reinstalled the app,
+ * which clears the keychain and yields a new device id. The code on disk refuses
+ * both. Printing it anyway is a dead end, and the app's own refusal message
+ * sends people here to escape one.
+ *
+ * An unclaimed pairing is left alone, so running the command twice while walking
+ * to your phone does not invalidate the QR you are halfway through scanning.
+ * `--rotate` covers the case this cannot see: a code that leaked before anyone
+ * claimed it, which looks untouched and must still be replaced.
+ */
+export function rotationFor(
+  claimedBy: string | undefined,
+  forced: boolean,
+): { rotate: boolean; supersededDevice?: string } {
+  // A placeholder from a pre-gate app is not a real owner, and rotating on its
+  // account would break the upgrade path it exists to keep open.
+  const claimed = isRealClaim(claimedBy) ? claimedBy : undefined;
+  if (claimed) return { rotate: true, supersededDevice: claimed };
+  return { rotate: forced };
+}
+
 export interface PairOptions {
   json?: boolean;
   rotate?: boolean;
@@ -221,7 +248,12 @@ export async function cmdPair(flags: Set<string>): Promise<number> {
     wait: !flags.has("--no-wait"),
   };
 
-  const pairing = options.rotate ? await rotatePairing() : await loadPairing();
+  const existing = await loadPairing();
+  const { rotate: rotated, supersededDevice } = rotationFor(
+    existing.claimedBy,
+    Boolean(options.rotate),
+  );
+  const pairing = rotated ? await rotatePairing() : existing;
   const port = daemonPort();
   const addresses = lanAddresses();
   const url = pairingUrl({ token: pairing.token, key: pairing.key, port, relay: pairing.relay });
@@ -253,6 +285,9 @@ export async function cmdPair(flags: Set<string>): Promise<number> {
           // An agent driving setup needs to know this code cannot onboard a
           // second device, rather than discovering it when the phone is refused.
           claimedBy: isRealClaim(pairing.claimedBy) ? pairing.claimedBy : null,
+          // Set when this call re-minted a pairing that another phone held, so
+          // an agent driving setup can say what it just disconnected.
+          supersededDevice: supersededDevice ?? null,
         },
         null,
         2,
@@ -270,11 +305,16 @@ export async function cmdPair(flags: Set<string>): Promise<number> {
     addresses,
     port,
     daemonRunning,
-    rotated: Boolean(options.rotate),
+    rotated,
+    // Names the phone this replaced, so an unexpected rotation reads as a
+    // consequence of something the user did rather than the tool losing state.
+    // Labelled here: the view renders it as given, and this is the module that
+    // already turns ids into names for the paired line.
+    ...(supersededDevice ? { supersededDevice: deviceLabel(supersededDevice) } : {}),
     // Only a real claim is worth warning about. A stored placeholder from a
     // pre-gate app is treated as unclaimed, so announcing it would tell the user
     // their code is spoken for when the next scan will take it.
-    ...(isRealClaim(pairing.claimedBy) ? { claimedBy: pairing.claimedBy } : {}),
+
   };
 
   const style = styler(colorLevel());

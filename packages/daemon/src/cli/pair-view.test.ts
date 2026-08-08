@@ -101,38 +101,30 @@ test("rotation warns that existing devices are now unpaired", () => {
   expect(text).toContain("just rotated");
 });
 
-test("an already-claimed pairing says so before anyone scans it", () => {
-  // A link admits one device. Printing a code that cannot onboard a second
-  // phone, with nothing said, sends the user to scan it and read a refusal on
-  // the phone instead — where the fix is hardest to act on.
-  const text = renderPair(view({ claimedBy: "phone-aaaa" }), undefined, plain)
+test("a code that replaced another phone names the one it unpaired", () => {
+  // `pew2 pair` re-mints a pairing that a phone already holds, because the old
+  // code could not have onboarded anyone. The previous phone stops working the
+  // moment this screen appears, so saying which one keeps that reading as a
+  // consequence of what the user just did rather than the tool losing state.
+  const text = renderPair(
+    view({ rotated: true, supersededDevice: "Kens-iPhone" }),
+    undefined,
+    plain,
+  )
     .map(stripAnsi)
     .join("\n");
 
-  expect(text).toContain("admits no other");
-  expect(text).toContain("pew2 pair --rotate");
+  expect(text).toContain("Kens-iPhone is unpaired and must scan again");
 });
 
-test("a placeholder claim is not announced as an owner", () => {
-  // A pre-gate app stored the literal `phone`, which the daemon treats as
-  // unclaimed and the next scan will take. Warning about it would tell the user
-  // their code is spoken for at the exact moment it is not.
-  const text = renderPair(view({ claimedBy: "phone" }), undefined, plain)
+test("a rotation with nothing to supersede stays general", () => {
+  // `--rotate` on a pairing no device ever claimed has no name to give, and
+  // inventing one would be worse than the general warning.
+  const text = renderPair(view({ rotated: true }), undefined, plain)
     .map(stripAnsi)
     .join("\n");
 
-  expect(text).not.toContain("admits no other");
-});
-
-test("a fresh rotation does not also claim to be already paired", () => {
-  // `--rotate` clears the claim, so showing both notices would have the output
-  // contradict itself in the one moment the user is deciding whether to scan.
-  const text = renderPair(view({ rotated: true, claimedBy: "phone-aaaa" }), undefined, plain)
-    .map(stripAnsi)
-    .join("\n");
-
-  expect(text).toContain("must scan again");
-  expect(text).not.toContain("admits no other");
+  expect(text).toContain("devices paired before now must scan again");
 });
 
 test("the QR is centred without touching its own escape sequences", () => {

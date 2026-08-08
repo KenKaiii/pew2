@@ -6,7 +6,7 @@
  * because the QR printed above is already valid.
  */
 import { expect, test } from "bun:test";
-import { checkRelay, cliDeviceId, deviceLabel, reachOf, waitForDevice } from "./pair.js";
+import { checkRelay, cliDeviceId, deviceLabel, reachOf, rotationFor, waitForDevice } from "./pair.js";
 
 /** A WebSocket stand-in with just the surface `waitForDevice` touches. */
 class FakeSocket {
@@ -130,4 +130,34 @@ test("device names drop the relay's uuid suffix", () => {
   expect(deviceLabel("Kens-iPhone")).toBe("Kens-iPhone");
   expect(deviceLabel("iPhone-3f2a1b4c-9d8e-4f1a-b2c3-d4e5f6a7b8c9")).toBe("iPhone");
   expect(deviceLabel("   ")).toBe("a device");
+});
+
+test("printing a code for a claimed pairing re-mints it", () => {
+  // The old code could not have onboarded anyone: the phone holding it never
+  // needs to scan again, and everyone else is refused. The app's own refusal
+  // tells people to run `pew2 pair`, so handing them the same dead code is a
+  // loop with no way out of it.
+  expect(rotationFor("phone-aaaa", false)).toEqual({
+    rotate: true,
+    supersededDevice: "phone-aaaa",
+  });
+});
+
+test("an unclaimed pairing is printed as it stands", () => {
+  // Running the command twice while walking to your phone must not invalidate
+  // the QR you are halfway through scanning.
+  expect(rotationFor(undefined, false)).toEqual({ rotate: false });
+});
+
+test("--rotate replaces a code nobody has claimed", () => {
+  // The case judgement cannot see: a link that leaked before first use looks
+  // untouched, and is exactly the one that has to be replaced.
+  expect(rotationFor(undefined, true)).toEqual({ rotate: true });
+});
+
+test("a pre-gate placeholder does not trigger a rotation", () => {
+  // `phone` is treated as unclaimed so an older app keeps working until it
+  // updates. Rotating on its account would break the upgrade path it exists to
+  // keep open, and would name a device that is not really there.
+  expect(rotationFor("phone", false)).toEqual({ rotate: false });
 });

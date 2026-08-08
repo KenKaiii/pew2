@@ -29,7 +29,7 @@ import {
   type Style,
 } from "./ui.js";
 import { rail } from "./rail.js";
-import { isRealClaim } from "../device-claim.js";
+
 
 export type Reach = "anywhere" | "local" | "unreachable";
 
@@ -46,17 +46,19 @@ export interface PairView {
   daemonRunning: boolean;
   rotated: boolean;
   /**
-   * The device already using this pairing, if one has claimed it.
+   * The phone this code replaced, when printing it re-minted a claimed pairing.
    *
-   * A link admits one device, so a code printed for an already-claimed pairing
-   * cannot onboard a second phone. Saying so here is the difference between a
-   * one-line fix and scanning a QR that answers with a refusal.
+   * Naming it is what stops an unasked-for rotation reading as the tool losing
+   * state: the previous phone stops working the moment this screen appears, and
+   * the person looking at it is the only one who can tell whether that was the
+   * point.
    *
-   * A placeholder left by a pre-gate app is not a real claim and is not
-   * announced; `isRealClaim` decides, so the screen and the gate cannot drift
-   * into disagreeing about who owns a pairing.
+   * Already a display label rather than a raw id. The caller applies
+   * `deviceLabel`, which lives beside the command that also prints it on the
+   * paired line — importing it here would close a cycle, since that module
+   * already depends on this one.
    */
-  claimedBy?: string;
+  supersededDevice?: string;
 }
 
 export interface RenderOptions {
@@ -339,22 +341,12 @@ export function renderPair(
     const g = options.glyph ?? glyphs();
     lines.push(
       rail(options).bar(),
-      `${g_}${s.hex(PALETTE.warning, g.warn)} ${s.dim("token rotated — devices paired before now must scan again")}`,
-    );
-  } else if (isRealClaim(view.claimedBy)) {
-    // Only when it was not just rotated: a rotation clears the claim, so both
-    // notices at once would contradict each other.
-    //
-    // And only for a real claim. A pre-gate app stored the literal `phone`,
-    // which the daemon treats as unclaimed and the next scan will take — so
-    // warning about it would tell the user their code is spoken for at the exact
-    // moment it is not.
-    const s = options.style ?? styler();
-    const g = options.glyph ?? glyphs();
-    lines.push(
-      rail(options).bar(),
-      `${g_}${s.hex(PALETTE.warning, g.warn)} ${s.dim("already paired to a device — this code admits no other")}`,
-      `${g_}  ${s.dim("to move to a different phone: pew2 pair --rotate")}`,
+      // Named when one exists. A pairing this call took from a specific phone
+      // deserves to say which, rather than a general warning that leaves the
+      // user working out whether it means them.
+      view.supersededDevice
+        ? `${g_}${s.hex(PALETTE.warning, g.warn)} ${s.dim(`new code — ${view.supersededDevice} is unpaired and must scan again`)}`
+        : `${g_}${s.hex(PALETTE.warning, g.warn)} ${s.dim("token rotated — devices paired before now must scan again")}`,
     );
   }
 
