@@ -481,10 +481,11 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
   // `setTimeout` and break every `.unref()` in it. `resumeNow` exists to keep
   // that boundary while still letting this side drive the reconnect.
   //
-  // A second listener rather than a branch in the one above: that one writes a
-  // ref during render-sensitive work, this one is idle until the app returns,
-  // and `AppState` is a plain emitter where the extra subscription costs
-  // nothing measurable.
+  // A second listener rather than a branch in the `foreground` one above,
+  // because that one is declared before `useDaemon` runs and so has no
+  // `resumeNow` to call. Reordering the two to share a subscription would put
+  // the socket's setup above the ref that decides whether a finished turn needs
+  // a banner, which is the more delicate of the two orderings.
   const resumeDaemon = daemon.resumeNow;
   useEffect(() => {
     const subscription = AppState.addEventListener("change", (next) => {

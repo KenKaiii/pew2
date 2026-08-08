@@ -1516,6 +1516,12 @@ export function useDaemon(
       // the next delay and let one more failure trip the "can't reach your
       // machine" threshold on what is, for the user, the first try.
       attempts.current = 0;
+      // And the verdict those attempts produced goes with them. The UI checks
+      // `unreachable` before `status`, so leaving it set would keep "Can't reach
+      // your machine" on screen over a connection that is only just starting —
+      // the pessimistic message this whole path exists to get rid of. Guarded so
+      // a resume with nothing to correct does not re-render the tree.
+      setState((s) => (s.unreachable ? { ...s, unreachable: false } : s));
       connect();
     };
 
