@@ -11,6 +11,25 @@ installs them separately, and what an app and a daemon must agree on is
 
 Dates are the day the tag was cut.
 
+## 0.9.13 — 2026-08-08
+
+### Fixed
+
+- **`pew2 pair` can always pair again.** A pairing admits one device, so once a
+  phone had claimed it the printed code could not onboard anyone: the phone
+  holding it never needs to scan again, and everyone else is refused — including
+  that same phone after reinstalling the app, which clears its identity. The
+  command now mints a fresh code in that situation rather than printing one
+  nothing can use, and names the phone it just unpaired.
+
+  A code nobody has claimed is still printed unchanged, so running the command
+  twice while walking to your phone does not invalidate the QR you are halfway
+  through scanning. `--rotate` remains for the case this cannot see: a code that
+  leaked before it was ever used looks untouched, and still has to be replaced.
+
+  This closes a loop. The app's own refusal tells you to run `pew2 pair` on the
+  machine, which until now handed back the same code that had just been refused.
+
 ## 0.9.12 — 2026-08-08
 
 ### Security
