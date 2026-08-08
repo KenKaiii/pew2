@@ -30,7 +30,6 @@ import {
 } from "./ui.js";
 import { rail } from "./rail.js";
 
-
 export type Reach = "anywhere" | "local" | "unreachable";
 
 export interface PairView {

@@ -282,11 +282,12 @@ export async function cmdPair(flags: Set<string>): Promise<number> {
           daemonRunning,
           remote: reach === "anywhere",
           reach,
-          // An agent driving setup needs to know this code cannot onboard a
-          // second device, rather than discovering it when the phone is refused.
+          // Always unclaimed by the time it is printed: a claimed pairing is
+          // re-minted above, so this code can always onboard a phone. Kept
+          // because callers read it, and now it states that plainly.
           claimedBy: isRealClaim(pairing.claimedBy) ? pairing.claimedBy : null,
-          // Set when this call re-minted a pairing that another phone held, so
-          // an agent driving setup can say what it just disconnected.
+          // The phone this call disconnected, when re-minting took the pairing
+          // from one. An agent driving setup needs to be able to say so.
           supersededDevice: supersededDevice ?? null,
         },
         null,
@@ -311,10 +312,6 @@ export async function cmdPair(flags: Set<string>): Promise<number> {
     // Labelled here: the view renders it as given, and this is the module that
     // already turns ids into names for the paired line.
     ...(supersededDevice ? { supersededDevice: deviceLabel(supersededDevice) } : {}),
-    // Only a real claim is worth warning about. A stored placeholder from a
-    // pre-gate app is treated as unclaimed, so announcing it would tell the user
-    // their code is spoken for when the next scan will take it.
-
   };
 
   const style = styler(colorLevel());
