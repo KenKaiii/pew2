@@ -51,13 +51,17 @@ interface Props {
   showCommands: boolean;
   onCommands: () => void;
   /**
-   * Send the draft.
+   * Send the draft, answering whether it actually went.
    *
    * Handed the text rather than reading it from shared state, so the root never
    * needs the draft as a value and never re-renders as it changes.
+   *
+   * The answer decides whether the draft is cleared. Sending can be refused —
+   * no agent is available to start a conversation with — and a refusal has to
+   * leave the words in the box: they were never delivered, and clearing them
+   * would destroy a message the user still needs.
    */
-  onSend: (text: string) => void;
-  /** Clear the draft after a send the parent accepted. */
+  onSend: (text: string) => boolean;
   busy?: boolean;
   onStop?: () => void;
   editable?: boolean;
@@ -110,16 +114,11 @@ function ComposerDockView(
   );
 
   const send = useCallback(() => {
-    const text = draftRef.current.trim();
-    // Cleared here rather than by the parent: the draft belongs to this
-    // component now, and a parent reaching back in to empty it would be the
-    // shared state this refactor removed, reintroduced through a callback.
-    //
-    // Unconditional, because a send with no text is still a send when there are
-    // attachments \u2014 whether this message is allowed to go is `onSend`'s
-    // decision, and it makes the same one either way.
-    setDraft("");
-    onSend(text);
+    // Cleared here rather than by the parent, because the draft belongs to this
+    // component now — but only once the message has actually gone. A send the
+    // parent refuses leaves the words where they are, which is the difference
+    // between a message that did not send and a message that was destroyed.
+    if (onSend(draftRef.current.trim())) setDraft("");
   }, [onSend]);
 
   return (

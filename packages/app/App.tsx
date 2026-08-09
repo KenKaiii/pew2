@@ -948,12 +948,19 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
     }, []),
   });
 
-  // Handed the text by the dock, which owns it and has already cleared it.
+  // Handed the text by the dock, which owns it.
+  //
+  // Answers whether the message went. The dock clears the draft on true and
+  // keeps it on false, so a send refused below — no agent available to start a
+  // conversation with — leaves the words in the box instead of destroying a
+  // message that was never delivered.
   const send = useCallback(
-    (text: string) => {
+    (text: string): boolean => {
       // A photo on its own is a message; "look at this" is implied by attaching it.
-      if (!text && attachmentsRef.current.length === 0) return;
+      if (!text && attachmentsRef.current.length === 0) return false;
       const staged = attachmentsRef.current;
+
+      if (!daemon.sessionId && !active?.available) return false;
 
       // Whatever the recogniser still holds is not going into a message that has
       // already gone, and a live mic outliving the send is what leaves the OS
@@ -970,10 +977,10 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
       } else {
         // No session yet: start one with the chosen available agent and let the
         // daemon deliver this prompt as soon as it is ready.
-        if (!active?.available) return;
-        daemon.start(active.id, text, staged);
+        daemon.start(active!.id, text, staged);
       }
       setAttachments([]);
+      return true;
     },
     // Attachments are read through their ref, so staging a photo does not
     // rebuild this and re-render the memoised dock beneath it.
