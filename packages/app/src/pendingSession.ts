@@ -50,10 +50,17 @@ export function pendingSession(
   providerId: string,
   firstPrompt: string | undefined,
   now: number,
+  cwd?: string,
 ): Session {
   return {
     id: pendingSessionKey(requestId),
     providerId,
+    // Where this conversation was started, carried from the moment it is asked
+    // for. The drawer narrows by project and decides with `session.cwd`, so a
+    // row without one is not merely unlabelled — it is filtered out of the list
+    // entirely whenever a project is selected. That is the second half of the
+    // invisible-session bug: the row existed, and still could not be seen.
+    cwd,
     // The prompt is the title everywhere else in this app; using it here too
     // means adoption does not visibly rename the row the user just created.
     title: firstPrompt?.trim().slice(0, 60) || "New conversation",
@@ -90,6 +97,11 @@ export function adoptPendingSession(
   const waiting = existing[at]!;
   const adopted: Session = {
     ...live,
+    // The project the user picked, kept unless the daemon named one itself.
+    // Losing it here would put the row straight back into the state this module
+    // exists to prevent: in the list, and invisible under a project filter.
+    cwd: live.cwd ?? waiting.cwd,
+    folder: live.folder ?? waiting.folder,
     // The pending entry's turns, not the live one's: `session.started` carries
     // no transcript, and the optimistic prompt rendered under it is the only
     // copy that exists until the agent replies.

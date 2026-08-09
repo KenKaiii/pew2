@@ -162,7 +162,14 @@ function ComposerView({
   const split = splitCommand(value);
 
   const [focused, setFocused] = useState(false);
-  const [contentHeight, setContentHeight] = useState<number>(theme.line.body);
+  // Whether the draft has reached the ceiling and the field scrolls internally.
+  //
+  // A boolean rather than the measured height it is derived from, because this
+  // is state: every distinct value re-renders the composer, and holding the
+  // height here meant a full React commit for every line the draft grew by — on
+  // the same JS thread the measurement has to cross to reach the UI thread.
+  // Flipping once, at the eighth line, is the whole of what the prop needs.
+  const [atCeiling, setAtCeiling] = useState(false);
   const reduceMotion = useReducedMotion();
 
   // Focus alone: the keyboard's visibility is a separate event stream with no
@@ -172,13 +179,20 @@ function ComposerView({
 
   // Grow with the text, then scroll internally rather than eat the thread.
   //
-  // A shared value and not the `contentHeight` state beside it, because state
-  // cannot reach the UI thread without a React commit: `contentSize` measured,
-  // `setContentHeight` re-rendered, `useAnimatedStyle` closed over the new
-  // number, and only then did the box move. That is a full JS round trip per
-  // wrapped line, and it showed as the box catching up a frame or more behind
-  // the caret while typing. Written straight from the native event, the next UI
-  // frame already has the number whatever the JS thread is busy with.
+  // A shared value and never React state, because state cannot reach the UI
+  // thread without a commit: `contentSize` measured, `setState` re-rendered,
+  // `useAnimatedStyle` closed over the new number, and only then did the box
+  // move. That is a full JS round trip per wrapped line, and it showed as the
+  // box — and the caret riding inside it — lagging behind the text on every
+  // return and every auto-wrap. Written straight from the native event, the
+  // next UI frame already has the number whatever the JS thread is busy with.
+  //
+  // The first attempt at this kept a `contentHeight` state beside it for
+  // `scrollEnabled`, which put the same render back on the same path: every
+  // measurement was a distinct number, so every wrapped line still re-rendered
+  // the whole composer while the UI thread was mid-animation. `atCeiling`
+  // above is the same information reduced to what the prop actually needs, and
+  // it changes twice in a draft's life instead of once per line.
   //
   // Only meaningful once expanded: a multiline TextInput reports the natural
   // height of its own placeholder even while collapsed, wrapped into the narrow
@@ -291,9 +305,11 @@ function ComposerView({
               onContentSizeChange={(event) => {
                 const measured = event.nativeEvent.contentSize.height;
                 if (expanded) textHeight.value = measured;
-                // Still state as well, because `scrollEnabled` below is a prop
-                // on the JS side of the tree and has to be re-rendered to change.
-                setContentHeight(measured);
+                // Only when the answer changes. `scrollEnabled` is a JS-side
+                // prop and needs a render, but it needs one twice in a draft's
+                // life — not once per wrapped line.
+                const capped = measured >= MAX_TEXT_HEIGHT;
+                if (capped !== atCeiling) setAtCeiling(capped);
               }}
               placeholder={placeholder}
               placeholderTextColor={theme.color.placeholder}
@@ -305,7 +321,7 @@ function ComposerView({
               // size, so while scrolling is on it always measures one line and the
               // box can never grow. Scrolling therefore stays off until the box
               // has actually reached its ceiling.
-              scrollEnabled={contentHeight >= MAX_TEXT_HEIGHT}
+              scrollEnabled={atCeiling}
             />
           </Animated.View>
 

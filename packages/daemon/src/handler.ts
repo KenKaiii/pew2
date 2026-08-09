@@ -199,6 +199,11 @@ export async function handleMessage(raw: string, ctx: HandlerContext): Promise<v
           providerId: message.providerId,
           configOptions: [],
           resumed: true,
+          // Where this conversation lives, resolved here because only this
+          // machine can resolve it. Clients file sessions by project and hide
+          // the ones they cannot place, so a session announced without it is
+          // one the drawer will not show under a selected project.
+          cwd: workspace,
           // Clients list the agent's copy as a stub; this is what lets them
           // replace it with the live session instead of showing it twice.
           agentSessionId: message.agentSessionId,
@@ -237,6 +242,12 @@ export async function handleMessage(raw: string, ctx: HandlerContext): Promise<v
           t: "session.started",
           sessionId,
           providerId: message.providerId,
+          // The project the session was actually started in, which is not
+          // always the one asked for: an unrecognised `cwd` falls back to the
+          // agent's last workspace above. Sending the resolved value means a
+          // client files the row where the work is really happening, and a
+          // second device — which never saw the request — can file it at all.
+          cwd: workspace,
           // Echoed so a client can tell its own session from one another device
           // started. Without it, every client adopts every new session.
           requestId: message.requestId,

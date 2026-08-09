@@ -1416,6 +1416,14 @@ export function useDaemon(
                 turns,
                 configOptions: message.configOptions ?? [],
                 agentSessionId,
+                // The project this conversation belongs to, known now rather
+                // than at the end of its first turn. `session.idle` used to be
+                // the only thing that ever set this, and the drawer filters by
+                // it — so with a project selected a new conversation was absent
+                // from the list until it had finished replying, which is the
+                // one moment the user is most likely to go looking for it.
+                cwd: message.cwd ?? projectRef.current[message.providerId ?? ""],
+                folder: message.folder,
                 // A session started to deliver a first prompt is already
                 // working; the drawer must say so from the moment it exists.
                 // Only when this is that session: `prev.busy` describes the
@@ -1849,7 +1857,13 @@ export function useDaemon(
           // phone pointing at it. See `pendingSession`.
           sessions: [
             {
-              ...pendingSession(requestId, providerId, initialText, started),
+              ...pendingSession(
+                requestId,
+                providerId,
+                initialText,
+                started,
+                projectRef.current[providerId],
+              ),
               turns: turn ? [turn] : [],
             },
             ...s.sessions,

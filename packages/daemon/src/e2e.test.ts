@@ -142,6 +142,18 @@ test("session.started carries the request id that asked for it", async () => {
   app.close();
 }, TEST_TIMEOUT);
 
+test("session.started says which project the conversation is in", async () => {
+  const { app, started } = await withSession("r-project");
+
+  // Clients file sessions by project and hide the ones they cannot place, so a
+  // session announced without this is one the drawer will not show while a
+  // project is selected — which used to be every new conversation until its
+  // first turn finished, because `session.idle` was the only frame carrying it.
+  expect(typeof started.cwd).toBe("string");
+  expect(started.cwd.length).toBeGreaterThan(0);
+  app.close();
+}, TEST_TIMEOUT);
+
 test("session.started reaches sockets that did not ask for it, marked as another's", async () => {
   const watcher = await AppClient.connect(daemon, { deviceId: DEVICE });
   const { app, sessionId } = await withSession("r-mine");
