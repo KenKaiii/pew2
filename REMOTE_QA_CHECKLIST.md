@@ -133,8 +133,8 @@ Suspect path:
       daemon's own answer, so a stuck dot cannot outlive a reconnect. The daemon
       sends `working` per session in its catch-up because `session.idle` is
       broadcast and never logged — a turn that ended while the phone was away
-      replays nothing that says so. Background conversations get the flag even
-      though their events have nowhere to render
+      replays nothing that says so. Background conversations get the flag
+      alongside their missed events, which now land in the transcript they carry
       (`replayFold.ts: foldBackgroundCatchUp`).
 - [x] Missed events are replayed on reconnect from a per-session cursor instead
       of resuming silently at the live edge, so a phone that blinked mid-turn no
