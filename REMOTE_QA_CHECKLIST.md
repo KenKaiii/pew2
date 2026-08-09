@@ -15,15 +15,21 @@ which is the extraction the last section asks for, arriving one bug at a time.
 The other half is now `packages/daemon/src/e2e.test.ts`: a real daemon in a real
 process, driven over a real socket by a fake phone that performs the same
 handshake the app does (`testing/daemon-process.ts`, `testing/app-client.ts`).
-Every bug on this list lived *between* the parts rather than inside one, which
-is exactly where the unit suites cannot look. It asserts wire facts only — that
-the daemon sends the right frame, to the right socket, with enough in it to tell
-one client's work from another's. What the app then does with a frame stays in
-the pure app-side folds, which are fast and need no processes.
+The session bugs below all lived *between* the parts rather than inside one,
+which is exactly where the unit suites cannot look — they hand a `Daemon` a
+message and read what comes back, and the seam was never there. It asserts wire
+facts only: that the daemon sends the right frame, to the right socket, with
+enough in it to tell one client's work from another's. What the app then does
+with a frame stays in the pure app-side folds, which are fast and need no
+processes.
 
-Those scenarios were checked by mutation, not just by passing: breaking the
-`requestId` echo, the `working` flag and the replay window each turn the
-matching test red and nothing else.
+Those scenarios were checked by mutation rather than by passing. Breaking the
+`requestId` echo, the `working` flag, the replay window and the cancel path each
+turned the matching test red and nothing else. The cancel one earned its keep
+immediately: the echo agent had no `session/cancel` handler, so every turn ran
+to completion and the test would have passed with the daemon's cancel path
+deleted outright. The fixture now stops when told to, and the test asserts the
+turn ends early rather than merely ending.
 
 ---
 
