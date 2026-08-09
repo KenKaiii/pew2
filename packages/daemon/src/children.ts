@@ -286,12 +286,14 @@ export async function sweepOrphans(env: NodeJS.ProcessEnv = process.env): Promis
   const keep: ChildRecord[] = [];
 
   for (const record of records) {
-    // Anything with a living owner is somebody's working agent, and that
-    // includes this process: a sweep runs at startup but the registry outlives
-    // it, so a record written by *this* daemon is a child it is still using.
-    // Testing only for a *different* live owner killed our own agents the next
-    // time a sweep ran — `killOwnedChildren` is what ends those, at shutdown.
-    if (record.ownerPid === process.pid || alive(record.ownerPid)) {
+    // A *different* live daemon owns it, so it is somebody's working agent.
+    //
+    // Our own pid is deliberately not spared here. This runs once, at module
+    // load, before this process has registered anything — so a record claiming
+    // us as its owner is a dead daemon's record whose pid the OS has since
+    // handed to us. That is exactly the orphan this sweep exists to reap, and
+    // the identity check below is what stops it touching a reused pid.
+    if (record.ownerPid !== process.pid && alive(record.ownerPid)) {
       keep.push(record);
       continue;
     }

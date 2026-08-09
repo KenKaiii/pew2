@@ -110,14 +110,19 @@ posixTest("sweepOrphans kills children of a dead daemon and leaves live ones alo
   const env = await home();
   const orphan = stubborn();
   const owned = stubborn();
+  // Stands in for a second daemon that is still running. It has to be a real,
+  // live pid that is *not* this process: the sweep runs once at module load,
+  // before a daemon has registered anything, so a record naming our own pid is
+  // a dead daemon's whose number we inherited — an orphan, not a live child.
+  const otherDaemon = stubborn();
   await armed();
 
-  // Recorded through `registerChild`, the same path production uses, then the
-  // orphan's owner rewritten to a dead pid. Reading the command line here with
-  // its own `ps` call was the flake: that read comes back empty inside this
-  // file while exiting 0 (Bun #32067, the trap CLAUDE.md records for spawned
-  // children), so every record stored `""`, matched nothing, and the sweep
-  // correctly did nothing.
+  // Recorded through `registerChild`, the same path production uses, then each
+  // record's owner rewritten. Reading the command line here with its own `ps`
+  // call was the flake: that read comes back empty inside this file while
+  // exiting 0 (Bun #32067, the trap CLAUDE.md records for spawned children), so
+  // every record stored `""`, matched nothing, and the sweep correctly did
+  // nothing.
   await registerChild({ pid: orphan.pid!, providerId: "echo", fallbackCommand: "echo" }, env);
   await registerChild({ pid: owned.pid!, providerId: "echo", fallbackCommand: "echo" }, env);
 
@@ -127,8 +132,10 @@ posixTest("sweepOrphans kills children of a dead daemon and leaves live ones alo
     registryFile,
     JSON.stringify(
       records.map((record) =>
-        // An owner pid high enough to be certain nothing is running on it.
-        record.pid === orphan.pid ? { ...record, ownerPid: 999_999 } : record,
+        record.pid === orphan.pid
+          ? // An owner pid high enough to be certain nothing is running on it.
+            { ...record, ownerPid: 999_999 }
+          : { ...record, ownerPid: otherDaemon.pid },
       ),
     ),
   );
@@ -137,11 +144,27 @@ posixTest("sweepOrphans kills children of a dead daemon and leaves live ones alo
   await settled();
 
   expect(killed).toEqual([orphan.pid!]);
-  // The live daemon's own agent is untouched: two daemons on one machine is a
+  // The other daemon's agent is untouched: two daemons on one machine is a
   // normal state, and stealing each other's processes is worse than the leak.
   expect(() => process.kill(owned.pid!, 0)).not.toThrow();
 
   owned.kill("SIGKILL");
+  otherDaemon.kill("SIGKILL");
+});
+
+posixTest("a record naming this process is a reused pid, not a live child", async () => {
+  // The sweep's one call site is a top-level `await` in `server.ts`, reached
+  // before any child exists. So `ownerPid === process.pid` cannot mean "mine,
+  // still running" — it means a previous daemon died and the OS handed us its
+  // number. Sparing those was a real leak: the agent survived every restart
+  // that inherited the pid, with nothing left alive that knew to kill it.
+  const env = await home();
+  const inherited = stubborn();
+  await armed();
+
+  await registerChild({ pid: inherited.pid!, providerId: "echo", fallbackCommand: "echo" }, env);
+
+  expect(await sweepOrphans(env)).toEqual([inherited.pid!]);
 });
 
 posixTest("sweepOrphans spares a pid that has been reused by something else", async () => {
