@@ -108,14 +108,20 @@ Suspect path:
       back, rather than leaving a row that opens onto nothing and never stops
       pulsing. A session that really was created returns by the slower honest
       route: `activeSessions` and the next history probe.
-- [ ] **Known gap opened by the fix above.** A conversation that does not claim
-      the screen also does not accumulate one: `session.event` is dropped unless
-      it matches the visible session (`useDaemon.ts:1070`), so switching away
-      while the agent boots means returning to your prompt and no reply, since
-      the session is live and nothing re-fetches it. Strictly better than the
-      blanked screen it replaces, and not yet right. The fix is per-session
-      transcripts, or an on-demand replay request reusing the cursors already on
-      the wire — both are the reducer extraction below, not a patch here.
+- [x] **Per-session transcripts.** `session.event` used to be dropped unless it
+      matched the visible session, so a conversation that did not claim the
+      screen accumulated nothing — switching away while an agent worked meant
+      returning to your own prompt and silence, with the answer already
+      delivered and discarded. Each session now folds its own chunks into the
+      transcript it carries (`replayFold.ts: foldBackgroundEvent`), and reopening
+      it paints from that. Reconnect catch-up does the same per session, so
+      events missed while the socket was down land in the right conversation
+      too.
+- [x] One definition of how a chunk becomes a bubble (`replayFold.ts:
+      applyChunk`), shared by the live path, the replay fold and background
+      sessions. It was three copies of the same twenty lines; a background
+      transcript drifting from the visible one would only show up after the user
+      switched back, which is the worst place to find it.
 - [ ] Global `busy` (`:251`) vs per-session `busy` (`:151`) are both live and
       both write to the same rows. `Sidebar.tsx:245` reads `session.busy`, but
       several writes only touch the global flag. Audit every `busy: true` write

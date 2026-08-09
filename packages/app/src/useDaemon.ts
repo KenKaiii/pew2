@@ -48,12 +48,13 @@ import {
 import type { WireProject } from "./projects";
 import { readUsage, type ContextUsage } from "./contextUsage";
 import {
+  applyChunk,
+  capTurns,
   foldBackgroundCatchUp,
+  foldBackgroundEvent,
   foldCatchUp,
   foldSessionEvents,
   isOptimistic,
-  mergeChunk,
-  turnFromChunk,
   type ReplayEvent,
 } from "./replayFold";
 
@@ -457,32 +458,6 @@ export interface TurnFinished {
  */
 const NOTICE_BUFFER = 2000;
 
-/**
- * The most turns one conversation keeps in memory.
- *
- * Every other store in the system is bounded — the daemon's session log at 10k,
- * its transcript cache at 400 — and the phone, which has the least memory of
- * anything involved, was the one place that grew without limit. A long agent run
- * emits thousands of chunks, and they are held twice: once as the open
- * transcript and once inside the drawer entry it mirrors into.
- *
- * Matched to the transcript cache on purpose. That is what a reopened
- * conversation paints from, so a session kept in memory and the same session
- * reopened show the same amount of history rather than differing by how long
- * the app happened to be running.
- */
-const MAX_TURNS = 400;
-
-/**
- * Keep the newest turns, dropping from the front.
- *
- * The front is what a scrolled-to-bottom chat view is least likely to be
- * looking at, and it is also what the daemon has already written to its own
- * transcript — so nothing is lost that reopening the conversation cannot show.
- */
-function capTurns(turns: Turn[]): Turn[] {
-  return turns.length > MAX_TURNS ? turns.slice(turns.length - MAX_TURNS) : turns;
-}
 
 /** Where the daemon should push when this phone's app is asleep. */
 export interface PushAddress {
@@ -879,17 +854,33 @@ export function useDaemon(
         // quadratic event-by-event array copies that caused multi-second stalls.
         if (message.t === "session.replay" && Array.isArray(message.events)) {
           if (message.sessionId !== sessionRef.current) {
-            // Not this transcript, so its events have nowhere to be rendered.
-            // A catch-up still says whether that conversation is working, which
-            // is the one thing the drawer can show for it and the one thing
-            // reconnecting just threw away. See `foldBackgroundCatchUp`.
+            // Another conversation's missed events, folded into the transcript
+            // that conversation carries. Not rendered now — the user is reading
+            // something else — but there to read when they open it, which is
+            // the whole point of holding a transcript per session.
+            //
+            // Only for a catch-up. A *resume* replay of a background session
+            // would be its full history arriving against turns this client
+            // already has, and duplicating them is worse than waiting for the
+            // reopen that asked for it.
             if (message.catchUp === true) {
+              const missed: ReplayEvent[] = [];
               for (const event of message.events) {
                 if (event?.t !== "session.event" || typeof event.seq !== "number") continue;
+                // Same duplicate guard as the visible path below: a catch-up
+                // and a live event can cross on the wire, and the cursor is
+                // what stops the same chunk being appended twice.
+                if (alreadySeen(cursors.current, event.sessionId, event.seq)) continue;
                 cursors.current = advance(cursors.current, event.sessionId, event.seq);
+                missed.push(event);
               }
               setState((prev) =>
-                foldBackgroundCatchUp(prev, message.sessionId, message.working === true),
+                foldBackgroundCatchUp(
+                  prev,
+                  message.sessionId,
+                  missed,
+                  message.working === true,
+                ),
               );
             }
             return;
@@ -1067,7 +1058,26 @@ export function useDaemon(
         // conversation left running has finished, which is precisely the one
         // nobody is looking at. It is applied per session instead.
         const scoped = message.t === "session.event" || message.t === "session.config";
-        if (scoped && message.sessionId !== sessionRef.current) return;
+        if (scoped && message.sessionId !== sessionRef.current) {
+          // Not on screen, but it is still someone's conversation. Its chunks go
+          // into the transcript that session carries, so switching away from a
+          // working agent and coming back shows the reply that landed while you
+          // were gone rather than your own prompt and silence.
+          //
+          // `session.config` is genuinely not wanted here: it is answered by the
+          // `session.config` case, which already mirrors it per session.
+          if (message.t === "session.event") {
+            setState((prev) =>
+              foldBackgroundEvent(
+                prev,
+                message.sessionId,
+                `${message.sessionId}:${message.seq}`,
+                message.payload,
+              ),
+            );
+          }
+          return;
+        }
 
         if (message.t === "session.idle") {
           const finished: string = message.sessionId;
@@ -1536,33 +1546,13 @@ export function useDaemon(
               if (!chunk || isEmptyChunk(chunk)) return base;
 
               const turns = [...prev.turns];
-              const last = turns[turns.length - 1];
-              // The echo of a prompt this client already rendered: adopt the
-              // server id in place rather than showing the message twice. Text
-              // is the only handle on that identity, so an image-only chunk is
-              // never mistaken for an echo of one.
-              const optimistic =
-                chunk.role === "user" && chunk.text
-                  ? turns.findIndex(
-                      (turn) => isOptimistic(turn) && turn.text === chunk.text,
-                    )
-                  : -1;
-              if (optimistic >= 0) {
-                turns[optimistic] = {
-                  ...turns[optimistic]!,
-                  id: `${message.sessionId}:${message.seq}`,
-                };
-              } else if (last && last.role === chunk.role && chunk.role !== "user") {
-                // Coalesce consecutive chunks of the same role into one bubble.
-                turns[turns.length - 1] = mergeChunk(last, chunk);
-              } else {
-                // `seq` restarts at 0 for every session, so it alone would
-                // collide across sessions and produce duplicate React keys.
-                turns.push(turnFromChunk(`${message.sessionId}:${message.seq}`, chunk));
-              }
-              // Bounded here rather than at each branch above: this is the one
-              // place a turn is added, and it runs for every chunk of every
-              // streamed answer.
+              // Shared with the replay fold and with background sessions, so a
+              // conversation reads the same whether it was watched live, caught
+              // up after a drop, or written while the user was elsewhere.
+              applyChunk(turns, `${message.sessionId}:${message.seq}`, chunk);
+              // Bounded here rather than inside that helper: this is the one
+              // place a turn is added to the visible transcript, and it runs for
+              // every chunk of every streamed answer.
               const capped = capTurns(turns);
               // Mirror into history so the sidebar can reopen this later, and
               // title the session from its first user message.

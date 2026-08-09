@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import {
   foldBackgroundCatchUp,
+  foldBackgroundEvent,
   foldCatchUp,
   foldSessionEvents,
   isOptimistic,
@@ -18,6 +19,11 @@ const agent = (seq: number, text: string) => ({
   seq,
   payload: { update: { sessionUpdate: "agent_message_chunk", content: { text } } },
 });
+
+// The same two, addressed to a second conversation — the one the user is *not*
+// reading, which is the whole subject of the background tests below.
+const s2User = (seq: number, text: string) => ({ ...user(seq, text), sessionId: "s2" });
+const s2Agent = (seq: number, text: string) => ({ ...agent(seq, text), sessionId: "s2" });
 
 const state = (turns: Turn[] = [], sessions: Session[] = []) => ({
   turns,
@@ -257,7 +263,7 @@ test("a catch-up dismisses the loading skeleton it arrived behind", () => {
 
 test("a background conversation still working survives the reconnect busy sweep", () => {
   const background = { ...sessionStub, id: "s2", busy: false };
-  const next = foldBackgroundCatchUp(state([], [sessionStub, background]), "s2", true);
+  const next = foldBackgroundCatchUp(state([], [sessionStub, background]), "s2", [], true);
 
   expect(next.sessions[1]!.busy).toBe(true);
   // Only the one the frame names: nothing is known about the others.
@@ -266,7 +272,7 @@ test("a background conversation still working survives the reconnect busy sweep"
 
 test("a background catch-up for a finished turn leaves the row quiet", () => {
   const background = { ...sessionStub, id: "s2", busy: true };
-  const next = foldBackgroundCatchUp(state([], [background]), "s2", false);
+  const next = foldBackgroundCatchUp(state([], [background]), "s2", [], false);
 
   expect(next.sessions[0]!.busy).toBe(false);
 });
@@ -274,7 +280,66 @@ test("a background catch-up for a finished turn leaves the row quiet", () => {
 test("a background catch-up that changes nothing keeps the same array", () => {
   const before = state([], [{ ...sessionStub, id: "s2", busy: true }]);
 
-  expect(foldBackgroundCatchUp(before, "s2", true).sessions).toBe(before.sessions);
-  expect(foldBackgroundCatchUp(before, "gone", true).sessions).toBe(before.sessions);
-  expect(foldBackgroundCatchUp(before, undefined, true).sessions).toBe(before.sessions);
+  expect(foldBackgroundCatchUp(before, "s2", [], true).sessions).toBe(before.sessions);
+  expect(foldBackgroundCatchUp(before, "gone", [], true).sessions).toBe(before.sessions);
+  expect(foldBackgroundCatchUp(before, undefined, [], true).sessions).toBe(before.sessions);
+});
+
+test("missed events land in the conversation they belong to, not the open one", () => {
+  const background = { ...sessionStub, id: "s2", busy: true };
+  const open = { ...sessionStub, id: "s1", turns: [{ id: "s1:0", role: "user" as const, text: "Mine" }] };
+  const before = state(open.turns, [open, background]);
+  const next = foldBackgroundCatchUp(before, "s2", [s2Agent(4, "Done, all green.")], true);
+
+  expect(next.sessions[1]!.turns).toEqual([
+    { id: "s2:4", role: "agent", text: "Done, all green." },
+  ]);
+  // The transcript on screen belongs to another conversation and must not
+  // move: this is the reply arriving for a session the user is not reading.
+  expect(next.turns).toBe(before.turns);
+  expect(next.sessions[0]!.turns).toBe(open.turns);
+});
+
+test("a reply that lands while the user is elsewhere is there when they return", () => {
+  const prompt: Turn = { id: "local:1", role: "user", text: "Fix the bug" };
+  const background = { ...sessionStub, id: "s2", turns: [prompt], busy: true };
+  const before = state([], [background]);
+
+  // The echo of the prompt, then the answer — the exact sequence that was
+  // being dropped, which is why switching away mid-turn used to mean coming
+  // back to your own message and silence.
+  const withEcho = foldBackgroundEvent(before, "s2", "s2:0", s2User(0, "Fix the bug").payload);
+  const next = foldBackgroundEvent(withEcho, "s2", "s2:1", s2Agent(1, "Fixed it.").payload);
+
+  expect(next.sessions[0]!.turns).toEqual([
+    // Adopted in place rather than duplicated, same as the visible path.
+    { id: "s2:0", role: "user", text: "Fix the bug" },
+    { id: "s2:1", role: "agent", text: "Fixed it." },
+  ]);
+  expect(next.sessions[0]!.title).toBe("Fix the bug");
+});
+
+test("a background session's chunks coalesce into one bubble like any other", () => {
+  const background = { ...sessionStub, id: "s2" };
+  let next = state([], [background]);
+  for (const [seq, text] of [[0, "Looking "], [1, "into "], [2, "it"]] as const) {
+    next = foldBackgroundEvent(next, "s2", `s2:${seq}`, s2Agent(seq, text).payload);
+  }
+
+  expect(next.sessions[0]!.turns).toEqual([{ id: "s2:0", role: "agent", text: "Looking into it" }]);
+  // Streaming prose marks the row as working, so the drawer dot and the
+  // spinner say the same thing about the same session.
+  expect(next.sessions[0]!.busy).toBe(true);
+});
+
+test("an event for a conversation the drawer does not hold changes nothing", () => {
+  const before = state([], [sessionStub]);
+
+  expect(foldBackgroundEvent(before, "gone", "gone:0", s2Agent(0, "Hi").payload)).toBe(before);
+  expect(foldBackgroundEvent(before, undefined, "x:0", s2Agent(0, "Hi").payload)).toBe(before);
+  // A tool call is not a chunk: nothing to render into a transcript that is
+  // not on screen, and no reason to re-render the drawer for it.
+  expect(foldBackgroundEvent(before, "s1", "s1:0", { update: { sessionUpdate: "tool_call" } })).toBe(
+    before,
+  );
 });
