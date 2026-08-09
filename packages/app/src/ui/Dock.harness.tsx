@@ -42,6 +42,14 @@ const TURNS: Turn[] = Array.from({ length: 24 }, (_, index) => ({
 }));
 
 /**
+ * Typing steps before the harness stops.
+ *
+ * Enough to carry the composer from one line to its eight-line ceiling, which
+ * is the whole of the growth worth measuring.
+ */
+const STEPS = 14;
+
+/**
  * Counts renders of the component it is called in.
  *
  * A ref rather than state, so counting never causes the thing it is counting.
@@ -95,12 +103,19 @@ function Screen() {
   const [step, setStep] = useState(0);
   useEffect(() => {
     composer.current?.focus();
-    const timer = setInterval(() => setStep((n) => n + 1), 500);
+    const timer = setInterval(() => {
+      // Stops at the ceiling. Past that the composer cannot grow, so every
+      // further step measures nothing while the draft grows without bound — and
+      // a harness left open would sit there allocating for as long as it is on
+      // screen, which is exactly the kind of drift that makes a measurement
+      // untrustworthy the second time someone runs it.
+      setStep((n) => (n >= STEPS ? n : n + 1));
+    }, 500);
     return () => clearInterval(timer);
   }, []);
   useEffect(() => {
     if (step === 0) return;
-    // One word at a time, as someone typing would, so growth happens at the
+    // A few words at a time, as someone typing would, so growth arrives at the
     // wrap boundary rather than in one jump.
     composer.current?.setDraft(Array.from({ length: step * 3 }, () => "word").join(" "));
   }, [step]);
