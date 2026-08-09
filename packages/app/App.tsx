@@ -48,7 +48,7 @@ import {
 } from "./src/ui/notifier";
 import { pushAddress } from "./src/ui/push";
 import { Orb } from "./src/ui/Orb";
-import { Composer, type ComposerHandle } from "./src/ui/Composer";
+import { ComposerDock, type ComposerDockHandle } from "./src/ui/ComposerDock";
 import { ChatThread, type ChatThreadRef } from "./src/ui/ChatThread";
 import { ImageResolverProvider } from "./src/ui/ChatImage";
 import { CommandSheet } from "./src/ui/CommandSheet";
@@ -58,7 +58,6 @@ import { AttachmentSheet, type AttachmentSource } from "./src/ui/AttachmentSheet
 import { addAttachments, MAX_ATTACHMENTS, type PendingAttachment } from "./src/attachments";
 import { pickFiles, pickPhotos, takePhoto } from "./src/ui/attachmentPicker";
 import { useDictation } from "./src/ui/useDictation";
-import { ContextBar } from "./src/ui/ContextBar";
 import { ApprovalSheet } from "./src/ui/ApprovalSheet";
 import { ThoughtSheet } from "./src/ui/ThoughtSheet";
 import { applyCommand, type SlashCommand } from "./src/slashCommands";
@@ -499,7 +498,6 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
   // reply it is announcing. The daemon pushes without knowing what this phone is
   // showing — only this side can know that.
   useEffect(() => setOpenConversation(daemon.sessionId), [daemon.sessionId]);
-  const [draft, setDraft] = useState("");
   // Files staged for the next message. Cleared with the draft on send, because
   // the two are one message.
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
@@ -517,7 +515,13 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
   // so the sheet lives outside the recycling list — a cell scrolled off screen
   // must not take the sheet down with it.
   const [thought, setThought] = useState<string | null>(null);
-  const composer = useRef<ComposerHandle>(null);
+  // The draft lives inside the dock, not here.
+  //
+  // Holding it at the root meant every keystroke re-rendered the entire app,
+  // and the composer's own growth animation then had to share the JS thread
+  // with that work — which is what made the box lag the caret on every wrapped
+  // line. This handle is how the root still reaches text it no longer owns.
+  const composer = useRef<ComposerDockHandle>(null);
   /** The keyboard is up, so the composer owns the screen. */
   const [typing, setTyping] = useState(false);
   // Measured so the thread's top inset always matches the real nav height.
@@ -923,7 +927,7 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
       // The conversation has to be reloaded first (the daemon was restarted).
       // Open it with the reply waiting in the composer rather than dropping
       // what was typed: one tap to send beats losing it silently.
-      setDraft(choice.text);
+      composer.current?.setDraft(choice.text);
     }
     openSession(choice.sessionId);
   }, [choice, daemon.sessions, daemon.prompt, openSession]);
@@ -931,46 +935,50 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
   /**
    * Dictation writes straight into the draft.
    *
-   * `draft` is read through a getter rather than passed as a value: it changes
-   * on every result, and a dependency on it would tear down the recogniser's
-   * listeners mid-sentence.
+   * Both sides go through the dock's handle, which is stable: the draft is not
+   * state here any more, so there is nothing on this component for a
+   * dependency to track and nothing to tear the recogniser's listeners down
+   * mid-sentence.
    */
-  const draftRef = useRef(draft);
-  draftRef.current = draft;
   const dictation = useDictation({
-    draft: useCallback(() => draftRef.current, []),
-    onDraftChange: setDraft,
+    draft: useCallback(() => composer.current?.getDraft() ?? "", []),
+    onDraftChange: useCallback((text: string) => composer.current?.setDraft(text), []),
     onMessage: useCallback((message: string) => {
       Alert.alert("Dictation", message);
     }, []),
   });
 
-  const send = useCallback(() => {
-    const text = draft.trim();
-    // A photo on its own is a message; "look at this" is implied by attaching it.
-    if (!text && attachments.length === 0) return;
+  // Handed the text by the dock, which owns it and has already cleared it.
+  const send = useCallback(
+    (text: string) => {
+      // A photo on its own is a message; "look at this" is implied by attaching it.
+      if (!text && attachmentsRef.current.length === 0) return;
+      const staged = attachmentsRef.current;
 
-    // Whatever the recogniser still holds is not going into a message that has
-    // already gone, and a live mic outliving the send is what leaves the OS
-    // recording indicator on.
-    dictation.cancel();
+      // Whatever the recogniser still holds is not going into a message that has
+      // already gone, and a live mic outliving the send is what leaves the OS
+      // recording indicator on.
+      dictation.cancel();
 
-    // Asked at the moment it earns itself: the user is about to wait on an
-    // agent, which is the only thing this app notifies about. Not awaited — the
-    // prompt must go out whatever the system decides.
-    void ensureNotificationPermission();
+      // Asked at the moment it earns itself: the user is about to wait on an
+      // agent, which is the only thing this app notifies about. Not awaited — the
+      // prompt must go out whatever the system decides.
+      void ensureNotificationPermission();
 
-    if (daemon.sessionId) {
-      daemon.prompt(text, undefined, attachments);
-    } else {
-      // No session yet: start one with the chosen available agent and let the
-      // daemon deliver this prompt as soon as it is ready.
-      if (!active?.available) return;
-      daemon.start(active.id, text, attachments);
-    }
-    setDraft("");
-    setAttachments([]);
-  }, [draft, attachments, dictation.cancel, daemon.sessionId, daemon.prompt, daemon.start, active]);
+      if (daemon.sessionId) {
+        daemon.prompt(text, undefined, staged);
+      } else {
+        // No session yet: start one with the chosen available agent and let the
+        // daemon deliver this prompt as soon as it is ready.
+        if (!active?.available) return;
+        daemon.start(active.id, text, staged);
+      }
+      setAttachments([]);
+    },
+    // Attachments are read through their ref, so staging a photo does not
+    // rebuild this and re-render the memoised dock beneath it.
+    [dictation.cancel, daemon.sessionId, daemon.prompt, daemon.start, active],
+  );
 
   // A mic left listening across a session switch would put the next sentence
   // into a conversation the user has already left.
@@ -1046,7 +1054,7 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
   const pickCommand = useCallback((command: SlashCommand) => {
     // Placed in the composer rather than sent: a command may still want an
     // argument, and even one that does not should be reviewed before running.
-    setDraft(applyCommand(command));
+    composer.current?.setDraft(applyCommand(command));
     setCommandsOpen(false);
     // Straight back to typing, caret after the trailing space. Deferred past
     // this commit because the sheet still holds focus during it, and focusing
@@ -1333,7 +1341,15 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
           {dockHeight > 0 && (
             <CanvasCover edge="bottom" height={dockHeight} style={styles.dockCover} />
           )}
-          <View
+          {/* The dock keeps the composer even while an approval is pending:
+              the request is its own blocking sheet now, so swapping this out
+              under it would only resize the thread behind a covered surface.
+
+              It owns the draft, so typing re-renders this subtree and not the
+              whole app. That is what leaves the JS thread free for the
+              composer's own growth animation while a line wraps. */}
+          <ComposerDock
+            ref={composer}
             style={[
               styles.dock,
               // Constant. The spacer below the body carries the keyboard, and it
@@ -1354,27 +1370,11 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
               // animation causes.
               setDockHeights((prev) => recordDockHeight(prev, typing, height));
             }}
-          >
-          {/* The dock keeps the composer even while an approval is pending:
-              the request is its own blocking sheet now, so swapping this out
-              under it would only resize the thread behind a covered surface.
-
-              The context row shows what the next prompt acts on — project,
-              context fill, uncommitted work, and the commands the agent offers
-              (an empty sheet is worse than no button). Never while typing: the
-              draft is the subject then, and the row would only crowd it. */}
-          {!typing && (daemon.commands.length > 0 || daemon.workspace || daemon.usage) && (
-            <ContextBar
-              workspace={daemon.workspace}
-              usage={daemon.usage}
-              showCommands={daemon.commands.length > 0}
-              onCommands={openCommands}
-            />
-          )}
-          <Composer
-            ref={composer}
-            value={draft}
-            onChangeText={setDraft}
+            typing={typing}
+            workspace={daemon.workspace}
+            usage={daemon.usage}
+            showCommands={daemon.commands.length > 0}
+            onCommands={openCommands}
             onSend={send}
             busy={showsStop(daemon)}
             onStop={daemon.cancel}
@@ -1391,7 +1391,6 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
             onRemoveAttachment={removeAttachment}
             dictation={dictation}
           />
-          </View>
         </View>
       </Reanimated.View>
 

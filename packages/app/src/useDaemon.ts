@@ -12,6 +12,7 @@ import { SecureChannel, e2e, envelopeHeader, wire } from "@pew2/protocol";
 const { WIRE_VERSION } = wire;
 import { USE_FIXTURES, isFixtureSession, sampleSessions } from "./fixtures";
 import { mergeAgentSessions, needsResume, replaceAgentSessionStub } from "./agentHistory";
+import { receiptOnOpen, recordReceipt } from "./turnReceipts";
 import {
   adoptPendingSession,
   dropPendingSessions,
@@ -158,6 +159,16 @@ export interface Session {
    * which ones are still working.
    */
   busy?: boolean;
+  /**
+   * What this conversation's last finished turn did, e.g. "Answered in 3s".
+   *
+   * Kept per session because it is a fact about the turn, not about the screen.
+   * It used to live only in the screen state, so it appeared as the turn ended
+   * and was gone the moment the user looked at another conversation and came
+   * back — the line was there while you watched it happen and never again.
+   * Reopening now restores the same summary the turn produced.
+   */
+  receipt?: TurnReceipt;
   /**
    * A turn finished here while the user was somewhere else. Cleared when the
    * conversation is opened, so the drawer marks what is worth going back to.
@@ -1476,15 +1487,21 @@ export function useDaemon(
               // agent finishing would stop the spinner on the turn you are
               // actually watching.
               const mine = message.sessionId === prev.sessionId;
+              // What the turn did, summarised once. Only the visible session
+              // has an `activity` to summarise — a background turn's tools were
+              // never rendered — so this is undefined for the others, which is
+              // also the honest answer: nothing was measured.
+              const receipt = mine ? summariseActivity(prev.activity, now) : undefined;
               return {
                 ...prev,
                 busy: mine ? false : prev.busy,
                 // The live line exits here, and what it was doing becomes the
-                // receipt. Only for the session on screen: a background turn's
-                // tools were never rendered and have nothing to summarise.
+                // receipt.
                 activity: mine ? IDLE_ACTIVITY : prev.activity,
-                receipt: mine ? summariseActivity(prev.activity, now) : prev.receipt,
-                sessions: prev.sessions.map((session) =>
+                receipt: mine ? receipt : prev.receipt,
+                // Stored on the conversation too, so reopening it shows the
+                // same line rather than losing it to navigation.
+                sessions: recordReceipt(prev.sessions, message.sessionId, receipt).map((session) =>
                   session.id === message.sessionId
                     ? {
                         ...session,
@@ -2106,10 +2123,11 @@ export function useDaemon(
           busy: session.busy === true,
           loadingSession: false,
           // A conversation still running elsewhere has tools this client never
-          // saw, and a finished one's receipt belongs to the thread it was
-          // measured in. Either way this opens without one.
+          // saw, so there is no live line to restore.
           activity: IDLE_ACTIVITY,
-          receipt: undefined,
+          // Its last finished turn's summary, though, is a fact about that
+          // turn and is restored with it.
+          receipt: receiptOnOpen(session),
           // Reading it is what makes it read.
           sessions: s.sessions.map((entry) =>
             entry.id === sessionId ? { ...entry, unread: false } : entry,
