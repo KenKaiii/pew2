@@ -20,8 +20,17 @@
  * imperative handle below rather than back up into shared state, which would
  * restore the very coupling this exists to remove.
  */
-import { forwardRef, memo, useCallback, useImperativeHandle, useRef, useState } from "react";
+import {
+  forwardRef,
+  memo,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useRef,
+  useState,
+} from "react";
 import { View, type StyleProp, type ViewStyle } from "react-native";
+import { SETTLE_MS, heightAction } from "../settledHeight";
 import type { PendingAttachment } from "../attachments";
 import type { ContextUsage } from "../contextUsage";
 import type { Workspace } from "../useDaemon";
@@ -71,7 +80,15 @@ interface Props {
   onRemoveAttachment: (id: string) => void;
   dictation: Dictation;
   style?: StyleProp<ViewStyle>;
-  onLayout?: React.ComponentProps<typeof View>["onLayout"];
+  /**
+   * This dock's height, reported once it has stopped changing.
+   *
+   * Not `onLayout`, deliberately. The composer grows with an animation, so raw
+   * layout events arrive on every frame of it, and anything that turns one into
+   * a state update re-renders the app about ten times per wrapped line — on the
+   * exact frames the animation needs. See `settledHeight.ts`.
+   */
+  onHeightSettled?: (height: number) => void;
 }
 
 function ComposerDockView(
@@ -91,7 +108,7 @@ function ComposerDockView(
     onRemoveAttachment,
     dictation,
     style,
-    onLayout,
+    onHeightSettled,
   }: Props,
   ref: React.Ref<ComposerDockHandle>,
 ) {
@@ -121,8 +138,38 @@ function ComposerDockView(
     if (onSend(draftRef.current.trim())) setDraft("");
   }, [onSend]);
 
+  // The last height handed upwards, and the timer waiting to hand up the next.
+  //
+  // Refs, not state: this is measurement plumbing, and storing it in state
+  // would re-render the dock on every animation frame — the cost being avoided.
+  const reported = useRef(0);
+  const settling = useRef<ReturnType<typeof setTimeout>>(undefined);
+  useEffect(() => () => clearTimeout(settling.current), []);
+
+  const measure = useCallback(
+    (height: number) => {
+      switch (heightAction(reported.current, height)) {
+        case "ignore":
+          return;
+        case "report-now":
+          reported.current = height;
+          onHeightSettled?.(height);
+          return;
+        case "defer":
+          // Restarted on every frame of the growth, so it only ever fires once
+          // the composer has stopped moving.
+          clearTimeout(settling.current);
+          settling.current = setTimeout(() => {
+            reported.current = height;
+            onHeightSettled?.(height);
+          }, SETTLE_MS);
+      }
+    },
+    [onHeightSettled],
+  );
+
   return (
-    <View style={style} onLayout={onLayout}>
+    <View style={style} onLayout={(event) => measure(event.nativeEvent.layout.height)}>
       {/* The context row shows what the next prompt acts on — project, context
           fill, uncommitted work, and the commands the agent offers (an empty
           sheet is worse than no button). Never while typing: the draft is the

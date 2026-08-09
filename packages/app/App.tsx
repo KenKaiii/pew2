@@ -1364,17 +1364,16 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
               // same gap above either boundary without re-laying out.
               { paddingBottom: insets.bottom + theme.space(2) },
             ]}
-            onLayout={(event) => {
-              // Read out here, not inside the updater. React pools synthetic
-              // events and nulls `nativeEvent` once the handler returns, and a
-              // state updater runs after that — reaching into the event from in
-              // there threw `Cannot read property 'layout' of null` and took the
-              // whole render down.
-              const height = event.nativeEvent.layout.height;
+            // Settled heights only. The dock reports once its growth animation
+            // has stopped, not on every frame of it — measured at roughly one
+            // layout pass per two pixels, which turned a single wrapped line
+            // into about ten re-renders of this whole component, each one
+            // rebuilding the thread's spacers and re-running its follow-scroll
+            // on the exact frames the composer was trying to animate.
+            onHeightSettled={(height) => {
               // Recorded against the state it was measured in, and only when it
-              // actually changed: an unconditional set would re-render on every
-              // layout pass the dock does, including the ones the keyboard's own
-              // animation causes.
+              // actually changed — the keyboard's own animation causes layout
+              // passes that have nothing to do with the draft.
               setDockHeights((prev) => recordDockHeight(prev, typing, height));
             }}
             typing={typing}

@@ -5,6 +5,7 @@
  * resolve through both `node_modules` folders. Without this an installed package
  * still fails with "Unable to resolve module".
  */
+const fs = require("node:fs");
 const path = require("node:path");
 const { getDefaultConfig } = require("expo/metro-config");
 
@@ -68,6 +69,8 @@ config.transformer.getTransformOptions = async () => ({
 const upstreamResolve = config.resolver.resolveRequest;
 config.resolver.resolveRequest = (context, moduleName, platform) => {
   const resolve = upstreamResolve ?? context.resolveRequest;
+  const harness = harnessFor(moduleName);
+  if (harness) return resolve(context, harness, platform);
   if (moduleName.startsWith(".") && moduleName.endsWith(".js")) {
     try {
       return resolve(context, moduleName.replace(/\.js$/, ""), platform);
@@ -77,5 +80,35 @@ config.resolver.resolveRequest = (context, moduleName, platform) => {
   }
   return resolve(context, moduleName, platform);
 };
+
+/**
+ * Swap the app for a component harness when one is asked for.
+ *
+ * The app shows nothing but a pairing screen until it has a paired daemon, and
+ * pairing is camera-only by design — which a simulator has no way to do. That
+ * left every question about the composer answerable only by building an `.ipa`
+ * and typing on a real phone: three rounds of that went into finding one stray
+ * re-render, and the first two fixes were aimed at the wrong layer because
+ * nothing here could render the component and watch how it behaved.
+ *
+ * `bun run harness` opens the simulator straight into one, with no pairing, no
+ * daemon and no network. Metro rewrites the entry's `./App` import, so nothing
+ * in the app's own source knows harnesses exist and a production bundle cannot
+ * contain one however the flag is set at runtime.
+ *
+ * Returns undefined for every other module, and for every build that did not
+ * ask, leaving the resolve above untouched.
+ */
+function harnessFor(moduleName) {
+  const name = process.env.EXPO_PUBLIC_HARNESS;
+  if (!name || moduleName !== "./App") return undefined;
+  if (!fs.existsSync(path.join(projectRoot, "src/ui", `${name}.harness.tsx`))) {
+    // Fail the bundle rather than the render. A typo would otherwise start the
+    // app normally, onto the pairing screen, looking exactly like a harness
+    // that rendered nothing.
+    throw new Error(`No harness "${name}". Expected src/ui/${name}.harness.tsx`);
+  }
+  return `./src/ui/${name}.harness`;
+}
 
 module.exports = config;
