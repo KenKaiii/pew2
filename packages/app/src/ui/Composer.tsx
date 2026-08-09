@@ -278,7 +278,40 @@ function ComposerView({
 
       <Glass radius={theme.radius.composer} tier="raised">
         <Reanimated.View style={surface}>
+          {/* The pill is a text field, so the whole pill has to answer a tap on
+              it — not just the one line-box the glyphs occupy.
+
+              The input is a thin strip near the top: about a line tall, inset
+              between the two buttons. Every other point on the pill used to
+              land on the action row below, which spans the entire collapsed
+              height and, being an ordinary View, is itself the hit-test result
+              — React Native walks *up* from there for a responder, never
+              sideways to the input beneath. So most of the control was dead to
+              touch, and a tap that missed the strip did nothing at all rather
+              than doing something wrong. Pressing twice was the user finding
+              the strip by hand.
+
+              Under the input in z-order, so a tap on actual text still goes to
+              the field and places the caret where it was aimed. */}
+          <Pressable
+            accessible={false}
+            importantForAccessibility="no"
+            // A locked composer must not be focusable by the wider target
+            // either, or the keyboard would come up over a field that refuses
+            // every keystroke.
+            disabled={!editable}
+            style={StyleSheet.absoluteFill}
+            onPress={() => input.current?.focus()}
+          />
+
+          {/* `box-none` for the same reason as the action row below. This
+              wrapper stretches to the bottom of the pill while collapsed, but
+              the field inside it is a single line — so the band beneath the
+              text was the wrapper's own, and a tap there bubbled up to the
+              pill rather than sideways to the catcher above. Its `TextInput`
+              child still takes presses on the text itself. */}
           <Animated.View
+            pointerEvents="box-none"
             style={[
               styles.inputWrap,
               {
@@ -327,12 +360,18 @@ function ComposerView({
           </Animated.View>
 
           {/* Always the bottom 58pt: the entire pill when collapsed, the action
-              row once expanded. Anchoring it means the buttons never shift. */}
-          <View style={styles.actions}>
+              row once expanded. Anchoring it means the buttons never shift.
+
+              `box-none` because of that first case: while collapsed this row
+              covers the whole control, and as an ordinary View it answered for
+              every point on it that is not one of its buttons — which is what
+              stole taps from the field. Its children still take their own
+              presses; only the container itself steps out of the way. */}
+          <View style={styles.actions} pointerEvents="box-none">
             {/* Grouped, because the row is `space-between`: a third loose child
                 would scatter the three across the width instead of keeping the
                 badge next to the button it belongs beside. */}
-            <View style={styles.leading}>
+            <View style={styles.leading} pointerEvents="box-none">
               <Pressable
                 style={({ pressed }) => [
                   styles.actionButton,

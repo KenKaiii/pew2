@@ -11,15 +11,11 @@
  * a moment, and the keyboard should drop.
  */
 import { useCallback, useEffect, useState } from "react";
-import {
-  ActivityIndicator,
-  Image,
-  Modal,
-  Pressable,
-  StyleSheet,
-  Text,
-  View,
-} from "react-native";
+import { ActivityIndicator, Modal, Pressable, StyleSheet, Text, View } from "react-native";
+// expo-image, as in the transcript: this opens onto a picture the thumbnail
+// just displayed, so the full-size decode is a cache hit rather than a second
+// main-thread decode of bytes the app already holds.
+import { Image } from "expo-image";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import Ionicons from "@expo/vector-icons/Ionicons";
 import { theme } from "../theme";
@@ -126,7 +122,10 @@ export function ImageViewer({
             accessibilityRole="image"
             accessibilityLabel={image.alt || "Image from the agent"}
             source={{ uri: resolvedSrc }}
-            resizeMode="contain"
+            contentFit="contain"
+            // No fade. The thumbnail behind this is already the same picture, so
+            // a transition would be the image visibly reappearing over itself.
+            transition={0}
             style={styles.imageFill}
           />
         </View>

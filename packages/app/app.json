@@ -83,6 +83,10 @@
           "isAccessMediaLocationEnabled": false
         }
       ]
-    ]
+    ],
+    "//experiments": "The React Compiler memoises components automatically — the same work as the hand-written memo/useCallback in Sidebar and ChatThread, which is what stopped the drawer recomputing its lists on the frame it starts moving. Those stay: they document intent, and the compiler is a floor under them rather than a replacement. Which files it may touch is decided by `sources` in babel.config.js, not here — this flag is only the on switch, and turning it on without that filter would hand it the daemon hook too, where a dropped update reads as a reply that never arrived rather than as a slow screen.",
+    "experiments": {
+      "reactCompiler": true
+    }
   }
 }

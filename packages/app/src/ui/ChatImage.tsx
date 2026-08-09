@@ -11,16 +11,13 @@
  * inside markdown, several renderer levels below anything this app controls.
  */
 import { createContext, memo, useContext, useEffect, useState } from "react";
-import {
-  ActivityIndicator,
-  Image,
-  Pressable,
-  StyleSheet,
-  Text,
-  View,
-  type ImageErrorEventData,
-  type NativeSyntheticEvent,
-} from "react-native";
+import { ActivityIndicator, Pressable, StyleSheet, Text, View } from "react-native";
+// Not React Native's `Image`. That one decodes on the main thread and keeps no
+// disk cache, so a transcript with pictures in it stuttered on open and then
+// decoded the same bytes again on every reopen. This one decodes off the main
+// thread and caches to disk, which is the difference between a scroll that
+// drops frames over images and one that does not.
+import { Image, type ImageErrorEventData, type ImageLoadEventData } from "expo-image";
 import Ionicons from "@expo/vector-icons/Ionicons";
 import { theme } from "../theme";
 import { haptics } from "./haptics";
@@ -149,12 +146,10 @@ function ChatImageView({ image }: { image: ChatImageModel }) {
     );
   }
 
-  const onError = (event: NativeSyntheticEvent<ImageErrorEventData>) =>
-    setFailed(
-      event.nativeEvent?.error
-        ? String(event.nativeEvent.error)
-        : "Could not display this image",
-    );
+  // Flat event, not a `NativeSyntheticEvent`: this component's `Image` is
+  // expo-image's, which hands the payload over directly.
+  const onError = (event: ImageErrorEventData) =>
+    setFailed(event?.error ? String(event.error) : "Could not display this image");
 
   return (
     <>
@@ -170,9 +165,20 @@ function ChatImageView({ image }: { image: ChatImageModel }) {
           source={{ uri: resolved.uri }}
           // `contain` and a measured ratio together: a wide screenshot keeps its
           // shape instead of being cropped to a square thumbnail.
-          resizeMode="contain"
-          onLoad={(event) => {
-            const { width, height } = event.nativeEvent.source ?? {};
+          contentFit="contain"
+          // The transcript is a recycling list, so a cell that scrolls away and
+          // comes back holding a different picture would otherwise show the old
+          // one until the new bytes land. Keyed on the source, the view blanks
+          // first. The frame around it still carries the previous picture's
+          // aspect ratio for that moment, which is the same one-step resize an
+          // image has always made on first load.
+          recyclingKey={image.src}
+          // Inline images arrive as `data:` payloads that are already in memory
+          // and are pointless to write to disk; everything else is worth keeping
+          // across launches, since a reopened transcript re-requests the lot.
+          cachePolicy={resolved.uri.startsWith("data:") ? "memory" : "memory-disk"}
+          onLoad={(event: ImageLoadEventData) => {
+            const { width, height } = event.source ?? {};
             if (width && height) setRatio(width / height);
           }}
           onError={onError}

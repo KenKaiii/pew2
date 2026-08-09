@@ -8,7 +8,7 @@
  * The approval sheet is the reason this app exists, so it is a blocking,
  * unmissable surface rather than an inline row that can scroll away.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { startTransition, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   Animated,
@@ -898,13 +898,30 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
 
   const openSession = useCallback(
     (id: string) => {
-      // Remounts the thread so it re-arms at this transcript's own bottom.
-      // Deliberately not `daemon.sessionId`: a fresh conversation renders its
-      // optimistic first prompt before the daemon assigns an id, and keying on
-      // that would tear the list down mid-reply the moment the id landed.
-      setThreadKey(id);
-      daemon.openSession(id);
+      // Closing the drawer is urgent; swapping the transcript underneath it is
+      // not, and they are separated here because they used to be one render.
+      //
+      // The spring that closes the drawer is started by an effect on
+      // `menuOpen`, and effects run after the commit — so it could not begin
+      // until React had finished the work in the same batch. That work is a
+      // whole new transcript: `threadKey` changes, the list remounts, and every
+      // turn in the conversation mounts and parses its markdown. The drawer
+      // therefore stayed still from the tap until all of that had landed, and
+      // only then started moving. That pause is the stagger — not a slow
+      // animation, a late one, and worst on the longest conversations.
+      //
+      // Marked non-urgent, the transcript renders in its own pass. The tap now
+      // commits nothing but `menuOpen`, the effect fires, and the drawer is
+      // already travelling while the turns are built behind it.
       setMenuOpen(false);
+      startTransition(() => {
+        // Remounts the thread so it re-arms at this transcript's own bottom.
+        // Deliberately not `daemon.sessionId`: a fresh conversation renders its
+        // optimistic first prompt before the daemon assigns an id, and keying on
+        // that would tear the list down mid-reply the moment the id landed.
+        setThreadKey(id);
+        daemon.openSession(id);
+      });
     },
     [daemon.openSession],
   );

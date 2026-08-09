@@ -212,6 +212,14 @@ function ChatThreadView(
       data={turns}
       renderItem={renderItem}
       keyExtractor={keyExtractor}
+      // A user turn, an agent's markdown, a thought and a system line are four
+      // different subtrees. Without this the list recycles any cell into any
+      // other, so React reconciles two unrelated trees instead of updating one:
+      // it tears the old subtree down and builds the new one — and under Fabric
+      // that mount lands on the main thread, mid-scroll. Typed, a cell is only
+      // ever reused for a turn of its own shape, which is the case
+      // reconciliation is actually cheap for.
+      getItemType={getItemType}
       // Follow an append only while the reader is near the end. Someone reading
       // history keeps their place while the reply streams on below.
       maintainVisibleContentPosition={MAINTAIN_POSITION}
@@ -279,6 +287,9 @@ const MAINTAIN_POSITION = {
 // server's when the echo lands, and keying on that would recycle the cell out
 // from under a message that never changed.
 const keyExtractor = (turn: TurnData) => turn.key ?? turn.id;
+
+/** One recycling pool per shape of turn. Reasoning at the call site. */
+const getItemType = (turn: TurnData) => turn.role;
 
 /** Carries only a `ListHeaderComponentStyle`/`ListFooterComponentStyle` inset. */
 /**

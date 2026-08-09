@@ -9,7 +9,7 @@
  * being covered, so the two surfaces read as one moving layout instead of a
  * modal layer. The panel itself is therefore static — App owns the motion.
  */
-import { memo, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   Animated,
@@ -174,10 +174,11 @@ interface SessionRowProps {
   /** Nothing in this row should be animating: shut drawer, or app in the
    *  background. */
   paused: boolean;
-  onOpen: () => void;
+  /** Takes the id, so one stable callback serves every row. */
+  onOpen: (id: string) => void;
 }
 
-function SessionRow({
+const SessionRow = memo(function SessionRow({
   session,
   index,
   active,
@@ -187,7 +188,29 @@ function SessionRow({
 }: SessionRowProps) {
   // Only the initial viewport cascades. Rows virtualized in later should appear
   // immediately, rather than fading under the user's finger while they scroll.
-  const shouldAnimate = !reduceMotion && index < MAX_STAGGERED_ROWS;
+  //
+  // And only rows that mount while the drawer is actually open. The list is
+  // remounted by its `key` whenever the app or the project changes, and both of
+  // those resolve on their own schedule — the daemon naming a provider a moment
+  // after launch remounts it behind a shut drawer. The cascade then ran against
+  // nothing, and pulling the drawer out a beat later caught it mid-flight: rows
+  // arriving one after another under a panel that was itself still moving. That
+  // is the drawer's intermittent stagger, and why it came and went with how
+  // quickly the daemon answered.
+  //
+  // Captured at mount rather than read each render, because this must not
+  // become true *later*: recomputing it when the drawer opens would re-run the
+  // effect below and replay the cascade on open, every open — which is the
+  // thing being fixed, arrived at from the other side.
+  //
+  // A lazy initial state rather than a ref, because this is read *during*
+  // render. The `useRef(new Animated.Value(…))` idiom used elsewhere in this
+  // file is a stable box whose identity never changes, so reading it in render
+  // is harmless; this one derives from a prop, which is the case the rule is
+  // actually about. Lazy state is the sanctioned way to freeze one at mount,
+  // and it stays correct under the React Compiler's memoisation.
+  const [revealing] = useState(() => !paused);
+  const shouldAnimate = !reduceMotion && revealing && index < MAX_STAGGERED_ROWS;
   const entrance = useRef(new Animated.Value(shouldAnimate ? 0 : 1)).current;
 
   useEffect(() => {
@@ -208,7 +231,13 @@ function SessionRow({
     return () => animation.stop();
   }, [entrance, index, shouldAnimate]);
 
-  const metadata = formatHistoryMetadata(session);
+  // Memoised against the row's own re-renders, not just the list's. `paused`
+  // flips the instant the drawer opens, so `memo` above cannot spare these rows
+  // that particular render — the one render that lands on the frame the slide
+  // starts. Only the dot at the end of the row actually reads `paused`; this is
+  // date arithmetic for a line that has not changed, and it ran once per
+  // mounted row before the drawer had moved a pixel.
+  const metadata = useMemo(() => formatHistoryMetadata(session), [session]);
   return (
     <Animated.View
       style={{
@@ -227,7 +256,7 @@ function SessionRow({
         accessibilityRole="button"
         accessibilityLabel={session.title}
         accessibilityState={{ selected: active }}
-        onPress={onOpen}
+        onPress={() => onOpen(session.id)}
         style={({ pressed }) => [
           styles.session,
           active && styles.sessionActive,
@@ -256,7 +285,7 @@ function SessionRow({
       </Pressable>
     </Animated.View>
   );
-}
+});
 
 function SidebarView({
   open,
@@ -300,20 +329,55 @@ function SidebarView({
     setMenuOpen(false);
   }, [open, activeProviderId]);
 
+  // The four derived lists below are memoised on what they actually read, not
+  // because any one of them is slow on its own, but because of *when* they run.
+  //
+  // Opening the drawer flips `open`, and that render lands on the same frame
+  // the slide starts. The translation itself is on the UI thread and does not
+  // care, but a sort, two filters and a scan of every session held the JS
+  // thread through the first frames of it — exactly when the list below is also
+  // laying out its rows. That is the hitch the drawer had on the way out, and
+  // the reason it was intermittent: it cost nothing until enough conversations
+  // had accumulated to be worth sorting.
+  //
+  // Now `open` changing re-renders a component whose data is all cache hits.
+
   // Most recently used app first, so the daily driver is never off-screen
   // behind apps that were tried once.
-  const orderedProviders = orderProvidersByRecency(providers, sessions);
+  const orderedProviders = useMemo(
+    () => orderProvidersByRecency(providers, sessions),
+    [providers, sessions],
+  );
   // Ready to use right now. `providers` also carries the ones that are known but
   // unusable — not installed, or missing an API key — and they are shown greyed
   // out rather than hidden, so the total would overstate what works.
-  const availableCount = providers.filter((provider) => provider.available).length;
+  const availableCount = useMemo(
+    () => providers.filter((provider) => provider.available).length,
+    [providers],
+  );
 
-  const selectedProject = projects.find((project) => project.path === selectedProjectPath);
+  const selectedProject = useMemo(
+    () => projects.find((project) => project.path === selectedProjectPath),
+    [projects, selectedProjectPath],
+  );
   // Narrowed before the recent-work cap, or a project's older conversations
   // would be cut away by a window they were never in.
-  const visible = recentSessionsForProvider(
-    sessionsInProject(sessions, selectedProject),
-    activeProviderId,
+  const visible = useMemo(
+    () => recentSessionsForProvider(sessionsInProject(sessions, selectedProject), activeProviderId),
+    [sessions, selectedProject, activeProviderId],
+  );
+
+  // Stable, so the memoised rows below actually bail out. Built per render it
+  // was a new function for every row on every render, which defeats the memo
+  // entirely: opening the drawer re-rendered the whole first batch — eighteen
+  // rows, per `initialNumToRender` below — and re-ran each one's date
+  // formatting, on the frame the slide begins.
+  const openRow = useCallback(
+    (id: string) => {
+      haptics.tap();
+      onOpenSession(id);
+    },
+    [onOpenSession],
   );
   // Spoken only. The dot beside the title carries this at a glance; a screen
   // reader gets the sentence, including which computer it is about.
@@ -498,10 +562,7 @@ function SidebarView({
                 active={session.id === activeSessionId}
                 reduceMotion={reduceMotion}
                 paused={rowsStill}
-                onOpen={() => {
-                  haptics.tap();
-                  onOpenSession(session.id);
-                }}
+                onOpen={openRow}
               />
             )}
           />
