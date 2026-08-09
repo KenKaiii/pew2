@@ -62,6 +62,17 @@ export const theme = {
   gutter: 20,
 
   /**
+   * Single vertical step between the drawer's stacked sections.
+   *
+   * "Connected Apps" to the agent pills, the pills to the project selector, the
+   * selector to "Latest chats" — each of those was its own number before (12,
+   * 12, 20), so the column read as three loosely related blocks rather than one
+   * list. Lives here rather than in `Sidebar.tsx` because `ProjectSelect` sits
+   * in that column too and has to keep the same rhythm from another file.
+   */
+  sectionGap: 16,
+
+  /**
    * Vertical inset from the safe area to the first row of controls. The drawer
    * header and the conversation's top bar must both use this, or the title and
    * the hamburger it sits beside land on different lines as the drawer opens.
@@ -80,23 +91,37 @@ export const theme = {
   /** Approval actions keep explicit contrast even over adaptive glass. */
   approval: approvalActionColors,
 
-  radius: { sm: 8, md: 12, lg: 18, composer: 26, pane: 34, pill: 999 },
+  /**
+   * `composer` is half of `size.composerCollapsed`, which is what makes the
+   * resting composer a true stadium rather than a rounded rectangle. Keep the
+   * two in step: a radius below half the height reads as a slightly squared
+   * box, which is exactly how this control looked beside its peers before.
+   */
+  radius: { sm: 8, md: 12, lg: 18, composer: 32, pane: 34, pill: 999 },
 
-  /** Control heights. Anything below 44 pairs with hitSlop to stay tappable. */
+  /**
+   * Control heights.
+   *
+   * `control` is the whole top bar — the hamburger, the selector pills, and the
+   * drawer header that has to line up with them — and it is deliberately the
+   * same 44 as `touch`. It used to be 38 and lean on `hitSlop` for the
+   * difference, which satisfies the tap target but not the eye: the controls
+   * read as small for the surface they sit on, and an invisible slop cannot fix
+   * that. Sizing them at the minimum instead means the visible control is the
+   * touch target.
+   */
   size: {
-    control: 38,
+    control: 44,
     chip: 40,
     /**
      * Resting composer: one row, text inline between the two buttons.
-     * 58 = button (36) + inset (11) top and bottom, so the buttons sit
+     * 64 = button (40) + inset (12) top and bottom, so the buttons sit
      * centred when collapsed and in the corners once it grows.
      */
-    composerCollapsed: 58,
-    /** Focused composer: one text line above the action row. */
-    composer: 96,
-    composerButton: 36,
+    composerCollapsed: 64,
+    composerButton: 40,
     /** Inset from the pill's edge to each action button. */
-    composerInset: 11,
+    composerInset: 12,
     orb: 44,
     /** Apple HIG minimum touch target. */
     touch: 44,

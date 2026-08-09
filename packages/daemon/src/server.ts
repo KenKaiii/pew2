@@ -20,6 +20,7 @@ import { handleMessage } from "./handler.js";
 import { RelayClient } from "./relay-client.js";
 import { hostname } from "node:os";
 import { daemonLogPaths, rotateLog } from "./logs.js";
+import { sweepOrphans } from "./children.js";
 import type { ServerWebSocket } from "bun";
 
 const PORT = Number(process.env.PEW2_PORT ?? 8787);
@@ -29,6 +30,14 @@ const PORT = Number(process.env.PEW2_PORT ?? 8787);
 // here, before anything is written.
 const rotations = await Promise.all(daemonLogPaths().map((path) => rotateLog(path)));
 const trimmed = rotations.reduce((total, r) => total + (r.rotated ? r.before - r.after : 0), 0);
+
+// Agents left behind by a daemon that died without running its shutdown
+// handler. Nothing inside a SIGKILL'd process can clean up after itself, so the
+// next start does it: children of daemons that are still running are untouched.
+const reaped = await sweepOrphans();
+if (reaped.length > 0) {
+  console.log(`[children] reaped ${reaped.length} orphaned agent(s) from a previous daemon`);
+}
 
 // Minted on first run and reused thereafter, so restarting the daemon does not
 // unpair the phone.
@@ -412,7 +421,12 @@ function shutdown() {
   stopWatching();
   relay?.stop();
   daemon.closeAll();
-  process.exit(0);
+  // `closeAll` asks each agent to exit; this is the half-second it gets to do
+  // so before the process ends and `children.ts`'s exit hook kills whatever is
+  // still up. The delay is what makes that a backstop rather than the normal
+  // path: an agent mid-write deserves the chance to finish. Safe to wait —
+  // launchd allows 20s, and a terminal will not notice half a second.
+  setTimeout(() => process.exit(0), 500);
 }
 
 for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {

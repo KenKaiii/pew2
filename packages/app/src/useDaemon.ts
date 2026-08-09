@@ -20,6 +20,15 @@ import {
   pendingSession,
   pendingSessionKey,
 } from "./pendingSession";
+import {
+  enqueue,
+  markSent,
+  partitionOutbox,
+  pendingStartFor,
+  queuedPendingSessions,
+  remapSession,
+  type OutboxEntry,
+} from "./outbox";
 import { rememberConfigs, visibleConfigs, withChoice } from "./configTruth";
 import {
   beginActivity,
@@ -40,7 +49,12 @@ import {
   type PendingAttachment,
 } from "./attachments";
 import { defaultProviderId } from "./lastProvider";
-import { loadLastProvider, saveLastProvider } from "./preferences";
+import {
+  loadCachedProviders,
+  loadLastProvider,
+  saveCachedProviders,
+  saveLastProvider,
+} from "./preferences";
 import {
   offeredCommands,
   readAvailableCommands,
@@ -58,6 +72,7 @@ import {
   isOptimistic,
   type ReplayEvent,
 } from "./replayFold";
+import { readPermissionRequest } from "./permissions";
 
 export type Status = "connecting" | "online" | "offline";
 
@@ -107,6 +122,15 @@ export interface Turn {
    * it) and markdown is re-parsed on every streamed chunk.
    */
   images?: ChatImage[];
+  /**
+   * Typed with no way to send it, and waiting in the outbox for a socket.
+   *
+   * Rendered as the message it is, with a mark saying it has not left the
+   * phone — not as a failure, because it has not failed: the reconnect sends
+   * it. Cleared the moment it goes out, and again by the daemon's echo, so a
+   * bubble can never keep the label after the agent has the message.
+   */
+  queued?: boolean;
 }
 
 /**
@@ -174,6 +198,17 @@ export interface Session {
    * conversation is opened, so the drawer marks what is worth going back to.
    */
   unread?: boolean;
+  /**
+   * The approval this conversation's agent is stopped on, if any.
+   *
+   * Per session for the same reason as `busy`: the agent that needs an answer
+   * is often not the one on screen, and it will wait for ever — there is no
+   * timeout at either end of ACP. Held here, it survives switching away, and
+   * survives losing the socket, since the daemon re-states every open request
+   * on reconnect. Cleared when it is answered, or when the turn it belonged to
+   * ends without it.
+   */
+  permission?: PermissionRequest;
 }
 
 
@@ -384,7 +419,12 @@ interface State {
  * A user turn rendered before the daemon has echoed it back. Its id is replaced
  * with the server's once the echo arrives, so it never renders twice.
  */
-function localTurn(seq: number, text: string, images?: ChatImage[]): Turn {
+function localTurn(
+  seq: number,
+  text: string,
+  images?: ChatImage[],
+  queued?: boolean,
+): Turn {
   // `key` outlives the id swap in the echo path, so the cell rendering this
   // prompt survives reconciliation instead of remounting.
   return {
@@ -396,6 +436,9 @@ function localTurn(seq: number, text: string, images?: ChatImage[]): Turn {
     // instant it is sent rather than after a round trip to fetch back the file
     // this device just uploaded.
     ...(images?.length ? { images } : {}),
+    // Only when it is true: an ordinary send must not carry a false flag into
+    // every turn comparison in the thread.
+    ...(queued ? { queued: true as const } : {}),
   };
 }
 
@@ -595,6 +638,15 @@ export function useDaemon(
   // seconds, and the daemon's echo arrives only after that, so the prompt is
   // rendered locally first and reconciled when the echo lands.
   const localSeq = useRef(0);
+  // Messages typed with no socket to send them on. See `outbox.ts`: the phone
+  // is offline routinely, and a send that cannot go out waits here rather than
+  // being refused at the keyboard or written to a dead socket and lost.
+  //
+  // A ref, and only a ref: it is read and written by socket handlers that must
+  // not touch state, and it is deliberately not persisted — it holds attachment
+  // bytes, and a queue that survives a force-quit would deliver a message the
+  // user has long stopped expecting to send.
+  const outbox = useRef<OutboxEntry[]>([]);
   // The `session.start` this client is waiting on, if any. Held outside state
   // because the message handler must read it without a render having happened,
   // and matched against the `requestId` echoed back so the answer adopts the
@@ -714,6 +766,37 @@ export function useDaemon(
     };
   }, []);
 
+  // The agents this machine last reported, restored for a launch with no
+  // signal. Without it a cold start offline knew of no agent at all, so a new
+  // conversation had nothing to address — the composer took the words and the
+  // send was refused, whatever the outbox was willing to hold. See
+  // `providerCache.ts`.
+  //
+  // Applied only over an empty list, and never after: the socket may well have
+  // answered before the keychain did, and this must never overwrite what the
+  // machine is saying right now with what it said last week.
+  useEffect(() => {
+    let cancelled = false;
+    void loadCachedProviders().then((cached) => {
+      if (cancelled || cached.length === 0) return;
+      setState((s) => (s.providers.length > 0 ? s : { ...s, providers: cached }));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Written back whenever the machine answers, so the memory is of the last
+  // truth rather than the first. Keyed on the ids and their availability, not
+  // the array — which is rebuilt by frames that change neither.
+  const providerKey = state.providers.map((p) => `${p.id}:${p.available}`).join(",");
+  useEffect(() => {
+    if (!providerKey) return;
+    void saveCachedProviders(providersRef.current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `providerKey` stands
+    // in for the array on purpose; including it would write on every frame.
+  }, [providerKey]);
+
   // Where the composer points before the user picks anything this launch.
   const fallbackProviderId = defaultProviderId(state.providers, rememberedProviderId);
 
@@ -763,6 +846,117 @@ export function useDaemon(
       const secure = new SecureChannel(e2e.fromHex(pairingKey), "app");
       channel.current = secure;
 
+      /**
+       * Deliver everything typed while there was nowhere to send it.
+       *
+       * Called once the channel is proven — the first sealed frame back, not
+       * merely an open socket — and again whenever a conversation gains the id
+       * its waiting messages are addressed to. See `outbox.ts`.
+       */
+      const flushOutbox = () => {
+        if (outbox.current.length === 0) return;
+        // At most one conversation may be starting at a time: `pendingStart`
+        // holds a single request id, and a second `session.start` sent beside
+        // it could never be adopted — leaving a row that outlives its own
+        // answer, and prompts addressed to a pending key nothing will rename.
+        // The `session.started` that answers this one flushes the next.
+        let starting = pendingStart.current !== undefined;
+        const { ready, held } = partitionOutbox(outbox.current, (entry) => {
+          if (entry.kind === "start") {
+            if (starting) return false;
+            starting = true;
+            return true;
+          }
+          // A conversation with no id yet is early rather than undeliverable:
+          // `session.started` re-addresses this entry the moment it is named.
+          if (isPendingSession(entry.sessionId)) return false;
+          // An undefined `activeSessions` is an older daemon saying nothing,
+          // which `needsResume` reads as live.
+          if (liveSessions.current === undefined || liveSessions.current.has(entry.sessionId))
+            return true;
+          // The session died with a previous daemon. Held only while reopening
+          // the conversation can still re-address it — the resume carries the
+          // agent's own id, which is what `session.started` remaps on. Without
+          // one, nothing will ever rename this entry, so it goes and is refused
+          // out loud rather than waiting in a queue nobody can see.
+          const row = sessionsRef.current.find((entry2) => entry2.id === entry.sessionId);
+          return !row?.agentSessionId;
+        });
+        if (ready.length === 0) return;
+        outbox.current = held;
+
+        // Which turns stop saying they are waiting. Collected here and applied
+        // in one update below, rather than a state pass per message. The turns
+        // are also what says which conversations start pulsing: a row is
+        // working exactly when one of these bubbles is in it, which stays true
+        // through the renaming `session.started` is about to do to it.
+        const sent = new Set<string>();
+        for (let i = 0; i < ready.length; i++) {
+          const entry = ready[i]!;
+          // The socket can die between two writes of the same batch. What is
+          // left goes back to the front of the queue, ahead of what was held,
+          // so the conversation keeps the order it was typed in.
+          if (socket.current !== ws || ws.readyState !== WebSocket.OPEN) {
+            outbox.current = [...ready.slice(i), ...outbox.current];
+            break;
+          }
+          const message =
+            entry.kind === "start"
+              ? {
+                  t: "session.start",
+                  requestId: entry.requestId,
+                  providerId: entry.providerId,
+                  cwd: entry.cwd,
+                }
+              : {
+                  t: "session.prompt",
+                  sessionId: entry.sessionId,
+                  text: entry.text,
+                  attachments: entry.attachments,
+                };
+          ws.send(JSON.stringify(secure.seal(message, envelopeHeader(message))));
+          if (entry.kind === "start") {
+            // Reinstated here, not when the message was queued: `onopen` clears
+            // it, and without this the answer would find no row to adopt and
+            // prepend a second one beside the prompt already on screen.
+            pendingStart.current = entry.requestId;
+          }
+          // A request alone marks nothing: the conversation is not working
+          // until the message it was started for has actually gone, which is a
+          // separate entry addressed to it.
+          if (entry.kind === "prompt") sent.add(entry.turnKey);
+        }
+        if (sent.size === 0) return;
+
+        const started = Date.now();
+        setState((s) => {
+          const turns = markSent(s.turns, sent);
+          // A delivered bubble in the open transcript is what makes this the
+          // conversation on screen — asked of the turns rather than of a session
+          // id, because the row carrying them may still be a `pending:` request
+          // that `session.started` renames a moment from now.
+          const onScreen = turns !== s.turns;
+          return {
+            ...s,
+            busy: onScreen ? true : s.busy,
+            // The clock starts when the message actually leaves the phone. It
+            // would be a lie about the agent otherwise — it measures how long
+            // the answer took, not how long the tunnel lasted.
+            activity: onScreen ? beginActivity(started) : s.activity,
+            receipt: onScreen ? undefined : s.receipt,
+            turns,
+            sessions: s.sessions.map((session) => {
+              const owned = markSent(session.turns, sent);
+              if (owned === session.turns) return session;
+              // Marked working here rather than on the first streamed chunk, for
+              // the same reason `deliverPrompt` does: an agent can think for a
+              // long time before it says anything.
+              return { ...session, turns: owned, busy: true };
+            }),
+          };
+        });
+      };
+
       ws.onopen = () => {
         clearTimeout(deadline);
         attempts.current = 0;
@@ -787,9 +981,12 @@ export function useDaemon(
           // the pulsing dot would never stop. Clear it: a session still running
           // announces itself the moment it finishes, which is the signal that
           // matters.
-          sessions: dropPendingSessions(s.sessions).map((session) =>
-            session.busy ? { ...session, busy: false } : session,
-          ),
+          // Except the ones whose request never reached a socket at all: they
+          // are still in the outbox, and this reconnect is what sends them.
+          sessions: dropPendingSessions(
+            s.sessions,
+            queuedPendingSessions(outbox.current),
+          ).map((session) => (session.busy ? { ...session, busy: false } : session)),
         }));
         // Cleartext, because it is what establishes the connection — and carries
         // a sealed proof beside it, so the daemon can tell a paired phone from
@@ -891,6 +1088,7 @@ export function useDaemon(
                   message.sessionId,
                   missed,
                   message.working === true,
+                  message.permissions,
                 ),
               );
             }
@@ -916,6 +1114,11 @@ export function useDaemon(
                 events,
                 message.working === true,
                 Date.now(),
+                // What the agent is still stopped on, which no replayed event
+                // can say: a logged `permission_request` is skipped as history,
+                // so without this the sheet the user dropped their signal in
+                // front of never came back and the turn never resumed.
+                message.permissions,
               );
             }
 
@@ -1132,6 +1335,31 @@ export function useDaemon(
         // before the announcement that would otherwise still call it stale.
         if (message.t === "session.started" && message.sessionId) {
           liveSessions.current = new Set(liveSessions.current ?? []).add(message.sessionId);
+
+          // This conversation has a real id now, so the messages waiting on the
+          // name it used to have are addressed to it and can go. Two names lead
+          // here: the `pending:` key of the request this client sent, and the id
+          // this conversation had under a daemon that has since restarted, which
+          // a resume replaces. Re-addressed whether or not it is on screen — the
+          // messages belong to the conversation, not to the screen.
+          if (adoptedRequestId) {
+            outbox.current = remapSession(
+              outbox.current,
+              pendingSessionKey(adoptedRequestId),
+              message.sessionId,
+            );
+          }
+          const resumed = message.agentSessionId
+            ? sessionsRef.current.find(
+                (entry) =>
+                  entry.agentSessionId === message.agentSessionId &&
+                  entry.id !== message.sessionId,
+              )
+            : undefined;
+          if (resumed) {
+            outbox.current = remapSession(outbox.current, resumed.id, message.sessionId);
+          }
+          flushOutbox();
         }
 
         // What a *new* conversation with this agent will open with, held per
@@ -1240,6 +1468,12 @@ export function useDaemon(
               JSON.stringify(secure.seal({ t: "provider.capabilities", providerId: provider.id })),
             );
           }
+
+          // Anything typed while there was no signal goes now. Here rather than
+          // in `onopen` for two reasons: this frame is the proof the sealed
+          // channel works, and `activeSessions` above is what says whether the
+          // conversation a queued prompt names still exists.
+          flushOutbox();
         }
         if (message.t === "provider.capabilities") {
           pendingCapabilities.current.delete(message.providerId);
@@ -1495,6 +1729,12 @@ export function useDaemon(
               return {
                 ...prev,
                 busy: mine ? false : prev.busy,
+                // A turn cannot end while its agent is waiting to be let past a
+                // tool, so an approval still standing here died with the turn:
+                // cancelled, or the agent gave up. The daemon has already
+                // forgotten it, and a button that posts an id nothing is
+                // listening for is worse than no button.
+                permission: mine ? undefined : prev.permission,
                 // The live line exits here, and what it was doing becomes the
                 // receipt.
                 activity: mine ? IDLE_ACTIVITY : prev.activity,
@@ -1506,6 +1746,7 @@ export function useDaemon(
                     ? {
                         ...session,
                         busy: false,
+                        permission: undefined,
                         // Worth going back to, and marked as such until it is
                         // opened. Never for the conversation on screen: its
                         // reply is already there to read.
@@ -1557,19 +1798,19 @@ export function useDaemon(
                 return { ...base, usage };
               }
 
-              if (payload?.kind === "permission_request") {
-                const params = payload.params ?? {};
+              const permission = readPermissionRequest(payload);
+              if (permission) {
                 return {
                   ...base,
                   busy: false,
-                  permission: {
-                    requestId: payload.requestId,
-                    title: params.toolCall?.title ?? "The agent needs your approval",
-                    options: params.options ?? [
-                      { optionId: "allow", name: "Allow" },
-                      { optionId: "reject", name: "Reject" },
-                    ],
-                  },
+                  permission,
+                  // Filed against the conversation as well as shown, so it is
+                  // still answerable after switching away — and so a reconnect,
+                  // which restates every open request, has something to
+                  // reconcile against.
+                  sessions: base.sessions.map((session) =>
+                    session.id === message.sessionId ? { ...session, permission } : session,
+                  ),
                 };
               }
 
@@ -1827,6 +2068,83 @@ export function useDaemon(
     resume.current?.();
   }, []);
 
+  /**
+   * Send a prompt, or hold it until there is a socket to send it on.
+   *
+   * The one place a user message becomes a turn, shared by the two ways of
+   * sending one: into an open conversation, and into a conversation that has
+   * been asked for but not yet named. Both can be offline, and the difference
+   * shows only in what the bubble says about itself — the message is rendered
+   * either way, and `flushOutbox` delivers it when the signal returns.
+   *
+   * Returns false only when the message is genuinely not taken: the queue is
+   * full. The composer keeps the words in that case rather than clearing a
+   * message that is going nowhere.
+   */
+  const deliverPrompt = useCallback(
+    (sessionId: string, text: string, attachments: readonly PendingAttachment[]): boolean => {
+      // Attempted first, because its answer decides everything below. A
+      // conversation with no id yet cannot be addressed at all, so it does not
+      // even try: `session.started` re-addresses this entry later.
+      const wire = toWireAttachments(attachments);
+      const sent =
+        !isPendingSession(sessionId) &&
+        post({ t: "session.prompt", sessionId, text, attachments: wire });
+      const turn = localTurn(localSeq.current++, text, attachmentImages(attachments), !sent);
+      if (!sent) {
+        const queue = enqueue(outbox.current, {
+          kind: "prompt",
+          turnKey: turn.key!,
+          sessionId,
+          text,
+          attachments: wire,
+        });
+        if (!queue) return false;
+        outbox.current = queue;
+      }
+      const started = Date.now();
+      // The conversation on screen, whether it has an id yet or not.
+      const visible =
+        sessionId === sessionRef.current ||
+        (isPendingSession(sessionId) && sessionId === viewingRef.current);
+      setState((s) => ({
+        ...s,
+        // Nothing is working while a message waits for a socket, so nothing
+        // spins and no clock runs. Both start in `flushOutbox`, at the moment
+        // the message actually leaves the phone.
+        busy: visible && sent ? true : s.busy,
+        // Whatever this conversation was still loading, it is now carrying a
+        // prompt the user just sent. `loadingSession` suppresses the working
+        // indicator entirely, so leaving it set showed an empty transcript
+        // under the message for as long as the agent took to attach — the
+        // one moment the user most needs to see that something is happening.
+        loadingSession: visible ? false : s.loadingSession,
+        // A prompt sent to another conversation is not what this transcript
+        // is showing, so the line under it keeps describing this one.
+        activity: visible && sent ? beginActivity(started) : s.activity,
+        receipt: visible && sent ? undefined : s.receipt,
+        turns: visible ? capTurns([...s.turns, turn]) : s.turns,
+        sessions: s.sessions.map((session) =>
+          session.id === sessionId
+            ? {
+                ...session,
+                turns: capTurns([...session.turns, turn]),
+                // Marked working here, not on the first streamed chunk:
+                // an agent can think for a long time before it says
+                // anything, and the drawer should show that as work.
+                busy: sent ? true : session.busy,
+                unread: false,
+                title:
+                  session.title === "New conversation" ? turn.text.slice(0, 60) : session.title,
+              }
+            : session,
+        ),
+      }));
+      return true;
+    },
+    [post],
+  );
+
   const actions = useMemo(
     () => ({
       /**
@@ -1837,8 +2155,17 @@ export function useDaemon(
         providerId: string,
         initialText?: string,
         attachments: readonly PendingAttachment[] = [],
-      ) => {
+      ): boolean => {
         const started = Date.now();
+        // A conversation with this agent already asked for and still waiting for
+        // a socket: this message joins it instead of opening a second one.
+        // Offline that is the ordinary case rather than a race — without it,
+        // every message typed in a tunnel would open its own thread and spawn
+        // its own agent the moment the signal came back.
+        const waiting = initialText ? pendingStartFor(outbox.current, providerId) : undefined;
+        if (waiting) {
+          return deliverPrompt(pendingSessionKey(waiting.requestId), initialText!, attachments);
+        }
         queued.current = initialText ? { text: initialText, attachments } : undefined;
         // Named, so the answer can be matched to this request rather than to
         // whichever `session.started` happens to arrive next: the daemon
@@ -1856,20 +2183,47 @@ export function useDaemon(
         // A chosen project is where this conversation opens. Without it the
         // daemon falls back to the agent's last workspace, which is the whole
         // reason picking a project from the phone was impossible before.
-        post({ t: "session.start", requestId, providerId, cwd: projectRef.current[providerId] });
+        const cwd = projectRef.current[providerId];
+        const sent = post({ t: "session.start", requestId, providerId, cwd });
         // Spawning the agent and its ACP handshake take seconds; without a local
         // turn the screen would sit empty and look like the send did nothing.
         const turn = initialText
-          ? localTurn(localSeq.current++, initialText, attachmentImages(attachments))
+          ? localTurn(localSeq.current++, initialText, attachmentImages(attachments), !sent)
           : undefined;
+        if (!sent) {
+          // The first message is queued against the request rather than held in
+          // `queued`, which is only delivered when the answer lands on the
+          // conversation the user is looking at. Across a reconnect that is a
+          // long time to still be standing in the same place — open another
+          // conversation meanwhile and the message would be adopted into the
+          // new row and then never sent. See `QueuedStart`.
+          queued.current = undefined;
+          const request = enqueue(outbox.current, { kind: "start", requestId, providerId, cwd });
+          const queue =
+            request && turn
+              ? enqueue(request, {
+                  kind: "prompt",
+                  turnKey: turn.key!,
+                  sessionId: pendingSessionKey(requestId),
+                  text: initialText!,
+                  attachments: toWireAttachments(attachments),
+                })
+              : request;
+          // Both or neither: a request queued without the message it exists to
+          // carry would open an empty conversation on reconnect.
+          if (!queue) return false;
+          outbox.current = queue;
+        }
         setState((s) => ({
           ...s,
-          busy: turn !== undefined,
+          busy: turn !== undefined && sent,
           loadingSession: false,
           turns: turn ? capTurns([...s.turns, turn]) : s.turns,
           // The clock starts when the prompt leaves the phone, not when the
-          // agent first speaks: booting the agent is part of the wait.
-          activity: turn ? beginActivity(started) : s.activity,
+          // agent first speaks: booting the agent is part of the wait. A prompt
+          // still waiting for a socket has not left the phone, and its clock
+          // starts in `flushOutbox` instead.
+          activity: turn && sent ? beginActivity(started) : s.activity,
           receipt: undefined,
           // The conversation exists as far as the user is concerned — they
           // just started it — so it is in the drawer from here, carrying the
@@ -1880,18 +2234,16 @@ export function useDaemon(
           // phone pointing at it. See `pendingSession`.
           sessions: [
             {
-              ...pendingSession(
-                requestId,
-                providerId,
-                initialText,
-                started,
-                projectRef.current[providerId],
-              ),
+              ...pendingSession(requestId, providerId, initialText, started, cwd),
+              // A conversation whose request is still queued is not working:
+              // nothing has been asked of anything yet.
+              busy: turn !== undefined && sent,
               turns: turn ? [turn] : [],
             },
             ...s.sessions,
           ],
         }));
+        return true;
       },
 
       /**
@@ -1918,46 +2270,7 @@ export function useDaemon(
           const target = sessionsRef.current.find((entry) => entry.id === to);
           if (!target || needsResume(target, liveSessions.current)) return false;
         }
-        post({ t: "session.prompt", sessionId, text, attachments: toWireAttachments(attachments) });
-        const started = Date.now();
-        const turn = localTurn(localSeq.current++, text, attachmentImages(attachments));
-        const visible = sessionId === sessionRef.current;
-        setState((s) => {
-          const turns = visible ? capTurns([...s.turns, turn]) : s.turns;
-          return {
-            ...s,
-            busy: visible ? true : s.busy,
-            // Whatever this conversation was still loading, it is now carrying a
-            // prompt the user just sent. `loadingSession` suppresses the working
-            // indicator entirely, so leaving it set showed an empty transcript
-            // under the message for as long as the agent took to attach — the
-            // one moment the user most needs to see that something is happening.
-            loadingSession: visible ? false : s.loadingSession,
-            // A prompt sent to another conversation is not what this transcript
-            // is showing, so the line under it keeps describing this one.
-            activity: visible ? beginActivity(started) : s.activity,
-            receipt: visible ? undefined : s.receipt,
-            turns,
-            sessions: s.sessions.map((session) =>
-              session.id === sessionId
-                ? {
-                    ...session,
-                    turns: capTurns([...session.turns, turn]),
-                    // Marked working here, not on the first streamed chunk:
-                    // an agent can think for a long time before it says
-                    // anything, and the drawer should show that as work.
-                    busy: true,
-                    unread: false,
-                    title:
-                      session.title === "New conversation"
-                        ? turn.text.slice(0, 60)
-                        : session.title,
-                  }
-                : session,
-            ),
-          };
-        });
-        return true;
+        return deliverPrompt(sessionId, text, attachments);
       },
 
       cancel: () => {
@@ -1995,7 +2308,19 @@ export function useDaemon(
       answer: (requestId: string, optionId: string) => {
         const sessionId = sessionRef.current;
         if (sessionId) post({ t: "session.permission", sessionId, requestId, optionId });
-        setState((s) => ({ ...s, permission: undefined, busy: true }));
+        setState((s) => ({
+          ...s,
+          permission: undefined,
+          busy: true,
+          // Cleared on the conversation too, or reopening it would offer the
+          // same approval again and the second answer would land on a request
+          // the agent has already been let past.
+          sessions: s.sessions.map((session) =>
+            session.id === sessionId && session.permission
+              ? { ...session, permission: undefined }
+              : session,
+          ),
+        }));
       },
 
       /** Change a model, thinking level or mode on the open session. */
@@ -2066,13 +2391,22 @@ export function useDaemon(
             // Cleared so the previous conversation's menu is not offered for
             // this one; the provider's own list below fills it back in.
             commands: [],
+            // A reopen is a new agent session, so nothing can be pending in it
+            // yet — and the sheet being left behind belongs to a request in the
+            // conversation being left, which this screen must not answer.
+            permission: undefined,
             busy: true,
             loadingSession: true,
             // Both describe the conversation being left.
             activity: IDLE_ACTIVITY,
             receipt: undefined,
             sessions: s.sessions.map((entry) =>
-              entry.id === sessionId ? { ...entry, unread: false } : entry,
+              // Its approval goes with it: a resume means the daemon no longer
+              // holds that session, so the request it was blocked on died with
+              // the old agent and the button would post an id into nothing.
+              entry.id === sessionId
+                ? { ...entry, unread: false, permission: undefined }
+                : entry,
             ),
           }));
           return;
@@ -2121,6 +2455,12 @@ export function useDaemon(
           // mid-turn on the desktop, and clearing the spinner here would show
           // a running agent as finished.
           busy: session.busy === true,
+          // Same rule, and the reason it is kept per session: an agent stopped
+          // waiting for approval is what the user came back to deal with. The
+          // previous conversation's sheet goes with it — answering that one
+          // from here posted the wrong session's request id, which the daemon
+          // dropped in silence.
+          permission: session.permission,
           loadingSession: false,
           // A conversation still running elsewhere has tools this client never
           // saw, so there is no live line to restore.
@@ -2281,7 +2621,7 @@ export function useDaemon(
     }),
     // `deviceId` identifies this phone in the ids `start` mints. It does not
     // change in practice, and listing it costs nothing if it ever does.
-    [post, sendImageRequest, deviceId],
+    [post, deliverPrompt, sendImageRequest, deviceId],
   );
 
   // Give up on a conversation that is taking impossibly long to open.

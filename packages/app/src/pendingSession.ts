@@ -129,9 +129,16 @@ export function adoptPendingSession(
  * A session that really was created still comes back: the daemon lists it in
  * `activeSessions`, and its agent-side copy is discovered by the next history
  * probe. That path is slower, and it is the honest one.
+ *
+ * `keep` names the requests that were never written to any socket — a
+ * conversation started while the phone had no signal, still waiting in the
+ * outbox. That is the opposite case: the request is going to be sent, and its
+ * row is the only thing on screen holding the first prompt.
  */
-export function dropPendingSessions(existing: readonly Session[]): Session[] {
-  return existing.some((session) => isPendingSession(session.id))
-    ? existing.filter((session) => !isPendingSession(session.id))
-    : (existing as Session[]);
+export function dropPendingSessions(
+  existing: readonly Session[],
+  keep: ReadonlySet<string> = new Set(),
+): Session[] {
+  const stale = (session: Session) => isPendingSession(session.id) && !keep.has(session.id);
+  return existing.some(stale) ? existing.filter((session) => !stale(session)) : (existing as Session[]);
 }

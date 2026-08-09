@@ -74,6 +74,7 @@ import { withLayoutX, type PillX } from "./src/ui/pillAnchor";
 import { PairingScreen } from "./src/ui/PairingScreen";
 import { LaunchScreen } from "./src/ui/LaunchScreen";
 import { clearPairing, loadPairing, savePairing, type Pairing } from "./src/pairing";
+import { clearCachedProviders } from "./src/preferences";
 import * as SplashScreen from "expo-splash-screen";
 import { clearCrash, readCrash } from "./src/crashLog";
 import * as Clipboard from "expo-clipboard";
@@ -231,7 +232,11 @@ function Root() {
   const unpair = useCallback(() => {
     // Same reasoning inverted: forget it locally even if the delete failed, or
     // the confirmed "Forget" action would appear to do nothing.
-    void clearPairing()
+    //
+    // The remembered agent list goes with it. It describes one specific machine,
+    // so keeping it would offer the next computer agents it may not have — and
+    // "Forget this computer" ought to mean it.
+    void Promise.all([clearPairing(), clearCachedProviders()])
       .catch(() => {})
       .then(() => {
         setPairing(null);
@@ -989,13 +994,17 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
       // prompt must go out whatever the system decides.
       void ensureNotificationPermission();
 
-      if (daemon.sessionId) {
-        daemon.prompt(text, undefined, staged);
-      } else {
-        // No session yet: start one with the chosen available agent and let the
-        // daemon deliver this prompt as soon as it is ready.
-        daemon.start(active!.id, text, staged);
-      }
+      // Offline the message is queued rather than sent, which still counts as
+      // taken: it is on screen, marked as waiting, and goes out on reconnect.
+      // A false here is the rare genuine refusal — the outbox is full — and the
+      // draft and its attachments stay put, because destroying a message that
+      // was never delivered is the one outcome there is no way back from.
+      const taken = daemon.sessionId
+        ? daemon.prompt(text, undefined, staged)
+        : // No session yet: start one with the chosen available agent and let
+          // the daemon deliver this prompt as soon as it is ready.
+          daemon.start(active!.id, text, staged);
+      if (!taken) return false;
       setAttachments([]);
       return true;
     },
@@ -1326,11 +1335,18 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
                     machine rejects below the socket — 401 from the daemon, 409
                     from a relay room with no machine in it — sends no frame to
                     explain itself, so retrying continues in the background
-                    while the words stop pretending it is nearly there. */}
+                    while the words stop pretending it is nearly there.
+
+                    Deliberately not a checklist. By far the commonest reason
+                    this shows is that the phone has no signal, and the machine
+                    is fine — so instructions to go and inspect it are wrong
+                    advice most of the times they are read, and unfollowable
+                    anyway from wherever the user is standing. What can be done
+                    from here is keep typing, which the composer now says. */}
                 {daemon.fatal
                   ? daemon.fatal
                   : daemon.unreachable
-                    ? "Can't reach your machine. Check it's awake and running pew2 — if this code is old, run `pew2 pair` there for the current one."
+                    ? "Can't reach your machine."
                     : daemon.status !== "online"
                       ? "Connecting to your machine..."
                       : active
@@ -1401,13 +1417,25 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
             onSend={send}
             busy={showsStop(daemon)}
             onStop={daemon.cancel}
-            editable={daemon.status === "online"}
+            // Never locked by the network. A dead socket used to disable the
+            // whole composer — no keyboard, no typing, nothing — which is the
+            // one moment a phone is most likely to be in a tunnel and the user
+            // most wants to get a thought down. Offline sends are queued and
+            // delivered on reconnect (see `outbox.ts`), so the only thing that
+            // still locks it is a refusal retrying cannot fix: a rotated key or
+            // a version mismatch, where nothing typed here could ever go.
+            editable={!daemon.fatal}
             placeholder={
               dictation.listening
                 ? "Listening..."
-                : active
-                  ? "Ask me. Task me..."
-                  : "Waiting for an agent..."
+                : // Kept to one line: the collapsed pill is a single line tall,
+                  // and a placeholder that wraps pushes its own second line out
+                  // of the box — the state reads as broken rather than as calm.
+                  daemon.status !== "online"
+                  ? "Offline — sends when you reconnect"
+                  : active
+                    ? "Ask me anything..."
+                    : "Waiting for an agent..."
             }
             attachments={attachments}
             onAttach={openAttach}

@@ -3,7 +3,9 @@
  *
  * `connectProvider` spawns a real process, so most of it is not unit-testable
  * without one. What is tested here is the part that had no bound at all: an
- * agent that never answers `initialize`.
+ * agent that never answers `initialize` — plus, with one real spawn at the
+ * bottom, the process lifecycle: a child gets its own process group, and
+ * closing the session takes that whole group with it.
  *
  * That case is not hypothetical. A corrupt `npx` cache, an agent that prompts
  * for login on a stdin nobody is reading, or a package that simply does not
@@ -13,7 +15,17 @@
  * on a loading skeleton with nothing in the log.
  */
 import { expect, test } from "bun:test";
-import { HANDSHAKE_TIMEOUT_MARKER, restoreMethodFor, withTimeout } from "./connect.js";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  connectProvider,
+  HANDSHAKE_TIMEOUT_MARKER,
+  restoreMethodFor,
+  withTimeout,
+} from "./connect.js";
+import type { LoadedProvider } from "../providers/registry.js";
 
 test("a promise that never settles is rejected with the caller's error", async () => {
   const never = new Promise<string>(() => {});
@@ -107,4 +119,56 @@ test("without the transcript, the replay is the only way to draw the thread", ()
   // never fills — worse than the 500ms it saves.
   expect(restoreMethodFor(false, true)).toBe("session/load");
   expect(restoreMethodFor(false, false)).toBe("session/load");
+});
+
+/** The echo agent: a real ACP peer that needs no key, no network and no PATH. */
+const echoProvider: LoadedProvider = {
+  manifest: { id: "echo", name: "echo" } as LoadedProvider["manifest"],
+  source: "<test>",
+  command: "bun",
+  args: ["run", new URL("../testing/echo-agent.ts", import.meta.url).pathname],
+  missingEnv: [],
+  commandMissing: false,
+};
+
+// Process groups and `ps` are POSIX; the Windows path kills with `taskkill /T`
+// and cannot be asserted the same way.
+const posixTest = process.platform === "win32" ? test.skip : test;
+
+posixTest("a spawned agent is its own process group, and close() ends the group", async () => {
+  // Both halves of the same bug. Five bundled providers launch through `npx`,
+  // so the process spawned here is a launcher and the agent is its child:
+  // signalling only the launcher reparented the real agent to pid 1, where it
+  // ran until the machine rebooted. `detached` is the only thing that creates
+  // the group, and without the group there is nothing for `close()` to address.
+  //
+  // Redirected because connecting records the child in the daemon's own state
+  // directory, and a test must not write to the one a live daemon is reading.
+  const previousHome = process.env.PEW2_HOME;
+  process.env.PEW2_HOME = mkdtempSync(join(tmpdir(), "pew2-connect-"));
+
+  try {
+    const handle = await connectProvider({
+      provider: echoProvider,
+      cwd: tmpdir(),
+      onUpdate: () => {},
+      onPermissionRequest: () => {},
+    });
+
+    const pid = handle.child.pid!;
+    const exited = new Promise<void>((resolve) => handle.child.once("exit", () => resolve()));
+
+    // Its own group leader: the group id equals the pid, so `kill(-pid)` reaches
+    // this agent and its descendants and nothing else on the machine.
+    const group = Number(
+      execFileSync("ps", ["-o", "pgid=", "-p", String(pid)]).toString().trim(),
+    );
+    expect(group).toBe(pid);
+
+    handle.close();
+    await exited;
+  } finally {
+    if (previousHome === undefined) delete process.env.PEW2_HOME;
+    else process.env.PEW2_HOME = previousHome;
+  }
 });

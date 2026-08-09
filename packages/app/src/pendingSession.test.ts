@@ -80,6 +80,17 @@ test("requests that can no longer be answered are dropped on reconnect", () => {
   expect(dropPendingSessions(untouched)).toBe(untouched);
 });
 
+test("a request still queued offline survives the reconnect that will send it", () => {
+  const waiting = pendingSession("r1", "ggcoder", "Fix the bug", 10);
+  const keep = new Set([pendingSessionKey("r1")]);
+
+  expect(dropPendingSessions([other, waiting], keep)).toEqual([other, waiting]);
+  // A request that did reach the dead socket still goes: its answer was
+  // broadcast once, into nothing.
+  const abandoned = pendingSession("r2", "ggcoder", "Something else", 11);
+  expect(dropPendingSessions([waiting, abandoned], keep)).toEqual([waiting]);
+});
+
 test("pending ids are recognisable without being told", () => {
   expect(isPendingSession(pendingSessionKey("r1"))).toBe(true);
   expect(isPendingSession("agent:ggcoder:abc")).toBe(false);

@@ -195,6 +195,56 @@ test("a message missing what the daemon will use is refused", () => {
   }
 });
 
+test("a catch-up carries the approvals the agent is still blocked on", () => {
+  // Zod strips what it does not declare, so this schema is where a field is
+  // silently lost. That matters more here than for most: the app cannot infer
+  // an open request from the replayed events (a logged `permission_request` is
+  // history, and answered long ago in a resumed transcript), so if `params` did
+  // not survive the boundary a reconnecting phone would show the fallback
+  // "Allow/Reject" for a request whose real choices were something else — or,
+  // with the array dropped entirely, no sheet at all and an agent waiting for
+  // ever, since nothing times a permission out at either end.
+  const frame = ServerMessage.parse({
+    t: "session.replay",
+    sessionId: "s1",
+    events: [],
+    complete: true,
+    catchUp: true,
+    working: true,
+    permissions: [{ requestId: "perm_1", params: { toolCall: { title: "Run tests" } } }],
+  });
+  expect(frame).toMatchObject({
+    permissions: [{ requestId: "perm_1", params: { toolCall: { title: "Run tests" } } }],
+  });
+
+  // Optional in both directions that matter: an empty array is the daemon
+  // saying nothing is pending (which is what dismisses a sheet answered at the
+  // desk), and an omitted field is an older daemon that says nothing at all.
+  // The app tells those apart, so both have to reach it intact.
+  expect(
+    ServerMessage.parse({ t: "session.replay", sessionId: "s1", events: [], permissions: [] }),
+  ).toMatchObject({ permissions: [] });
+  expect(
+    (ServerMessage.parse({ t: "session.replay", sessionId: "s1", events: [] }) as {
+      permissions?: unknown;
+    }).permissions,
+    // Undefined rather than absent-as-a-key: what the app branches on is the
+    // value, and asserting the key's absence would test Zod's output style
+    // rather than the distinction this carries.
+  ).toBeUndefined();
+
+  // An entry with no id is unanswerable, and would render a button that posts
+  // `undefined` at the daemon.
+  expect(
+    ServerMessage.safeParse({
+      t: "session.replay",
+      sessionId: "s1",
+      events: [],
+      permissions: [{ params: {} }],
+    }).success,
+  ).toBe(false);
+});
+
 test("a push registration is a client message, and needs a real platform", () => {
   // Additive rather than a `WIRE_VERSION` bump: an older daemon answers
   // `unknown_message` and the app keeps its local-only banners, instead of the

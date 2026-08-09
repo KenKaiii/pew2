@@ -71,6 +71,17 @@ function TurnView({ turn, onOpenThought }: TurnProps) {
           )}
           <ChatImages images={images} />
         </View>
+        {/* A message typed with no signal. Shown as what it is — sent, waiting
+            on the network — rather than as an error, because nothing has
+            failed: the reconnect delivers it. Under the bubble and quiet, so a
+            thread queued up offline reads as a conversation rather than as a
+            column of warnings. */}
+        {turn.queued && (
+          <View style={styles.queuedRow}>
+            <Ionicons name="time-outline" size={12} color={theme.color.textDim} />
+            <Text style={styles.queuedLabel}>Sends when you're back online</Text>
+          </View>
+        )}
       </View>
     );
   }
@@ -131,6 +142,9 @@ export const Turn = memo(
     before.onOpenThought === after.onOpenThought &&
     before.turn.text === after.turn.text &&
     before.turn.role === after.turn.role &&
+    // The one flag that is drawn: without it the label would outlive the
+    // message going out, which is the moment it stops being true.
+    before.turn.queued === after.turn.queued &&
     // Identity is enough: images are only ever appended as a new array, and
     // comparing sources would walk megabytes of inline base64 per render.
     before.turn.images === after.turn.images,
@@ -145,6 +159,14 @@ const styles = StyleSheet.create({
     paddingHorizontal: theme.space(3.5),
     paddingVertical: theme.space(2.75),
   },
+  queuedRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.space(1),
+    paddingTop: theme.space(1),
+    paddingRight: theme.space(1),
+  },
+  queuedLabel: { color: theme.color.textDim, fontSize: theme.font.small },
   // Stacked rather than inline: instructions are markdown and may run to
   // several lines, which would not wrap cleanly beside the token.
   commandPrompt: { gap: theme.space(1) },

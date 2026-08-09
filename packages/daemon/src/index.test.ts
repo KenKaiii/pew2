@@ -54,6 +54,7 @@ function plantSession(daemon: Daemon, sessionId: string) {
     providerId: string;
     live: boolean;
     working?: boolean;
+    permissions?: Map<string, unknown>;
   } = {
     handle: {} as AcpSessionHandle,
     log: new SessionLog(sessionId),
@@ -357,8 +358,59 @@ test("a catch-up reports a turn that ended while the client was away", () => {
   session.working = false;
 
   expect(daemon.catchUp({ done: -1 })[0]).toMatchObject({ working: false });
-  // Nothing missed and nothing running is nothing to say.
-  expect(daemon.catchUp({ done: 0 })).toEqual([]);
+  // Still answered when nothing was missed and nothing is running. The frame
+  // costs a few bytes and carries the two facts a returning client cannot infer
+  // for itself: the turn is over, and no approval is waiting.
+  expect(daemon.catchUp({ done: 0 })[0]).toMatchObject({
+    events: [],
+    working: false,
+    permissions: [],
+  });
+});
+
+test("a catch-up re-states an approval the agent is still blocked on", () => {
+  // The failure this closes: the phone loses signal, the agent asks to run a
+  // command, and the request event is replayed but deliberately ignored as
+  // history — so the sheet never came back, and since neither ACP nor this
+  // daemon times a permission out, the turn stopped for good. Only the daemon
+  // knows which requests are still open; the resolver lives with the
+  // connection.
+  const { daemon } = daemonWithCollector();
+  const session = plantSession(daemon, "blocked");
+  daemon.markLive("blocked");
+  session.working = true;
+  session.permissions = new Map([["perm_1", { toolCall: { title: "Run tests" } }]]);
+  (daemon as any).record(session, { kind: "permission_request", requestId: "perm_1" });
+
+  // Even with nothing missed: the client saw the request go by and then lost
+  // the socket before the user could answer it.
+  expect(daemon.catchUp({ blocked: 0 })[0]).toMatchObject({
+    permissions: [{ requestId: "perm_1", params: { toolCall: { title: "Run tests" } } }],
+  });
+
+  // Answered, so no longer something to come back to — and reported as an empty
+  // array rather than an absent field. The app reads absent as "an older daemon
+  // said nothing, leave the sheet alone" and empty as "dismiss it", so this is
+  // the frame that clears a sheet the user answered at the desk while the phone
+  // was offline.
+  session.handle = { answerPermission: () => true } as unknown as AcpSessionHandle;
+  daemon.answerPermission("blocked", "perm_1", "allow");
+  expect(session.permissions.size).toBe(0);
+  expect((daemon.catchUp({ blocked: 0 })[0] as any)?.permissions).toEqual([]);
+});
+
+test("an answer the connection does not recognise leaves other requests pending", () => {
+  // `answerPermission` returns false when the request is already resolved — a
+  // stale sheet, or a second client answering first. Forgetting it on that
+  // basis would drop a *different* request that is genuinely still open, which
+  // is the same hang from the other direction.
+  const { daemon } = daemonWithCollector();
+  const session = plantSession(daemon, "stale");
+  session.handle = { answerPermission: () => false } as unknown as AcpSessionHandle;
+  session.permissions = new Map([["perm_2", {}]]);
+
+  expect(daemon.answerPermission("stale", "perm_1", "allow")).toBe(false);
+  expect([...session.permissions.keys()]).toEqual(["perm_2"]);
 });
 
 test("a catch-up never invents a session the client was not introduced to", () => {

@@ -143,7 +143,7 @@ function ComposerView({
   onSend,
   busy = false,
   onStop,
-  placeholder = "Ask me. Task me...",
+  placeholder = "Ask me anything...",
   editable = true,
   attachments = EMPTY_ATTACHMENTS,
   onAttach,

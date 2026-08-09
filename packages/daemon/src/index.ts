@@ -81,6 +81,20 @@ interface ActiveSession {
    */
   working?: boolean;
   /**
+   * Approval requests the agent is blocked on, oldest first.
+   *
+   * The ACP request is still open — its resolver is sitting in the connection
+   * waiting for `answerPermission` — and nothing but this daemon knows that. A
+   * client that was offline when it was asked has no way back to it: the logged
+   * `permission_request` event is skipped on replay (in history it was answered
+   * long ago), so the sheet never reappeared and the turn stayed stopped for
+   * ever. `catchUp` hands these back so a reconnecting phone can answer.
+   *
+   * Keyed by request id and insertion-ordered: an agent can have several tools
+   * in flight, and answering one must not drop the rest.
+   */
+  permissions?: Map<string, unknown>;
+  /**
    * What the agent has said so far in the current turn.
    *
    * Only the daemon can supply the body of a push notification: by the time a
@@ -606,8 +620,13 @@ export class Daemon {
   ): Promise<void> {
     const callbacks = {
       onUpdate: (payload: unknown) => this.record(session, payload),
-      onPermissionRequest: ({ requestId, params }: { requestId: string; params: unknown }) =>
-        this.record(session, { kind: "permission_request", requestId, params }),
+      onPermissionRequest: ({ requestId, params }: { requestId: string; params: unknown }) => {
+        // Held before the event goes out, for the same reason the resolver is
+        // registered before the UI is notified: an answer can come back on the
+        // very next frame, and it must find this here to remove.
+        (session.permissions ??= new Map()).set(requestId, params);
+        this.record(session, { kind: "permission_request", requestId, params });
+      },
       onConfigOptions: (configOptions: ConfigOption[]) =>
         this.publishConfigOptions(session, configOptions),
       onExit: (code: number | null) => this.record(session, { kind: "exit", code }),
@@ -1557,6 +1576,12 @@ export class Daemon {
       await session.handle!.prompt(text, stored);
     } finally {
       session.working = false;
+      // A turn cannot end while the agent is still waiting to be let past a
+      // tool: it is blocked on that answer. So anything left here was killed
+      // with the turn — cancelled, or the agent errored out — and offering it
+      // to the next client to reconnect would be an approve button wired to a
+      // request no one is listening for any more.
+      session.permissions?.clear();
       // Touched again at the end, so the idle window is measured from when the
       // agent stopped rather than from when the user typed. A turn that ran for
       // twenty minutes would otherwise be reapable the moment it finished.
@@ -1571,7 +1596,14 @@ export class Daemon {
   }
 
   answerPermission(sessionId: string, requestId: string, optionId: string) {
-    return this.require(sessionId).handle?.answerPermission(requestId, optionId) ?? false;
+    const session = this.require(sessionId);
+    const answered = session.handle?.answerPermission(requestId, optionId) ?? false;
+    // Only on a real answer. A `false` means the connection had no such request
+    // — a stale sheet from a previous turn, or a second client answering one
+    // that was already resolved — and forgetting it here on that basis would
+    // hide a *different*, still-open request from the next catch-up.
+    if (answered) session.permissions?.delete(requestId);
+    return answered;
   }
 
   /**
@@ -1652,9 +1684,18 @@ export class Daemon {
       // would break the same invariant `markLive` exists to hold.
       if (!session || !session.live) continue;
       const events = this.replay(sessionId, cursor);
+      const permissions = [...(session.permissions ?? [])].map(([requestId, params]) => ({
+        requestId,
+        params,
+      }));
       // A client that missed nothing still needs the running flag: it may have
       // been away for the `session.idle` that ended the turn it last saw.
-      if (events.length === 0 && !session.working) continue;
+      //
+      // Every known session gets a frame, including one with nothing to report.
+      // "No events, not working, nothing pending" is not silence — it is the
+      // answer that dismisses an approval sheet the user resolved at the desk
+      // while this phone was away, and skipping it left that sheet up for ever,
+      // wired to a requestId the daemon has already forgotten.
       frames.push({
         t: "session.replay",
         sessionId,
@@ -1662,6 +1703,11 @@ export class Daemon {
         complete: true,
         catchUp: true,
         working: session.working === true,
+        // Always sent, empty array included. The app reads an *absent* field as
+        // "an older daemon says nothing, leave any open sheet alone" and an
+        // empty one as "nothing is pending, dismiss it" — so omitting it made
+        // the second case unreachable.
+        permissions,
       });
     }
     return frames;

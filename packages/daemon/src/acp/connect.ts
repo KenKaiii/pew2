@@ -15,6 +15,7 @@ import { promptBlocks, type PromptCapabilities } from "./promptBlocks.js";
 import { SESSION_HISTORY_LIMIT } from "../session-history.js";
 import { hydrateMessageCounts } from "./messageCounts.js";
 import { foldProjects, type AgentProject } from "../projects.js";
+import { DETACH_CHILDREN, registerChild, terminateChild, unregisterChild } from "../children.js";
 
 /**
  * A session-level selector advertised by the agent: model, thinking level, mode.
@@ -426,6 +427,13 @@ export async function connectProvider(options: ConnectOptions): Promise<AcpSessi
     // ACP mandates stdout carry only protocol messages, so logs go to stderr.
     stdio: ["pipe", "pipe", "pipe"],
     env: process.env,
+    // Its own process group, so `kill` can address the whole tree. Five bundled
+    // providers run through `npx`: signalling only the process we spawned kills
+    // the launcher and reparents the real agent to pid 1, where it runs until
+    // the machine reboots. Detaching also stops a terminal's Ctrl-C reaching
+    // agents directly — the daemon's own handler closes them in order instead.
+    // Never on Windows, where the same flag means "outlive the parent".
+    detached: DETACH_CHILDREN,
   }) as ChildProcessWithoutNullStreams;
 
   // A missing executable surfaces asynchronously as an 'error' event. Without a
@@ -446,10 +454,37 @@ export async function connectProvider(options: ConnectOptions): Promise<AcpSessi
   });
   await spawned;
 
+  // Recorded so that a daemon which dies without running a handler — SIGKILL,
+  // OOM, panic — can still be cleaned up after, by the next one to start.
+  const pid = child.pid;
+  if (pid !== undefined) {
+    void registerChild({
+      pid,
+      providerId: provider.manifest.id,
+      fallbackCommand: [provider.command, ...provider.args].join(" "),
+    });
+  }
+
   // The exit listener is re-pointed on `adopt`, so a reused process reports
   // its death to the session currently living on it, not the first one.
   let exitHandler = options.onExit;
-  child.on("exit", (code, signal) => exitHandler?.(code, signal));
+  let exited = false;
+  child.on("exit", (code, signal) => {
+    exited = true;
+    if (pid !== undefined) void unregisterChild(pid);
+    exitHandler?.(code, signal);
+  });
+
+  /**
+   * SIGTERM to the whole group, SIGKILL to whatever ignored it.
+   *
+   * @param graceMs Time between the two. Zero for a process already known to be
+   * wedged, where the request is a formality.
+   */
+  const stop = (graceMs?: number) => {
+    if (exited || pid === undefined) return;
+    terminateChild(pid, () => exited, graceMs);
+  };
 
   // Always read stderr, even with no `onStderr` listener. An agent that fails to
   // hand shake explains itself there and nowhere else — `npm error ENOENT` from a
@@ -582,8 +617,10 @@ export async function connectProvider(options: ConnectOptions): Promise<AcpSessi
     options.handshakeTimeoutMs ?? HANDSHAKE_TIMEOUT_MS,
     () => {
       // The process is wedged, not merely slow: leaving it running would leak a
-      // child per attempt for as long as the user keeps tapping.
-      child.kill("SIGKILL");
+      // child per attempt for as long as the user keeps tapping. No grace, since
+      // it has already failed to answer for the whole handshake window — but by
+      // group, or a wrapped agent survives the launcher it was started behind.
+      stop(0);
       return new Error(
         `'${provider.manifest.name}' ${HANDSHAKE_TIMEOUT_MARKER}. ${failureContext()}`,
       );
@@ -887,7 +924,7 @@ export async function connectProvider(options: ConnectOptions): Promise<AcpSessi
     },
     close() {
       connection.close();
-      child.kill();
+      stop();
     },
   };
 }

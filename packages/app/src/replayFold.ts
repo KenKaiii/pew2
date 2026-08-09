@@ -14,7 +14,8 @@ import { isEmptyChunk, readChunk, type Chunk } from "./chunks";
 import { joinChunks } from "./chunkJoin";
 import { readUsage, type ContextUsage } from "./contextUsage";
 import { dedupeImages } from "./images";
-import type { Session, Turn } from "./useDaemon";
+import { pendingPermission, readPermissionRequest } from "./permissions";
+import type { PermissionRequest, Session, Turn } from "./useDaemon";
 
 /** True for a user turn rendered before the daemon echoed it back. */
 export function isOptimistic(turn: Turn): boolean {
@@ -76,7 +77,11 @@ export function applyChunk(turns: Turn[], key: string, chunk: Chunk): void {
       ? turns.findIndex((turn) => isOptimistic(turn) && turn.text === chunk.text)
       : -1;
   if (optimistic >= 0) {
-    turns[optimistic] = { ...turns[optimistic]!, id: key };
+    // The daemon has the message, so it is not waiting for a socket whatever
+    // the outbox flush managed to update first: the echo is the stronger
+    // evidence, and a bubble must never keep the label after the agent has it.
+    const { queued: _queued, ...adopted } = turns[optimistic]!;
+    turns[optimistic] = { ...adopted, id: key };
   } else if (last && last.role === chunk.role && chunk.role !== "user") {
     // Coalesce consecutive chunks of the same role into one bubble.
     turns[turns.length - 1] = mergeChunk(last, chunk);
@@ -138,6 +143,33 @@ interface FoldState {
   usage?: ContextUsage;
 }
 
+/**
+ * Remember (or forget) what a conversation is blocked on, in its own row.
+ *
+ * Per session rather than only on screen, because the conversation waiting for
+ * an answer is very often not the one being read: the daemon keeps every agent
+ * running while the phone looks at one of them. Held here, opening that
+ * conversation shows the sheet instead of a spinner over a turn that stopped
+ * minutes ago.
+ *
+ * Returns `prev` untouched when nothing changes, so a catch-up carrying no
+ * approvals for a session that had none costs a lookup and no render.
+ */
+function recordPermission<S extends { sessions: Session[] }>(
+  prev: S,
+  sessionId: string | undefined,
+  permission: PermissionRequest | undefined,
+): S {
+  if (!sessionId) return prev;
+  const at = prev.sessions.findIndex((session) => session.id === sessionId);
+  if (at < 0) return prev;
+  const session = prev.sessions[at]!;
+  if (session.permission?.requestId === permission?.requestId) return prev;
+  const sessions = [...prev.sessions];
+  sessions[at] = { ...session, permission };
+  return { ...prev, sessions };
+}
+
 interface CatchUpState extends FoldState {
   activity: Activity;
   loadingSession: boolean;
@@ -166,14 +198,25 @@ export function foldCatchUp<S extends CatchUpState>(
   events: readonly ReplayEvent[],
   working: boolean,
   now: number,
+  permissions?: unknown,
 ): S {
   const folded = foldSessionEvents(prev, events);
   let activity = prev.activity;
   for (const event of events) activity = foldActivity(activity, event.payload, now);
-  return {
+  // Undefined means the daemon said nothing about approvals (an older one), so
+  // whatever is on screen stands. `null` is it saying there are none, which is
+  // what takes down a sheet answered from the desktop while this phone was off
+  // the air.
+  const open = pendingPermission(permissions);
+  const permission = open === undefined ? (prev.permission as PermissionRequest | undefined) : (open ?? undefined);
+  const next = {
     ...folded,
     loadingSession: false,
-    busy: working,
+    // An agent blocked on approval is not working, whatever the flag says: it
+    // is waiting for this device. Showing a spinner there is what made the
+    // stall look like the drop had never ended.
+    busy: permission ? false : working,
+    permission,
     // A finished turn has nothing left to name. Its receipt is deliberately not
     // reconstructed here: this device never timed the turn, and "Answered in 0s"
     // is a worse answer than no receipt at all.
@@ -184,6 +227,7 @@ export function foldCatchUp<S extends CatchUpState>(
         : session,
     ),
   };
+  return open === undefined ? next : recordPermission(next, sessionId, permission);
 }
 
 /**
@@ -197,11 +241,13 @@ export function foldCatchUp<S extends CatchUpState>(
  * away while an agent worked therefore meant returning to your own prompt and
  * nothing under it, with the answer already delivered and thrown away.
  *
- * Deliberately narrow: turns, title and `busy`, and nothing else. `activity`,
- * `receipt`, `permission` and `usage` all describe the transcript on screen —
- * a background session's tool calls were never rendered, its context meter
- * belongs to another project, and its permission prompt would appear over a
- * conversation that did not ask for it.
+ * Deliberately narrow: turns, title, `busy`, and the approval it is stuck on.
+ * `activity`, `receipt` and `usage` all describe the transcript on screen — a
+ * background session's tool calls were never rendered and its context meter
+ * belongs to another project. An approval is the exception, and only because
+ * it is filed against the conversation rather than raised: putting another
+ * conversation's sheet on screen is still wrong, but silently dropping it left
+ * that agent stopped for ever with nothing anywhere saying why.
  *
  * Returns `prev` unchanged when there is nothing to apply, so a session the
  * drawer has not heard of and an event carrying no chunk both cost one lookup
@@ -214,6 +260,8 @@ export function foldBackgroundEvent<S extends { sessions: Session[] }>(
   payload: unknown,
 ): S {
   if (!sessionId) return prev;
+  const permission = readPermissionRequest(payload);
+  if (permission) return recordPermission(prev, sessionId, permission);
   const chunk = readChunk(payload);
   if (!chunk || isEmptyChunk(chunk)) return prev;
   const at = prev.sessions.findIndex((session) => session.id === sessionId);
@@ -254,12 +302,23 @@ export function foldBackgroundCatchUp<S extends { sessions: Session[] }>(
   sessionId: string | undefined,
   events: readonly ReplayEvent[],
   working: boolean,
+  permissions?: unknown,
 ): S {
   if (!sessionId) return prev;
   let next = prev;
   for (const event of events) {
+    // A request *in* the batch is not evidence it is still open: the desktop may
+    // have answered it during the same blackout, and the frame below is the only
+    // thing that knows. Taking it from the event would file an approval the
+    // agent has already been let past — the phantom sheet the visible fold
+    // avoids by ignoring these too.
+    if (readPermissionRequest(event.payload)) continue;
     next = foldBackgroundEvent(next, sessionId, `${sessionId}:${event.seq}`, event.payload);
   }
+  // So the daemon's list is the whole story: it holds the resolvers, so it alone
+  // knows what is still waiting.
+  const open = pendingPermission(permissions);
+  if (open !== undefined) next = recordPermission(next, sessionId, open ?? undefined);
   const at = next.sessions.findIndex((session) => session.id === sessionId);
   if (at < 0 || next.sessions[at]!.busy === working) return next;
   const sessions = [...next.sessions];

@@ -65,22 +65,16 @@ function hasNativeLiquidGlass(): boolean {
 }
 
 /**
- * Hoisted per tier. Recreating these arrays in render pushed new props to the
- * native gradient on every keystroke, because the composer's glass re-renders
- * with the draft. There are only two tiers, so both variants are cheaper to
- * spell out than to build.
+ * Fallback platforms only: the native material draws its own highlight and
+ * edge, so this stands in for it where there is none.
+ *
+ * Hoisted per tier because recreating the array in render pushed new props to
+ * the gradient on every keystroke, the composer's glass re-rendering with the
+ * draft. There are only two tiers, so both are cheaper to spell out than build.
  */
-const HIGHLIGHT: Record<"control" | "raised", readonly [string, string, string]> = {
-  raised: ["rgba(255,255,255,0.22)", "rgba(255,255,255,0.025)", "rgba(255,255,255,0)"],
-  control: ["rgba(255,255,255,0.14)", "rgba(255,255,255,0.025)", "rgba(255,255,255,0)"],
-};
 const BLUR_HIGHLIGHT: Record<"control" | "raised", readonly [string, string, string]> = {
   raised: ["rgba(255,255,255,0.22)", "rgba(255,255,255,0.035)", "rgba(255,255,255,0)"],
   control: ["rgba(255,255,255,0.14)", "rgba(255,255,255,0.035)", "rgba(255,255,255,0)"],
-};
-const NATIVE_RIM: Record<"control" | "raised", string> = {
-  raised: "rgba(255,255,255,0.34)",
-  control: "rgba(255,255,255,0.28)",
 };
 const ACCESSIBLE_FILL: Record<"control" | "raised", string> = {
   raised: "rgba(47,47,52,0.98)",
@@ -102,6 +96,14 @@ export function Glass({
   const { fill, rim } = theme.glass[tier];
 
   if (hasNativeLiquidGlass() && !reduceTransparency) {
+    // Nothing is layered over the material, deliberately. `regular` is Apple's
+    // own default glass: it already carries its specular highlight, its edge,
+    // and the system's tint, motion and contrast adaptations. A gradient and a
+    // rim of our own on top do not make it glassier — they sit *between* the
+    // material and the content as a fixed sheen that cannot respond to what is
+    // behind it, which is exactly what made these controls read as painted
+    // rather than as glass. The fallback below still needs both, because there
+    // it has no material to sit on.
     return (
       <GlassView
         glassEffectStyle="regular"
@@ -110,16 +112,8 @@ export function Glass({
         // child own hit-testing; otherwise UIVisualEffectView can swallow taps.
         isInteractive={interactive}
         pointerEvents="box-none"
-        style={[styles.material, { borderRadius: radius, borderColor: NATIVE_RIM[tier] }, style]}
+        style={[styles.native, { borderRadius: radius }, style]}
       >
-        <LinearGradient
-          colors={HIGHLIGHT[tier]}
-          locations={HIGHLIGHT_LOCATIONS}
-          start={HIGHLIGHT_START}
-          end={HIGHLIGHT_END}
-          style={StyleSheet.absoluteFill}
-          pointerEvents="none"
-        />
         {children}
       </GlassView>
     );
@@ -160,7 +154,6 @@ export function Glass({
   );
 }
 
-
 const styles = StyleSheet.create({
   /**
    * The rim is a border on the clipping view itself, never a second
@@ -170,6 +163,8 @@ const styles = StyleSheet.create({
    * one rounded path: the platform strokes the same curve it clips to.
    */
   material: { overflow: "hidden", borderWidth: StyleSheet.hairlineWidth },
+  /** Same clipping, no rim: the native material draws its own edge. */
+  native: { overflow: "hidden" },
   lowerShade: {
     position: "absolute",
     left: 0,

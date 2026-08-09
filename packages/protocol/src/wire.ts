@@ -559,6 +559,24 @@ export const Replay = z.object({
    * busy forever after catching up on a finished turn.
    */
   working: z.boolean().optional(),
+  /**
+   * Approval requests this session is still blocked on, on a catch-up frame.
+   *
+   * The one piece of a turn that a replayed event stream cannot carry. A
+   * permission request *is* in the log, but the app deliberately ignores it
+   * there: in a resumed transcript it was answered long ago, and raising it
+   * again is a phantom approve sheet over finished history. So a phone that
+   * dropped its signal at the wrong moment came back to a spinner, with the
+   * agent on the desktop waiting on an answer nobody could give — no timeout on
+   * either side, so the turn simply stopped.
+   *
+   * This is the daemon saying which requests are open *right now*, which only
+   * it can know: the resolver lives with the ACP connection. Same shape as the
+   * logged event's payload, so both paths render through one reader.
+   */
+  permissions: z
+    .array(z.object({ requestId: z.string(), params: z.unknown() }))
+    .optional(),
 });
 
 /**

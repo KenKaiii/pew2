@@ -97,6 +97,13 @@ test("adoption keeps the render key, so the prompt does not remount", () => {
   expect(next.turns[0]?.key).toBe("local:0");
 });
 
+test("a queued prompt stops saying so once the daemon echoes it back", () => {
+  const waiting: Turn = { id: "local:0", key: "local:0", role: "user", text: "Hello", queued: true };
+  const next = foldSessionEvents(state([waiting], [sessionStub]), [user(0, "Hello")]);
+
+  expect(next.turns[0]?.queued).toBeUndefined();
+});
+
 test("a replay is history: it never marks the session busy", () => {
   // The looping-indicator bug: the fold used to set busy from the last chunk,
   // and a resumed thread's last chunk is always a message.
@@ -249,6 +256,109 @@ test("a catch-up on a turn that already ended settles, rather than spinning", ()
   expect(next.busy).toBe(false);
   expect(next.activity).toBe(IDLE_ACTIVITY);
   expect(next.sessions[0]?.busy).toBe(false);
+});
+
+const permissionEvent = (seq: number, requestId: string, title: string) => ({
+  sessionId: "s1",
+  seq,
+  payload: { kind: "permission_request", requestId, params: { toolCall: { title } } },
+});
+
+test("a catch-up puts back the approval the agent is still waiting on", () => {
+  // The hang this closes: signal drops between the agent asking and the user
+  // tapping. The request *is* in the replayed events, but it is skipped there on
+  // purpose (in history it was answered long ago), so the sheet never came back
+  // — and nothing times a permission out, so the turn stopped for good. The
+  // daemon states the open ones separately, which is the only source that knows.
+  const before = {
+    ...state([], [sessionStub]),
+    activity: IDLE_ACTIVITY,
+    loadingSession: false,
+  };
+
+  const next = foldCatchUp(before, "s1", [permissionEvent(0, "p1", "Run bash?")], true, 1_000, [
+    { requestId: "p1", params: { toolCall: { title: "Run bash?" } } },
+  ]);
+
+  expect(next.permission).toMatchObject({ requestId: "p1", title: "Run bash?" });
+  // Waiting on this device is not working, whatever the daemon's flag says.
+  expect(next.busy).toBe(false);
+  // Filed on the conversation too, so leaving the screen does not lose it.
+  expect(next.sessions[0]?.permission?.requestId).toBe("p1");
+});
+
+test("a catch-up takes down a sheet that was answered elsewhere", () => {
+  // The desk answered it while the phone was off the air. An empty list is the
+  // daemon saying so, and it has to be acted on: an approve button wired to a
+  // resolved request does nothing at all when tapped.
+  const before = {
+    ...state([], [{ ...sessionStub, permission: { requestId: "p1", title: "Run bash?", options: [] } }]),
+    permission: { requestId: "p1", title: "Run bash?", options: [] },
+    activity: IDLE_ACTIVITY,
+    loadingSession: false,
+  };
+
+  const next = foldCatchUp(before, "s1", [], true, 1_000, []);
+
+  expect(next.permission).toBeUndefined();
+  expect(next.sessions[0]?.permission).toBeUndefined();
+  expect(next.busy).toBe(true);
+});
+
+test("a daemon that says nothing about approvals leaves the sheet alone", () => {
+  // An older daemon omits the field entirely. Absent is not "none": treating it
+  // as none would dismiss a live request the user is looking at.
+  const permission = { requestId: "p1", title: "Run bash?", options: [] };
+  const before = {
+    ...state([], [sessionStub]),
+    permission,
+    activity: IDLE_ACTIVITY,
+    loadingSession: false,
+  };
+
+  expect(foldCatchUp(before, "s1", [], true, 1_000).permission).toBe(permission);
+});
+
+test("an approval for a conversation off screen is filed, not shown", () => {
+  // It belongs to that agent, which is stopped until someone answers. Raising it
+  // over the conversation being read would be answering the wrong session; not
+  // recording it at all left the other agent stopped with nothing saying why.
+  const background = { ...sessionStub, id: "s2" };
+  const next = foldBackgroundCatchUp(state([], [sessionStub, background]), "s2", [], true, [
+    { requestId: "p9", params: { toolCall: { title: "Delete node_modules?" } } },
+  ]);
+
+  expect(next.sessions[1]?.permission).toMatchObject({ requestId: "p9" });
+  expect((next as { permission?: unknown }).permission).toBeUndefined();
+});
+
+test("a request inside a catch-up batch is not trusted on its own", () => {
+  // It may have been answered at the desk during the same blackout. Only the
+  // daemon holds the resolvers, so only its list decides — taking it from the
+  // replayed event would file an approval the agent was let past minutes ago,
+  // and leave a button that posts a dead id.
+  const background = { ...sessionStub, id: "s2" };
+  const missed = [{ sessionId: "s2", seq: 3, payload: { kind: "permission_request", requestId: "p1" } }];
+
+  expect(
+    foldBackgroundCatchUp(state([], [background]), "s2", missed, true, []).sessions[0]?.permission,
+  ).toBeUndefined();
+  // Still open per the daemon, so it is filed — from the frame, not the event.
+  expect(
+    foldBackgroundCatchUp(state([], [background]), "s2", missed, true, [{ requestId: "p1" }])
+      .sessions[0]?.permission?.requestId,
+  ).toBe("p1");
+});
+
+test("a live request in a background conversation is filed on its row", () => {
+  const background = { ...sessionStub, id: "s2" };
+  const next = foldBackgroundEvent(state([], [background]), "s2", "s2:4", {
+    kind: "permission_request",
+    requestId: "p3",
+    params: { toolCall: { title: "Push to main?" } },
+  });
+
+  expect(next.sessions[0]?.permission).toMatchObject({ requestId: "p3", title: "Push to main?" });
 });
 
 test("a catch-up dismisses the loading skeleton it arrived behind", () => {

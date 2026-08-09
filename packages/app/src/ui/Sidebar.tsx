@@ -25,7 +25,7 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import Ionicons from "@expo/vector-icons/Ionicons";
 import { theme } from "../theme";
-import { Orb } from "./Orb";
+import { AgentChip } from "./AgentChip";
 import { touchSlop } from "./controls";
 import { Glass } from "./Glass";
 import { haptics } from "./haptics";
@@ -83,15 +83,6 @@ interface SidebarProps {
 const MAX_STAGGERED_ROWS = 14;
 const ROW_STAGGER_MS = 18;
 const ROW_REVEAL_MS = 180;
-
-function selectedProviderTint(color: string = theme.color.orb) {
-  return {
-    // Carry the agent's identity beyond the small orb while keeping white text
-    // comfortably legible on every manifest colour.
-    backgroundColor: `${color}3d`,
-    borderColor: `${color}8c`,
-  };
-}
 
 /**
  * The dot beside a conversation title: working, or finished while you were
@@ -455,43 +446,12 @@ function SidebarView({
             contentContainerStyle={styles.agentRow}
           >
             {orderedProviders.map((provider) => (
-              <Glass
+              <AgentChip
                 key={provider.id}
-                radius={theme.radius.pill}
-                interactive={provider.available}
-                style={!provider.available && styles.chipDisabled}
-              >
-                <Pressable
-                  disabled={!provider.available}
-                  accessibilityRole="button"
-                  accessibilityLabel={
-                    provider.available
-                      ? provider.name
-                      : `${provider.name}, unavailable. ${provider.unavailableReason ?? ""}`
-                  }
-                  accessibilityState={{
-                    selected: provider.id === activeProviderId,
-                    disabled: !provider.available,
-                  }}
-                  onPress={() => {
-                    haptics.select();
-                    onSelectProvider(provider.id);
-                  }}
-                  style={({ pressed }) => [
-                    styles.agentChip,
-                    provider.id === activeProviderId && selectedProviderTint(provider.color),
-                    pressed && provider.available && styles.pressed,
-                  ]}
-                >
-                  {/* Below MATRIX_MIN_SIZE, so this is the static silhouette —
-                      two plain views, nothing animating behind a closed
-                      drawer. */}
-                  <Orb color={provider.color} size={18} />
-                  <Text style={styles.agentChipText} numberOfLines={1}>
-                    {provider.name}
-                  </Text>
-                </Pressable>
-              </Glass>
+                provider={provider}
+                selected={provider.id === activeProviderId}
+                onPress={onSelectProvider}
+              />
             ))}
           </ScrollView>
 
@@ -725,7 +685,8 @@ const styles = StyleSheet.create({
     // the title and the hamburger beside it share one baseline.
     paddingHorizontal: theme.gutter,
     height: theme.size.control,
-    marginBottom: theme.space(3),
+    // One step, shared by every gap down this column.
+    marginBottom: theme.sectionGap,
   },
   headerTitleRow: {
     flexDirection: "row",
@@ -764,21 +725,6 @@ const styles = StyleSheet.create({
     gap: theme.space(2),
     alignItems: "center",
   },
-  agentChip: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: theme.space(2),
-    height: theme.size.chip,
-    paddingHorizontal: theme.space(3.5),
-    borderRadius: theme.radius.pill,
-  },
-  agentChipText: {
-    color: theme.color.text,
-    fontSize: theme.font.small,
-    lineHeight: theme.font.small + 4,
-    maxWidth: 140,
-  },
-  chipDisabled: { opacity: 0.4 },
   pressed: { opacity: 0.6 },
 
   // A heading, not a caption: the drawer has two sections and they are peers,
@@ -798,12 +744,12 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     gap: theme.space(2),
     paddingHorizontal: theme.gutter,
-    paddingTop: theme.space(5),
+    paddingTop: theme.sectionGap,
     paddingBottom: theme.space(2),
     // Always the chip's height, whether or not the chip is there. Otherwise
     // choosing a project grows this row and shoves the whole list down a
     // centimetre — the button's own spring lands on top of a jump.
-    minHeight: theme.size.control + theme.space(7),
+    minHeight: theme.size.chip + theme.sectionGap + theme.space(2),
   },
   newChip: {
     flexDirection: "row",

@@ -45,7 +45,11 @@ function ProjectSelectView({ selected, count, open, onToggle, onLayout }: Projec
 
   return (
     <View style={styles.host} onLayout={onLayout}>
-      <Glass radius={theme.radius.md} interactive>
+      {/* `radius.pill`, matching the model and config selectors in the top bar.
+          This is the same kind of control — a labelled value that opens a menu —
+          and it was the one rounded rectangle among them, which read as a
+          different species of thing. */}
+      <Glass radius={theme.radius.pill} interactive>
         <Pressable
           accessibilityRole="button"
           // Named as a setting with a value, so it is spoken as "Project, all
@@ -88,13 +92,15 @@ function ProjectSelectView({ selected, count, open, onToggle, onLayout }: Projec
 const styles = StyleSheet.create({
   // Same gutter as the chips above and the list below: this is a rail the whole
   // drawer shares, and stepping it in would read as a nested panel.
-  host: { marginHorizontal: theme.gutter, marginTop: theme.space(3) },
+  host: { marginHorizontal: theme.gutter, marginTop: theme.sectionGap },
   control: {
     flexDirection: "row",
     alignItems: "center",
-    gap: theme.space(2),
+    // Both taken from `Pill` in `controls.tsx`, so this control has the same
+    // anatomy as its peers rather than merely the same corner radius.
+    gap: theme.space(1.5),
     height: theme.size.control,
-    paddingHorizontal: theme.space(3),
+    paddingHorizontal: theme.space(4),
   },
   label: {
     color: theme.color.text,

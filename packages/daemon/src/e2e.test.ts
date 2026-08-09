@@ -273,7 +273,7 @@ test("a catch-up says the turn is still running, which no replayed event can", a
   back.close();
 }, 30_000);
 
-test("a finished turn sends no catch-up at all, so a quiet row stays quiet", async () => {
+test("a finished turn catches up as settled, with no events and nothing pending", async () => {
   const { app, sessionId } = await withSession("r-settled");
   app.send({ t: "session.prompt", sessionId, text: "settle down" });
   await app.waitFor((f) => f.t === "session.idle" && f.sessionId === sessionId, "idle");
@@ -281,10 +281,18 @@ test("a finished turn sends no catch-up at all, so a quiet row stays quiet", asy
   app.kill();
 
   const back = await AppClient.connect(daemon, { deviceId: DEVICE, cursors });
-  // Nothing missed and nothing running, so the daemon says nothing about this
-  // session — which is itself the answer, and why the app clears `busy` on
-  // reconnect and lets a catch-up put it back rather than the reverse.
-  await back.expectNo((f) => f.t === "session.replay" && f.sessionId === sessionId);
+  // Silence used to be the answer here, and it cost the one case it could not
+  // express: an approval answered at the desk while this phone was away left a
+  // sheet up for ever, because "no permissions" was indistinguishable from "an
+  // older daemon that never mentions permissions". An empty frame says both
+  // things plainly — the turn is over, and there is nothing to approve.
+  const frame = (await back.waitFor(
+    (f) => f.t === "session.replay" && f.sessionId === sessionId,
+    "catch-up",
+  )) as { events: unknown[]; working: boolean; permissions: unknown[] };
+  expect(frame.events).toEqual([]);
+  expect(frame.working).toBe(false);
+  expect(frame.permissions).toEqual([]);
   back.close();
 }, TEST_TIMEOUT);
 
