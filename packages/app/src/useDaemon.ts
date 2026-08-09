@@ -793,8 +793,9 @@ export function useDaemon(
   useEffect(() => {
     if (!providerKey) return;
     void saveCachedProviders(providersRef.current);
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- `providerKey` stands
-    // in for the array on purpose; including it would write on every frame.
+    // No disable directive: the body reads only `providerKey`, a ref, and a
+    // module import, so the exhaustive-deps rule has nothing to say here and an
+    // added one is reported as unused.
   }, [providerKey]);
 
   // Where the composer points before the user picks anything this launch.
