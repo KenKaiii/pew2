@@ -1422,8 +1422,14 @@ export function useDaemon(
                 // it — so with a project selected a new conversation was absent
                 // from the list until it had finished replying, which is the
                 // one moment the user is most likely to go looking for it.
-                cwd: message.cwd ?? projectRef.current[message.providerId ?? ""],
-                folder: message.folder,
+                //
+                // The daemon's answer only, never this phone's selected project
+                // as a fallback. This frame is broadcast, so most of the time it
+                // describes a conversation started somewhere else, and guessing
+                // would file another device's work under whatever project this
+                // screen happens to be showing. A session that arrives without
+                // one is left unplaced, and `session.idle` still names it later.
+                cwd: message.cwd ?? resumedFrom?.cwd,
                 // A session started to deliver a first prompt is already
                 // working; the drawer must say so from the moment it exists.
                 // Only when this is that session: `prev.busy` describes the

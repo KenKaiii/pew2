@@ -99,7 +99,15 @@ test("a browsed directory can still be started in", async () => {
   });
 
   expect(started).toEqual([{ providerId: "echo", cwd: "/Users/someone/code/api" }]);
-  expect(out.some((m) => m.t === "session.started")).toBe(true);
+  const announced = out.find((m) => m.t === "session.started");
+  expect(announced).toBeDefined();
+  // The resolved workspace travels with the announcement. Clients file sessions
+  // by project and hide the ones they cannot place, so a session announced
+  // without this is missing from the drawer under a selected project — and a
+  // second device, which never saw the request, has nothing else to place it
+  // by. Sending it here is also what stops a client guessing from its own
+  // selection and filing another device's work in the wrong project.
+  expect(announced?.cwd).toBe("/Users/someone/code/api");
 });
 
 test("naming no project at all still falls back to the agent's last one", async () => {
@@ -107,9 +115,13 @@ test("naming no project at all still falls back to the agent's last one", async 
   // path never involved a client-supplied string and must keep working.
   const { daemon, started } = stubbed();
 
-  await send(daemon, { t: "session.start", providerId: "echo" });
+  const out = await send(daemon, { t: "session.start", providerId: "echo" });
 
   expect(started).toEqual([{ providerId: "echo", cwd: "/Users/someone/fallback" }]);
+  // The fallback, not the empty request. A client cannot work out where a
+  // session it did not ask for ended up, and this is the case where even the
+  // client that *did* ask has no idea — it named no project at all.
+  expect(out.find((m) => m.t === "session.started")?.cwd).toBe("/Users/someone/fallback");
 });
 
 test("listing a project's conversations refuses an unknown directory", async () => {
