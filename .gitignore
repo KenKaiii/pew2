@@ -46,3 +46,15 @@ packages/app/store/
 # there — this one turned up at the repo root the first time an agent was booted
 # from it. Those files belong to whoever ran the agent, not to this repo.
 memories.json
+
+# A working document, not a specification: it is ticked off against whatever
+# build is in front of you and rewritten as the app changes. Committed, every QA
+# pass arrives as a diff and two people testing at once conflict over it.
+REMOTE_QA_CHECKLIST.md
+
+# Signed builds, written here by `eas build --local` on the way to Transporter.
+# Fifteen megabytes of binary that is reproducible from the commit it was built
+# from — which is the part worth keeping.
+*.ipa
+*.apk
+*.aab
