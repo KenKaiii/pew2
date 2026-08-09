@@ -15,7 +15,11 @@
     "ios": {
       "supportsTablet": true,
       "//": "Reverse-DNS of the GitHub org that hosts this, not a domain: `pew2.dev` is not registered, and an identifier built from a domain someone else can buy is a claim that can be contested after the app is on a store \u2014 at which point it cannot be changed without shipping a new app. Fork this and you must change it: an identifier is unique per store, and a fork keeping this one cannot be submitted alongside the original.",
-      "bundleIdentifier": "io.github.kenkaiii.pew2"
+      "bundleIdentifier": "io.github.kenkaiii.pew2",
+      "//infoPlist": "Ships verbatim into Info.plist, so no comment keys inside it — Apple reads what is written there. `ITSAppUsesNonExemptEncryption: false` answers the export-compliance question at build time instead of halting every upload to ask it. The answer is honest: this app's own cryptography is the pairing seal in @pew2/protocol (libsodium via TweetNaCl) over TLS, both exempt under the standard 'uses only encryption exempt from EAR' category. Adding a non-exempt algorithm of our own means revisiting this line, not merely the answer in the console.",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
     },
     "android": {
       "package": "io.github.kenkaiii.pew2",
