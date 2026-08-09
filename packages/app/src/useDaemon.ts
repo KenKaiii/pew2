@@ -792,10 +792,9 @@ export function useDaemon(
   const providerKey = state.providers.map((p) => `${p.id}:${p.available}`).join(",");
   useEffect(() => {
     if (!providerKey) return;
+    // The ref, not `state.providers`: reading it here keeps the list out of the
+    // dependency array, so the write is driven by the key above.
     void saveCachedProviders(providersRef.current);
-    // No disable directive: the body reads only `providerKey`, a ref, and a
-    // module import, so the exhaustive-deps rule has nothing to say here and an
-    // added one is reported as unused.
   }, [providerKey]);
 
   // Where the composer points before the user picks anything this launch.
