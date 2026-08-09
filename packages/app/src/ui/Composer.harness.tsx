@@ -3,9 +3,10 @@
  *
  * Focus is hard to drive deterministically from a script, so these render side
  * by side using only the component's public API: an empty composer rests
- * collapsed, one holding text stays expanded, attachments add a chip row, and
- * dictation lights the mic. Each sits in a fixed-height slot so a screenshot
- * can be measured against known coordinates.
+ * collapsed, one holding text stays expanded, a draft past the eight-line
+ * ceiling shows where growth stops, attachments add a chip row, and dictation
+ * lights the mic. Each sits in a fixed-height slot so a screenshot can be
+ * measured against known coordinates.
  *
  * Not reachable from the app. Rendered by temporarily pointing index.ts here,
  * and it runs on web (`npx expo start --web`) — which is why anything iOS-only
@@ -51,11 +52,20 @@ function LiveDictationSlot() {
   );
 }
 
-function Slot({ label, children }: { label: string; children: ReactNode }) {
+function Slot({
+  label,
+  tall = false,
+  children,
+}: {
+  label: string;
+  /** For the one state that is taller than the standard slot. */
+  tall?: boolean;
+  children: ReactNode;
+}) {
   return (
     <View style={styles.slot}>
       <Text style={styles.label}>{label}</Text>
-      <View style={styles.mount}>{children}</View>
+      <View style={tall ? styles.tallMount : styles.mount}>{children}</View>
     </View>
   );
 }
@@ -73,6 +83,24 @@ export default function ComposerHarness() {
         <Slot label="EXPANDED">
           <Composer
             value="Refactor the auth module and add a test covering the concurrent refresh path"
+            onChangeText={() => {}}
+            onSend={() => {}}
+          />
+        </Slot>
+
+        {/* The only place the height ceiling is visible. The box grows a line
+            at a time up to eight and then stops, handing the overflow to the
+            input's own scrolling — so what this slot checks is that the pill
+            has a fixed top edge here and the action row is still on it. */}
+        <Slot label="CEILING" tall>
+          <Composer
+            value={
+              "Walk the session reducer and list every path that sets busy without a " +
+              "guaranteed clearing path, then write the invariant test that catches " +
+              "the stuck-working state: no session busy without an in-flight turn, " +
+              "asserted after every scripted scenario including a reconnect landing " +
+              "mid-stream and a duplicate id after a daemon restart."
+            }
             onChangeText={() => {}}
             onSend={() => {}}
           />
@@ -124,4 +152,7 @@ const styles = StyleSheet.create({
   // top edge rather than against the one above it. Kept tight so both slots
   // clear any dev-menu sheet that appears over the lower half of the screen.
   mount: { height: 150, justifyContent: "flex-start" },
+  // Only the ceiling slot needs this: a full eight lines plus the action row is
+  // taller than 150, and clipping it would hide the edge being checked.
+  tallMount: { height: 250, justifyContent: "flex-start" },
 });

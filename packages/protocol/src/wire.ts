@@ -26,6 +26,25 @@ import { z } from "zod";
 export const WIRE_VERSION = 2;
 
 /**
+ * The per-session cursors off a cleartext `hello`, ignoring anything malformed.
+ *
+ * A `hello` is read before the channel exists, so it is never schema-validated
+ * as a whole: whatever the socket sent is a plain `unknown`. Both transports
+ * answer these cursors with a catch-up replay, and both must reject junk the
+ * same way — a negative or fractional seq here would make `since()` slice from
+ * the wrong end and re-send a whole session.
+ */
+export function readCursors(value: unknown): Record<string, number> {
+  if (typeof value !== "object" || value === null) return {};
+  const cursors: Record<string, number> = {};
+  for (const [sessionId, seq] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof seq !== "number" || !Number.isInteger(seq) || seq < 0) continue;
+    cursors[sessionId] = seq;
+  }
+  return cursors;
+}
+
+/**
  * Whether a peer speaking `wire` can be talked to, and what to tell the user.
  *
  * Returns a sentence rather than a boolean so both sides say the same thing, and
@@ -346,9 +365,15 @@ export const StartSession = z.object({
    * Echoed back on `session.started`, so a client can tell the session it asked
    * for from one another device started.
    *
-   * Optional because the app does not send one: it adopts the next session for
-   * the provider it is showing. Required here, this schema would reject every
-   * real `session.start` the moment the daemon began validating against it.
+   * `session.started` is broadcast to every paired client, and without this
+   * none of them could tell which request a given one answered. Each assumed it
+   * was its own: starting a conversation anywhere redirected every other device
+   * to it, and — because the frame carries no transcript — redirected them to a
+   * blank one.
+   *
+   * Optional because a client need not send one, and because requiring it would
+   * reject every `session.start` from a client older than this field the moment
+   * the daemon began validating against this schema.
    */
   requestId: z.string().optional(),
   providerId: z.string(),
@@ -515,6 +540,25 @@ export const Replay = z.object({
   events: z.array(SessionEvent),
   /** False for a progressive resume batch; omitted/true marks replay complete. */
   complete: z.boolean().optional(),
+  /**
+   * This batch is a reconnect catch-up, not history.
+   *
+   * The two arrive in the same frame but mean opposite things. A resume replay
+   * is a transcript of work that finished long ago, so it must not light up the
+   * activity line. A catch-up is the last few seconds of a turn that is *still
+   * running* — the tool calls in it are what the agent is doing right now, and
+   * dropping them is why a phone that lost its socket mid-turn showed nothing
+   * until the agent happened to start another tool.
+   */
+  catchUp: z.boolean().optional(),
+  /**
+   * Whether a turn is still in flight, on a catch-up frame.
+   *
+   * `session.idle` is broadcast, not logged, so a turn that ended while the
+   * client was away leaves no event to replay. Without this the app would stay
+   * busy forever after catching up on a finished turn.
+   */
+  working: z.boolean().optional(),
 });
 
 /**
@@ -681,6 +725,7 @@ export type ImageData = z.output<typeof ImageData>;
 export type WorkspaceRequest = z.output<typeof WorkspaceRequest>;
 export type Workspace = z.output<typeof Workspace>;
 export type SessionEvent = z.output<typeof SessionEvent>;
+export type Replay = z.output<typeof Replay>;
 export type SessionIdle = z.output<typeof SessionIdle>;
 export type PushRegister = z.output<typeof PushRegister>;
 export type DeviceJoined = z.output<typeof DeviceJoined>;

@@ -1,5 +1,11 @@
 import { expect, test } from "bun:test";
-import { foldSessionEvents, isOptimistic } from "./replayFold";
+import {
+  foldBackgroundCatchUp,
+  foldCatchUp,
+  foldSessionEvents,
+  isOptimistic,
+} from "./replayFold";
+import { currentTool, IDLE_ACTIVITY } from "./activity";
 import type { PermissionRequest, Session, Turn } from "./useDaemon";
 
 const user = (seq: number, text: string) => ({
@@ -186,4 +192,89 @@ test("replay restores the context percentage, unlike busy", () => {
   expect(folded.usage).toEqual({ used: 250, size: 1000 });
   // Still history, so it must not look like a turn in progress.
   expect(folded.busy).toBe(false);
+});
+
+const toolCall = (seq: number, id: string, title: string) => ({
+  sessionId: "s1",
+  seq,
+  payload: {
+    update: { sessionUpdate: "tool_call", toolCallId: id, title, kind: "execute", status: "in_progress" },
+  },
+});
+
+test("a catch-up names the tool the agent is running right now", () => {
+  // The whole point of the frame. A phone that lost its socket mid-turn — screen
+  // lock, wifi to cellular, a relay blip — used to come back and show nothing at
+  // all until the agent happened to start its *next* tool. That read as twenty
+  // seconds of a dead screen followed by a shell command out of nowhere.
+  const before = {
+    ...state([], [sessionStub]),
+    activity: IDLE_ACTIVITY,
+    loadingSession: false,
+  };
+
+  const next = foldCatchUp(
+    before,
+    "s1",
+    [agent(0, "Checking the logs"), toolCall(1, "t1", "rg needle src")],
+    true,
+    1_000,
+  );
+
+  expect(currentTool(next.activity)?.title).toBe("rg needle src");
+  expect(next.busy).toBe(true);
+  expect(next.turns[0]?.text).toBe("Checking the logs");
+  expect(next.sessions[0]?.busy).toBe(true);
+});
+
+test("a catch-up on a turn that already ended settles, rather than spinning", () => {
+  // `session.idle` is broadcast and never logged, so a turn that finished while
+  // this client was away replays no event that says so. Only the daemon's flag
+  // can end it — inferring "still working" from the last event would leave the
+  // conversation pulsing in the drawer for as long as the app stayed open.
+  const before = {
+    ...state([], [{ ...sessionStub, busy: true }]),
+    activity: IDLE_ACTIVITY,
+    loadingSession: false,
+  };
+
+  const next = foldCatchUp(before, "s1", [toolCall(0, "t1", "rg needle src")], false, 1_000);
+
+  expect(next.busy).toBe(false);
+  expect(next.activity).toBe(IDLE_ACTIVITY);
+  expect(next.sessions[0]?.busy).toBe(false);
+});
+
+test("a catch-up dismisses the loading skeleton it arrived behind", () => {
+  const before = {
+    ...state([], [sessionStub]),
+    activity: IDLE_ACTIVITY,
+    loadingSession: true,
+  };
+
+  expect(foldCatchUp(before, "s1", [], true, 1_000).loadingSession).toBe(false);
+});
+
+test("a background conversation still working survives the reconnect busy sweep", () => {
+  const background = { ...sessionStub, id: "s2", busy: false };
+  const next = foldBackgroundCatchUp(state([], [sessionStub, background]), "s2", true);
+
+  expect(next.sessions[1]!.busy).toBe(true);
+  // Only the one the frame names: nothing is known about the others.
+  expect(next.sessions[0]!.busy).toBeUndefined();
+});
+
+test("a background catch-up for a finished turn leaves the row quiet", () => {
+  const background = { ...sessionStub, id: "s2", busy: true };
+  const next = foldBackgroundCatchUp(state([], [background]), "s2", false);
+
+  expect(next.sessions[0]!.busy).toBe(false);
+});
+
+test("a background catch-up that changes nothing keeps the same array", () => {
+  const before = state([], [{ ...sessionStub, id: "s2", busy: true }]);
+
+  expect(foldBackgroundCatchUp(before, "s2", true).sessions).toBe(before.sessions);
+  expect(foldBackgroundCatchUp(before, "gone", true).sessions).toBe(before.sessions);
+  expect(foldBackgroundCatchUp(before, undefined, true).sessions).toBe(before.sessions);
 });

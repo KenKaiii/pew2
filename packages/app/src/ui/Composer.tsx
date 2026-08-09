@@ -33,6 +33,7 @@ import Reanimated, {
 } from "react-native-reanimated";
 import Ionicons from "@expo/vector-icons/Ionicons";
 import { theme } from "../theme";
+import { composerHeight, type ComposerBounds } from "./composerHeight";
 import { touchSlop } from "./controls";
 import { haptics } from "./haptics";
 import { Glass } from "./Glass";
@@ -66,20 +67,41 @@ const TEXT_DROP = (COLLAPSED - theme.line.body) / 2 - theme.space(3);
 const MAX_LINES = 8;
 
 /**
- * Total control height that shows `lines` of text above the action row.
+ * Everything in the control that is not text.
  *
  * The text region spans from the top down to `COLLAPSED - space(2)`, and is
- * inset by `space(3)` at the top, so the chrome around the text is the action
- * row less that overlap plus the inset.
+ * inset by `space(3)` at the top, so the chrome around it is the action row
+ * less that overlap plus the inset.
+ *
+ * Resolved to a plain number here rather than left as `theme.space` calls
+ * because the height worklet below closes over it, and `theme.space` is a
+ * function — a worklet cannot reach back into JS to call it.
  */
-const heightForLines = (lines: number) =>
-  lines * theme.line.body + COLLAPSED - theme.space(2) + theme.space(3);
+const CHROME = COLLAPSED - theme.space(2) + theme.space(3);
+
+/** Total control height that shows `lines` of text above the action row. */
+const heightForLines = (lines: number) => lines * theme.line.body + CHROME;
 
 /** Floor: one line of text above the action row. */
 const MIN_HEIGHT = heightForLines(1);
 const MAX_HEIGHT = heightForLines(MAX_LINES);
 /** Text height at which the box stops growing and the input starts scrolling. */
 const MAX_TEXT_HEIGHT = MAX_LINES * theme.line.body;
+
+/**
+ * The theme's metrics, resolved once for the height worklet below.
+ *
+ * Sampled here rather than read inside the worklet because `theme.space` is a
+ * function and a worklet cannot reach back into JS to call one. See
+ * `composerHeight.ts` for the arithmetic itself, which lives there so it can be
+ * tested without importing this file — the runner cannot parse `react-native`.
+ */
+const BOUNDS: ComposerBounds = {
+  collapsed: COLLAPSED,
+  chrome: CHROME,
+  min: MIN_HEIGHT,
+  max: MAX_HEIGHT,
+};
 
 /**
  * iOS adds the whole leading (lineHeight minus the font's own height) above the
@@ -149,16 +171,21 @@ function ComposerView({
   const expanded = focused || hasText || busy || attachments.length > 0;
 
   // Grow with the text, then scroll internally rather than eat the thread.
-  // `contentHeight` is only meaningful once expanded: a multiline TextInput
-  // reports its natural height even while collapsed, which would otherwise
-  // inflate this box before the user has typed anything.
-  const textHeight = expanded ? contentHeight : theme.line.body;
-  const expandedHeight = Math.min(
-    MAX_HEIGHT,
-    // One line while the draft is one line: the box tracks the text rather than
-    // opening pre-grown into space nothing occupies yet.
-    Math.max(MIN_HEIGHT, textHeight + COLLAPSED - theme.space(2) + theme.space(3)),
-  );
+  //
+  // A shared value and not the `contentHeight` state beside it, because state
+  // cannot reach the UI thread without a React commit: `contentSize` measured,
+  // `setContentHeight` re-rendered, `useAnimatedStyle` closed over the new
+  // number, and only then did the box move. That is a full JS round trip per
+  // wrapped line, and it showed as the box catching up a frame or more behind
+  // the caret while typing. Written straight from the native event, the next UI
+  // frame already has the number whatever the JS thread is busy with.
+  //
+  // Only meaningful once expanded: a multiline TextInput reports the natural
+  // height of its own placeholder even while collapsed, wrapped into the narrow
+  // inline slot between the two buttons, which would inflate this box before
+  // the user has typed anything. So the measurement is taken only while
+  // expanded, and collapsing puts it back to one line.
+  const textHeight = useSharedValue<number>(theme.line.body);
 
   const sendIn = useRef(new Animated.Value(0)).current;
   // While listening, the mic *is* the control the user needs back, so send does
@@ -191,25 +218,27 @@ function ComposerView({
   // the same frames is what the first tap felt like. Scoped here, the box is
   // the only thing that moves, and it moves on the UI thread.
   //
-  // What animates is *how open the box is*, not its height directly. Only the
-  // open/close transition should ease: `expandedHeight` also grows as the draft
-  // wraps onto another line, and easing that would leave the box trailing 140ms
-  // behind the text being typed into it. Interpolating between the two heights
-  // keeps both — the transition eases, while a taller `expandedHeight` takes
-  // effect immediately, including partway through an open that is still
-  // running. The old imperative call got this for free by being fired from the
-  // focus handler and nowhere else.
+  // What eases is *how open the box is*, never the height itself. The box also
+  // grows as the draft wraps onto another line, and easing that would leave it
+  // trailing 140ms behind the text being typed into it. `composerHeight` reads
+  // both values on the UI thread each frame, so the transition eases while a
+  // wrap lands whole, including partway through an open that is still running.
+  // The old imperative call got that for free by being fired from the focus
+  // handler and nowhere else.
   const openness = useSharedValue(expanded ? 1 : 0);
 
   useEffect(() => {
+    // Discarding the measurement here rather than at the next render keeps it
+    // in step with the curve that is about to run: both leave in one effect.
+    if (!expanded) textHeight.value = theme.line.body;
     openness.value = withTiming(expanded ? 1 : 0, {
       duration: reduceMotion ? 0 : EXPAND_DURATION,
       easing: ReanimatedEasing.out(ReanimatedEasing.cubic),
     });
-  }, [expanded, reduceMotion, openness]);
+  }, [expanded, reduceMotion, openness, textHeight]);
 
   const surface = useAnimatedStyle(() => ({
-    height: COLLAPSED + (expandedHeight - COLLAPSED) * openness.value,
+    height: composerHeight(BOUNDS, openness.value, textHeight.value),
   }));
 
   useEffect(() => {
@@ -259,9 +288,13 @@ function ComposerView({
               }
               onFocus={() => setFocused(true)}
               onBlur={() => setFocused(false)}
-              onContentSizeChange={(event) =>
-                setContentHeight(event.nativeEvent.contentSize.height)
-              }
+              onContentSizeChange={(event) => {
+                const measured = event.nativeEvent.contentSize.height;
+                if (expanded) textHeight.value = measured;
+                // Still state as well, because `scrollEnabled` below is a prop
+                // on the JS side of the tree and has to be re-rendered to change.
+                setContentHeight(measured);
+              }}
               placeholder={placeholder}
               placeholderTextColor={theme.color.placeholder}
               multiline

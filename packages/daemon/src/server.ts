@@ -234,7 +234,12 @@ const server = Bun.serve({
       // `hello` arrives in cleartext because it is what establishes the
       // connection. Everything after it must be sealed.
       if (typeof frame === "object" && frame !== null && (frame as { t?: unknown }).t === "hello") {
-        const hello = frame as { wire?: unknown; deviceId?: unknown; proof?: unknown };
+        const hello = frame as {
+          wire?: unknown;
+          deviceId?: unknown;
+          proof?: unknown;
+          cursors?: unknown;
+        };
 
         // Checked before the proof, so a client too old to *have* a proof is
         // told to update rather than silently refused as unauthenticated.
@@ -291,6 +296,11 @@ const server = Bun.serve({
         // never arrived at all. The join is a fact the moment the proof checks
         // out; the agent list is a separate thing that follows.
         broadcast({ t: "device.joined", deviceId, at: Date.now() });
+
+        // Everything this client missed while its socket was down, before the
+        // provider scan: a turn running right now is the thing it is waiting to
+        // see, and `refreshProviders` touches the disk.
+        for (const catchUp of daemon.catchUp(wire.readCursors(hello.cursors))) send(ws, catchUp);
 
         // Announced only now: the provider list names every agent installed on
         // this machine, which is not something to hand to an unproven socket.

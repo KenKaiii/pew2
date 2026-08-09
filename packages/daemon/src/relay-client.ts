@@ -232,7 +232,12 @@ export class RelayClient {
       // far end of the connection — so it carries a sealed proof beside it, and
       // is worth nothing without one.
       if (kind === "hello") {
-        const hello = frame as { wire?: unknown; deviceId?: unknown; proof?: unknown };
+        const hello = frame as {
+          wire?: unknown;
+          deviceId?: unknown;
+          proof?: unknown;
+          cursors?: unknown;
+        };
         const deviceId = typeof hello.deviceId === "string" ? hello.deviceId : "";
 
         // Checked first, so a client too old to carry a proof is told to update
@@ -303,6 +308,18 @@ export class RelayClient {
         const joined = { t: "device.joined", deviceId, at: Date.now() };
         this.send(joined);
         this.options.onBroadcast?.(joined);
+
+        // Everything this phone missed while it was away. This is the path that
+        // needs it: a phone off the LAN reconnects through here every time the
+        // screen locks, and the turn it left running kept producing events that
+        // this socket was not up to carry.
+        //
+        // Not mirrored to `onBroadcast` — it is addressed to the client that
+        // asked, and replaying it to the desktop's own listeners would re-run
+        // events they have already seen.
+        for (const catchUp of this.options.daemon.catchUp(wire.readCursors(hello.cursors))) {
+          this.send(catchUp);
+        }
         return;
       }
 

@@ -8,7 +8,7 @@
  */
 import { expect, test } from "bun:test";
 import { directionKey, isEnvelope, seal } from "./crypto.js";
-import { ClientMessage, ServerMessage, WIRE_VERSION, wireMismatch } from "./wire.js";
+import { ClientMessage, readCursors, ServerMessage, WIRE_VERSION, wireMismatch } from "./wire.js";
 
 test("an outdated hello still parses, so its sender can be told why", () => {
   // The subtle one. Pinning `wire` to a literal in the schema would make this
@@ -217,4 +217,18 @@ test("a push registration is a client message, and needs a real platform", () =>
 
   // An empty token would be sent to Expo on every finished turn for nothing.
   expect(ClientMessage.safeParse({ t: "app.push", token: "", platform: "ios" }).success).toBe(false);
+});
+
+test("cursors off a raw hello are taken only when they are usable seq numbers", () => {
+  // `hello` establishes the connection, so it is read before any schema can be
+  // applied to it — whatever the socket sent is a plain `unknown`. Both
+  // transports answer these cursors with a catch-up replay, and a negative or
+  // fractional seq would make the log slice from the wrong end and re-send a
+  // whole session to a client that already had it.
+  expect(readCursors({ s1: 0, s2: 41 })).toEqual({ s1: 0, s2: 41 });
+  expect(readCursors({ s1: -1, s2: 2.5, s3: "9", s4: null, s5: NaN })).toEqual({});
+  // A client too old to send them, or one with nothing to catch up on.
+  expect(readCursors(undefined)).toEqual({});
+  expect(readCursors("nonsense")).toEqual({});
+  expect(readCursors(null)).toEqual({});
 });

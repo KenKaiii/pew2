@@ -1627,6 +1627,46 @@ export class Daemon {
     return session.log.since(cursor);
   }
 
+  /**
+   * Frames that bring a reconnecting client level with what it missed.
+   *
+   * A phone loses its socket constantly — the screen locks, iOS suspends the
+   * app, the radio switches from wifi to cellular, the relay drops a room. The
+   * agent does not stop for any of that, and a frame sent while the socket is
+   * down is gone: the relay stores nothing and `RelayClient.send` drops it.
+   *
+   * So the client names the highest `seq` it holds per session in its `hello`,
+   * and this answers with the rest. Without it a phone that blinked mid-turn
+   * silently resumed at the live edge, and the first thing the user saw was a
+   * shell command from twenty seconds into work it had watched none of.
+   *
+   * Only sessions the client already knows about: a client is introduced to a
+   * session by `session.started`, and an event for one it has never heard of
+   * has nowhere to go. Cursors name exactly the sessions it has seen.
+   */
+  catchUp(cursors: Record<string, number>): wire.Replay[] {
+    const frames: wire.Replay[] = [];
+    for (const [sessionId, cursor] of Object.entries(cursors)) {
+      const session = this.sessions.get(sessionId);
+      // Not live means clients were never told it exists; replaying into that
+      // would break the same invariant `markLive` exists to hold.
+      if (!session || !session.live) continue;
+      const events = this.replay(sessionId, cursor);
+      // A client that missed nothing still needs the running flag: it may have
+      // been away for the `session.idle` that ended the turn it last saw.
+      if (events.length === 0 && !session.working) continue;
+      frames.push({
+        t: "session.replay",
+        sessionId,
+        events,
+        complete: true,
+        catchUp: true,
+        working: session.working === true,
+      });
+    }
+    return frames;
+  }
+
   closeAll() {
     if (this.reaper) {
       clearInterval(this.reaper);

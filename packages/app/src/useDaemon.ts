@@ -12,6 +12,13 @@ import { SecureChannel, e2e, envelopeHeader, wire } from "@pew2/protocol";
 const { WIRE_VERSION } = wire;
 import { USE_FIXTURES, isFixtureSession, sampleSessions } from "./fixtures";
 import { mergeAgentSessions, needsResume, replaceAgentSessionStub } from "./agentHistory";
+import {
+  adoptPendingSession,
+  dropPendingSessions,
+  isPendingSession,
+  pendingSession,
+  pendingSessionKey,
+} from "./pendingSession";
 import { rememberConfigs, visibleConfigs, withChoice } from "./configTruth";
 import {
   beginActivity,
@@ -41,6 +48,8 @@ import {
 import type { WireProject } from "./projects";
 import { readUsage, type ContextUsage } from "./contextUsage";
 import {
+  foldBackgroundCatchUp,
+  foldCatchUp,
   foldSessionEvents,
   isOptimistic,
   mergeChunk,
@@ -205,6 +214,39 @@ export interface WorkspaceBrowse {
  */
 const STALLED_ATTEMPTS = 4;
 
+/**
+ * How long a conversation may sit as a skeleton before the app admits it is
+ * not coming.
+ *
+ * Generous on purpose. A resumed transcript reveals on its *first* batch rather
+ * than its last, so even a thousand-event conversation clears this in the time
+ * the agent takes to attach — which means anything still waiting at twenty
+ * seconds is not slow, it is lost. Erring the other way is worse than it
+ * sounds: cutting a live resume short would replace a transcript that was about
+ * to appear with a message saying it failed.
+ */
+const LOADING_SESSION_TIMEOUT = 20_000;
+
+/**
+ * How long a socket may stay in CONNECTING before it is treated as dead.
+ *
+ * Ten seconds is well past any real handshake, including a relay cold start,
+ * and well short of the operating system's own connect timeout — which is the
+ * point. The platform does eventually give up; it just does so on a timescale
+ * where the user has already decided the app is broken.
+ */
+const CONNECT_TIMEOUT = 10_000;
+
+/**
+ * `WebSocket.CONNECTING`, by value.
+ *
+ * React Native's WebSocket is not the DOM one, and the static constants are
+ * absent on some engines while the instance `readyState` is always the same
+ * standard number. Comparing against the literal is the portable form, and the
+ * name is what keeps it readable.
+ */
+const WEBSOCKET_CONNECTING = 0;
+
 interface State {
   status: Status;
   /**
@@ -357,6 +399,27 @@ function stoppedBeforeSend(seq: number): Turn {
     key: `local:${seq}`,
     role: "system",
     text: "Stopped before the agent received this.",
+  };
+}
+
+/**
+ * Marks a conversation that was asked for and never arrived.
+ *
+ * Reopening a session is two messages far apart: `session.resume` goes out, and
+ * the transcript follows once the agent has attached. Between them the screen
+ * is a skeleton with no composer and no controls. Nothing ever timed that out,
+ * so a resume whose answer was lost — the socket dropped, the agent failed to
+ * spawn, the daemon was killed mid-handshake — left the phone showing a
+ * loading conversation for as long as the app stayed open, with force-quitting
+ * the only way back. The wait now ends, and says so where the transcript would
+ * have been.
+ */
+function stalledLoading(seq: number): Turn {
+  return {
+    id: `local:${seq}`,
+    key: `local:${seq}`,
+    role: "system",
+    text: "Couldn't load this conversation. Open it again to retry.",
   };
 }
 
@@ -522,6 +585,13 @@ export function useDaemon(
   // Mirrors state.sessionId so actions can read it without doing work inside a
   // state updater. Updaters must stay pure: React may invoke them twice.
   const sessionRef = useRef<string | undefined>(undefined);
+  // Which drawer row the user is actually looking at, `sessionId` or not.
+  //
+  // Distinct from `sessionRef` because the cases that differ are exactly the
+  // ones that went wrong: a conversation still waiting to be named has no
+  // session id, and neither does the empty new-chat screen, yet they are
+  // different places to be standing. Undefined means the empty screen.
+  const viewingRef = useRef<string | undefined>(undefined);
   // Mirrors activeProviderId for the same reason sessionRef exists: message
   // handlers must not read state inside an updater.
   const providerRef = useRef<string | undefined>(undefined);
@@ -539,6 +609,19 @@ export function useDaemon(
   // seconds, and the daemon's echo arrives only after that, so the prompt is
   // rendered locally first and reconciled when the echo lands.
   const localSeq = useRef(0);
+  // The `session.start` this client is waiting on, if any. Held outside state
+  // because the message handler must read it without a render having happened,
+  // and matched against the `requestId` echoed back so the answer adopts the
+  // drawer row this client created rather than one another device's session
+  // would land in. See `pendingSession`.
+  const pendingStart = useRef<string | undefined>(undefined);
+  // Whether this client is waiting for a conversation it asked to reopen.
+  //
+  // A resume is answered by the same broadcast `session.started` as a start,
+  // and it carries no request id to match on, so "is this reopen mine?" can
+  // only be answered by whether this client asked for one at all. Without that
+  // a reopen on the laptop pulled every other device onto it.
+  const awaitingResume = useRef(false);
   // Providers already asked for capabilities, so a reconnect's repeat provider
   // announcement does not spawn another probe for each one.
   const probed = useRef(new Set<string>());
@@ -695,11 +778,18 @@ export function useDaemon(
       channel.current = secure;
 
       ws.onopen = () => {
+        clearTimeout(deadline);
         attempts.current = 0;
         // A request written to the socket that died is never answered, and its
         // entry would hold the drawer in a skeleton forever. Dropping them here
         // also lets the open project be asked for again.
         pendingProjectSessions.current.clear();
+        // Same reasoning for a `session.start` or `session.resume` written to
+        // the socket that died: their answer is broadcast once and stored
+        // nowhere, so waiting for it across a reconnect is waiting forever. See
+        // `dropPendingSessions`.
+        pendingStart.current = undefined;
+        awaitingResume.current = false;
         setState((s) => ({
           ...s,
           status: "online",
@@ -711,7 +801,7 @@ export function useDaemon(
           // the pulsing dot would never stop. Clear it: a session still running
           // announces itself the moment it finishes, which is the signal that
           // matters.
-          sessions: s.sessions.map((session) =>
+          sessions: dropPendingSessions(s.sessions).map((session) =>
             session.busy ? { ...session, busy: false } : session,
           ),
         }));
@@ -788,7 +878,22 @@ export function useDaemon(
         // loading; each batch is still folded in one state update, avoiding the
         // quadratic event-by-event array copies that caused multi-second stalls.
         if (message.t === "session.replay" && Array.isArray(message.events)) {
-          if (message.sessionId !== sessionRef.current) return;
+          if (message.sessionId !== sessionRef.current) {
+            // Not this transcript, so its events have nowhere to be rendered.
+            // A catch-up still says whether that conversation is working, which
+            // is the one thing the drawer can show for it and the one thing
+            // reconnecting just threw away. See `foldBackgroundCatchUp`.
+            if (message.catchUp === true) {
+              for (const event of message.events) {
+                if (event?.t !== "session.event" || typeof event.seq !== "number") continue;
+                cursors.current = advance(cursors.current, event.sessionId, event.seq);
+              }
+              setState((prev) =>
+                foldBackgroundCatchUp(prev, message.sessionId, message.working === true),
+              );
+            }
+            return;
+          }
           const events: ReplayEvent[] = [];
           for (const event of message.events) {
             if (event?.t !== "session.event" || typeof event.seq !== "number") continue;
@@ -798,6 +903,20 @@ export function useDaemon(
           }
           setState((prev) => {
             const folded = events.length > 0 ? foldSessionEvents(prev, events) : prev;
+
+            // A reconnect catch-up is the opposite of history: these events are
+            // a turn that is running right now, and the socket was simply not up
+            // to carry them. See `foldCatchUp`.
+            if (message.catchUp === true) {
+              return foldCatchUp(
+                prev,
+                message.sessionId,
+                events,
+                message.working === true,
+                Date.now(),
+              );
+            }
+
             const complete = message.complete !== false;
             // Reveal on the first real batch. An empty final frame still clears
             // the skeleton for sessions with no visible transcript.
@@ -857,11 +976,52 @@ export function useDaemon(
         // Track the live session id here, as the message arrives, rather than
         // inside the updater below. Updaters must stay pure: React may invoke
         // them twice, and the ref would then desync from state.
+        //
+        // The awaited request id is read and cleared for the same reason, and
+        // only when the daemon echoes the one this client sent: the daemon
+        // broadcasts `session.started` to every paired client, so a session
+        // opened on the laptop arrives here too and must not consume the row
+        // this phone is holding for its own pending request.
+        let adoptedRequestId: string | undefined;
+        // Whether this conversation is the one on screen, or merely one the
+        // daemon is announcing.
+        //
+        // `session.started` used to be taken as "this is now the screen",
+        // unconditionally. It is broadcast to every paired client, so a session
+        // opened anywhere — the laptop, another phone — redirected this one,
+        // and because the frame carries no transcript the redirect arrived as a
+        // blank conversation. Worse, it did that to a session the user had
+        // deliberately opened moments earlier: send a prompt, switch away while
+        // the agent boots, and the answer landed on whatever was being read,
+        // emptying it. Recovering meant force-quitting, and the session that
+        // caused it was the one nothing pointed at.
+        //
+        // So it takes the screen only when the screen is waiting for it: the
+        // empty new-chat view, the row this client is holding for its own
+        // request, or a reopen whose skeleton is already up.
+        let claimsScreen = false;
         if (message.t === "session.started") {
-          sessionRef.current = message.sessionId;
+          if (message.requestId && message.requestId === pendingStart.current) {
+            adoptedRequestId = pendingStart.current;
+            pendingStart.current = undefined;
+          }
+          const mine =
+            adoptedRequestId !== undefined &&
+            viewingRef.current === pendingSessionKey(adoptedRequestId);
+          const reopened = message.resumed === true && awaitingResume.current;
+          if (reopened) awaitingResume.current = false;
+          claimsScreen = mine || reopened || viewingRef.current === undefined;
+          if (claimsScreen) {
+            sessionRef.current = message.sessionId;
+            viewingRef.current = message.sessionId;
+          }
 
-          const pending = queued.current;
-          queued.current = undefined;
+          // The prompt this client is holding belongs to the session this
+          // client started, not to whichever one the daemon announced next.
+          // Delivering it to someone else's would put the user's message into a
+          // conversation on another device — and lose it from this one.
+          const pending = claimsScreen ? queued.current : undefined;
+          if (pending) queued.current = undefined;
           if (pending) {
             ws.send(
               JSON.stringify(
@@ -1034,6 +1194,9 @@ export function useDaemon(
                 : undefined;
             if (stale?.agentSessionId && stale.providerId) {
               sessionRef.current = undefined;
+              // The screen is still this conversation, and the reopen about to
+              // be sent is the one allowed to land on it.
+              awaitingResume.current = true;
               providerRef.current = stale.providerId;
               ws.send(
                 JSON.stringify(
@@ -1227,29 +1390,49 @@ export function useDaemon(
               // fresh identity re-renders the whole transcript for no change,
               // seen as the first prompt flickering the instant the session
               // opens — right after it was sent.
-              const local = prev.turns.filter(isOptimistic);
-              const turns = local.length === prev.turns.length ? prev.turns : local;
+              //
+              // Only the transcript on screen is a candidate: a conversation
+              // announced while the user is reading a different one has no
+              // optimistic turns of its own, and taking them from the visible
+              // thread would move that thread's unsent prompt into it.
+              const visibleTurns = claimsScreen ? prev.turns : [];
+              const local = visibleTurns.filter(isOptimistic);
+              const turns = local.length === visibleTurns.length ? visibleTurns : local;
+              const live: Session = {
+                id: message.sessionId,
+                providerId: message.providerId ?? prev.activeProviderId ?? "",
+                title: firstUserText(turns) ?? resumedFrom?.title ?? "New conversation",
+                startedAt: Date.now(),
+                turns,
+                configOptions: message.configOptions ?? [],
+                agentSessionId,
+                // A session started to deliver a first prompt is already
+                // working; the drawer must say so from the moment it exists.
+                // Only when this is that session: `prev.busy` describes the
+                // conversation on screen, and copying it onto an unrelated one
+                // announced from another device is a row that pulses for work
+                // it is not doing.
+                busy: claimsScreen ? prev.busy : undefined,
+              };
+              // The row this client already added when it asked, if this is the
+              // answer to that request. Adopting it in place keeps the
+              // conversation where the user last saw it in the list instead of
+              // removing a row and prepending a near-identical one.
+              const adopted = adoptPendingSession(prev.sessions, adoptedRequestId, live);
+              const sessions = adopted ?? replaceAgentSessionStub(prev.sessions, live);
+              // In the drawer either way — that is the whole point of this
+              // frame — but the screen is only redirected when it was waiting
+              // for this conversation. See `claimsScreen`.
+              if (!claimsScreen) return { ...prev, sessions };
               return {
                 ...prev,
+                sessions,
                 sessionId: message.sessionId,
                 activeProviderId: message.providerId ?? prev.activeProviderId,
                 configOptions: message.configOptions ?? [],
                 // Keep any prompt already rendered optimistically: it belongs to
                 // this session, which was started to deliver it.
                 turns,
-                sessions: replaceAgentSessionStub(prev.sessions, {
-                  id: message.sessionId,
-                  providerId: message.providerId ?? prev.activeProviderId ?? "",
-                  title:
-                    firstUserText(turns) ?? resumedFrom?.title ?? "New conversation",
-                  startedAt: Date.now(),
-                  turns,
-                  configOptions: message.configOptions ?? [],
-                  agentSessionId,
-                  // A session started to deliver a first prompt is already
-                  // working; the drawer must say so from the moment it exists.
-                  busy: prev.busy,
-                }),
                 // Keep the skeleton until the batched transcript follows this frame.
                 loadingSession: message.resumed === true,
                 // `prev.busy`, not `false`, for a session started to carry a
@@ -1483,7 +1666,29 @@ export function useDaemon(
         retry.current = setTimeout(connect, delay);
       };
 
-      ws.onclose = scheduleReconnect;
+      // A socket that never finishes connecting, and never fails either.
+      //
+      // The handshake reaches out over whatever the phone last had, and a
+      // network that changed underneath it — wifi to cellular, a captive
+      // portal, a VPN coming up — leaves the TCP connection half open: nothing
+      // is coming back, but nothing has been refused, so `onclose` and
+      // `onerror` are never called and the backoff below never runs. iOS will
+      // eventually time it out on its own schedule, which is measured in
+      // minutes and looks exactly like the app having given up silently. This
+      // is the deadline the platform does not give.
+      //
+      // Closing it is enough to start recovery: `onclose` follows, which is the
+      // same path a refused connection takes, so the attempt counts towards the
+      // backoff and towards `unreachable` like any other failure.
+      const deadline = setTimeout(() => {
+        if (socket.current !== ws || ws.readyState !== WEBSOCKET_CONNECTING) return;
+        ws.close();
+      }, CONNECT_TIMEOUT);
+
+      ws.onclose = () => {
+        clearTimeout(deadline);
+        scheduleReconnect();
+      };
       ws.onerror = () => ws.close();
     };
 
@@ -1614,26 +1819,52 @@ export function useDaemon(
       ) => {
         const started = Date.now();
         queued.current = initialText ? { text: initialText, attachments } : undefined;
+        // Named, so the answer can be matched to this request rather than to
+        // whichever `session.started` happens to arrive next: the daemon
+        // broadcasts them to every client, and another device starting a
+        // conversation at the same moment would otherwise be adopted here.
+        //
+        // Carries the device id because that is the part no other client can
+        // repeat. A counter and a clock alone are per-app values, and two
+        // phones opening their first conversation in the same millisecond would
+        // mint the same string — which is the one case this id exists to tell
+        // apart.
+        const requestId = `start:${deviceId}:${localSeq.current++}:${started}`;
+        pendingStart.current = requestId;
+        viewingRef.current = pendingSessionKey(requestId);
         // A chosen project is where this conversation opens. Without it the
         // daemon falls back to the agent's last workspace, which is the whole
         // reason picking a project from the phone was impossible before.
-        post({ t: "session.start", providerId, cwd: projectRef.current[providerId] });
-        if (!initialText) return;
+        post({ t: "session.start", requestId, providerId, cwd: projectRef.current[providerId] });
         // Spawning the agent and its ACP handshake take seconds; without a local
         // turn the screen would sit empty and look like the send did nothing.
-        const turn = localTurn(localSeq.current++, initialText, attachmentImages(attachments));
+        const turn = initialText
+          ? localTurn(localSeq.current++, initialText, attachmentImages(attachments))
+          : undefined;
         setState((s) => ({
           ...s,
-          busy: true,
+          busy: turn !== undefined,
           loadingSession: false,
-          turns: capTurns([...s.turns, turn]),
+          turns: turn ? capTurns([...s.turns, turn]) : s.turns,
           // The clock starts when the prompt leaves the phone, not when the
           // agent first speaks: booting the agent is part of the wait.
-          activity: beginActivity(started),
+          activity: turn ? beginActivity(started) : s.activity,
           receipt: undefined,
+          // The conversation exists as far as the user is concerned — they
+          // just started it — so it is in the drawer from here, carrying the
+          // prompt, and `session.started` adopts this row rather than creating
+          // its own. Leaving the list untouched until the answer arrived is
+          // what made a conversation vanish when the reply was slow and the
+          // user moved on: it was running on the desktop with nothing on the
+          // phone pointing at it. See `pendingSession`.
+          sessions: [
+            {
+              ...pendingSession(requestId, providerId, initialText, started),
+              turns: turn ? [turn] : [],
+            },
+            ...s.sessions,
+          ],
         }));
-        // The session itself does not exist yet, so there is nothing to mark
-        // busy: `session.started` creates its drawer entry, already working.
       },
 
       /**
@@ -1669,6 +1900,12 @@ export function useDaemon(
           return {
             ...s,
             busy: visible ? true : s.busy,
+            // Whatever this conversation was still loading, it is now carrying a
+            // prompt the user just sent. `loadingSession` suppresses the working
+            // indicator entirely, so leaving it set showed an empty transcript
+            // under the message for as long as the agent took to attach — the
+            // one moment the user most needs to see that something is happening.
+            loadingSession: visible ? false : s.loadingSession,
             // A prompt sent to another conversation is not what this transcript
             // is showing, so the line under it keeps describing this one.
             activity: visible ? beginActivity(started) : s.activity,
@@ -1775,6 +2012,11 @@ export function useDaemon(
         // daemon no longer holds it. See `needsResume`.
         if (needsResume(session, liveSessions.current)) {
           sessionRef.current = undefined;
+          // The row being reopened, even though it has no session id until the
+          // daemon answers: this is the screen, and a `session.started` for
+          // something else must not land on it.
+          viewingRef.current = sessionId;
+          awaitingResume.current = true;
           providerRef.current = session.providerId;
           queued.current = undefined;
           post({
@@ -1814,8 +2056,22 @@ export function useDaemon(
         // has never heard of them and those messages would vanish silently.
         // Opening one shows its history and selects its agent; typing then
         // starts a real session instead of posting against a phantom id.
-        const live = !isFixtureSession(sessionId);
+        //
+        // A conversation still waiting for its `session.started` is the same
+        // case for the same reason — the daemon has not named it yet, so there
+        // is no id to address — with the difference that this one becomes real
+        // shortly. Opening it shows the prompt already sent, and the answer
+        // lands in this transcript anyway, because `session.started` sets
+        // `sessionId` regardless of what is on screen.
+        const live = !isFixtureSession(sessionId) && !isPendingSession(sessionId);
         sessionRef.current = live ? sessionId : undefined;
+        viewingRef.current = sessionId;
+        // Opening this one withdraws the claim of a reopen still in flight. A
+        // resume does not block the drawer, so tapping a second conversation
+        // while the first is still attaching is ordinary — and without this the
+        // first one's answer would arrive, still count as "mine", and pull the
+        // user back out of the conversation they just chose.
+        awaitingResume.current = false;
         providerRef.current = session.providerId;
         queued.current = undefined;
         setState((s) => ({
@@ -1918,6 +2174,10 @@ export function useDaemon(
       /** Choose which agent the composer targets. Ends any open session. */
       select: (providerId: string) => {
         sessionRef.current = undefined;
+        viewingRef.current = undefined;
+        // Choosing an agent ends the open session, so a reopen still in flight
+        // has nothing left to come back to. Same reasoning as `leave`.
+        awaitingResume.current = false;
         providerRef.current = providerId;
         queued.current = undefined;
         setState((s) => ({
@@ -1963,6 +2223,10 @@ export function useDaemon(
 
       leave: () => {
         sessionRef.current = undefined;
+        viewingRef.current = undefined;
+        // Leaving is a decision about the screen, so a reopen still in flight
+        // no longer has a claim on it.
+        awaitingResume.current = false;
         queued.current = undefined;
         setState((s) => ({
           ...s,
@@ -1987,8 +2251,42 @@ export function useDaemon(
         }));
       },
     }),
-    [post, sendImageRequest],
+    // `deviceId` identifies this phone in the ids `start` mints. It does not
+    // change in practice, and listing it costs nothing if it ever does.
+    [post, sendImageRequest, deviceId],
   );
+
+  // Give up on a conversation that is taking impossibly long to open.
+  //
+  // Every other spinner in this app has something that ends it: a turn ends
+  // with `session.idle`, a connection ends with an open socket or a retry. The
+  // resume skeleton was the exception — it ended only when the transcript
+  // arrived, so if the transcript never arrived it did not end at all. That is
+  // the state that had to be force-quit out of. See `stalledLoading`.
+  //
+  // `busy` goes with it: the two are set together on the way in, and clearing
+  // only the skeleton would reveal a composer that still thought a turn was
+  // running.
+  useEffect(() => {
+    if (!state.loadingSession) return;
+    const timer = setTimeout(() => {
+      setState((s) =>
+        s.loadingSession
+          ? {
+              ...s,
+              loadingSession: false,
+              busy: false,
+              activity: IDLE_ACTIVITY,
+              turns: capTurns([...s.turns, stalledLoading(localSeq.current++)]),
+            }
+          : s,
+      );
+    }, LOADING_SESSION_TIMEOUT);
+    return () => clearTimeout(timer);
+    // `sessionId` restarts the clock when one conversation is opened while
+    // another is still loading: without it the second would inherit whatever
+    // was left of the first one's budget and could fail in a second or two.
+  }, [state.loadingSession, state.sessionId]);
 
   // Which project the bar above the composer names.
   //

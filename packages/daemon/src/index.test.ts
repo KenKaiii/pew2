@@ -48,7 +48,13 @@ async function until<T>(read: () => T | undefined, what: string): Promise<T> {
 
 /** Register a session without spawning an agent: the mechanism is what matters. */
 function plantSession(daemon: Daemon, sessionId: string) {
-  const session = {
+  const session: {
+    handle: AcpSessionHandle;
+    log: SessionLog;
+    providerId: string;
+    live: boolean;
+    working?: boolean;
+  } = {
     handle: {} as AcpSessionHandle,
     log: new SessionLog(sessionId),
     providerId: "test",
@@ -309,6 +315,63 @@ test("resume history streams after announcement and ends with a completion frame
     events: [],
     complete: true,
   });
+});
+
+test("a reconnecting client is given every event it missed while offline", () => {
+  // The bug this guards: a phone loses its socket constantly — screen lock, app
+  // suspend, wifi to cellular — and a frame sent while it is down is gone for
+  // good (the relay stores nothing, and `RelayClient.send` drops it). The agent
+  // keeps working through all of that, so the phone came back and resumed at
+  // the live edge: twenty seconds of tool calls simply never appeared, and the
+  // first thing the user saw was a shell command from the middle of the work.
+  const { daemon, sent } = daemonWithCollector();
+  const session = plantSession(daemon, "live");
+  daemon.markLive("live");
+  sent.length = 0;
+
+  // Three events the client saw, then two it did not.
+  for (const n of [0, 1, 2, 3, 4]) (daemon as any).record(session, { n });
+  session.working = true;
+
+  const frames = daemon.catchUp({ live: 2 });
+
+  expect(frames).toHaveLength(1);
+  expect(frames[0]).toMatchObject({
+    t: "session.replay",
+    sessionId: "live",
+    complete: true,
+    catchUp: true,
+    working: true,
+  });
+  expect(frames[0]!.events.map((event: any) => event.payload.n)).toEqual([3, 4]);
+});
+
+test("a catch-up reports a turn that ended while the client was away", () => {
+  // `session.idle` is broadcast, not logged, so a finished turn replays no
+  // event saying it finished. Without the flag the phone would catch up on the
+  // last chunk of a turn and then spin on it for ever.
+  const { daemon } = daemonWithCollector();
+  const session = plantSession(daemon, "done");
+  daemon.markLive("done");
+  (daemon as any).record(session, { n: 0 });
+  session.working = false;
+
+  expect(daemon.catchUp({ done: -1 })[0]).toMatchObject({ working: false });
+  // Nothing missed and nothing running is nothing to say.
+  expect(daemon.catchUp({ done: 0 })).toEqual([]);
+});
+
+test("a catch-up never invents a session the client was not introduced to", () => {
+  // Clients drop events for sessions they have never been told about, and a
+  // session that is not live has had no `session.started`. Replaying into one
+  // would break the very invariant `markLive` exists to hold.
+  const { daemon } = daemonWithCollector();
+  const session = plantSession(daemon, "hidden");
+  (daemon as any).record(session, { n: 0 });
+  session.working = true;
+
+  expect(daemon.catchUp({ hidden: -1 })).toEqual([]);
+  expect(daemon.catchUp({ "never-existed": -1 })).toEqual([]);
 });
 
 test("a capability answer carries the remembered value, not the agent's default", () => {

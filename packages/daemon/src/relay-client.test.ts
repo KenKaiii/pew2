@@ -28,10 +28,15 @@ function phone() {
 }
 
 /** Enough of a Daemon for the client to drive. */
-function fakeDaemon({ refreshFails = false } = {}) {
+function fakeDaemon({
+  refreshFails = false,
+  catchUp = (): unknown[] => [],
+}: { refreshFails?: boolean; catchUp?: (cursors: Record<string, number>) => unknown[] } = {}) {
   const calls: string[] = [];
+  const cursorsSeen: Record<string, number>[] = [];
   return {
     calls,
+    cursorsSeen,
     daemon: {
       refreshProviders: async () => {
         calls.push("refreshProviders");
@@ -39,6 +44,11 @@ function fakeDaemon({ refreshFails = false } = {}) {
         // it can genuinely fail on a machine that just woke up.
         if (refreshFails) throw new Error("EMFILE: too many open files");
         return { providers: [], errors: [] };
+      },
+      catchUp: (cursors: Record<string, number>) => {
+        calls.push("catchUp");
+        cursorsSeen.push(cursors);
+        return catchUp(cursors);
       },
     } as unknown as Daemon,
   };
@@ -77,10 +87,13 @@ class FakeSocket {
 
 function client(
   overrides: Partial<RelayClientOptions> = {},
-  daemonOptions: { refreshFails?: boolean } = {},
+  daemonOptions: {
+    refreshFails?: boolean;
+    catchUp?: (cursors: Record<string, number>) => unknown[];
+  } = {},
 ) {
   FakeSocket.instances = [];
-  const { daemon, calls } = fakeDaemon(daemonOptions);
+  const { daemon, calls, cursorsSeen } = fakeDaemon(daemonOptions);
   const statuses: string[] = [];
   const relay = new RelayClient({
     daemon,
@@ -92,7 +105,7 @@ function client(
     createSocket: (url) => new FakeSocket(url) as unknown as WebSocket,
     ...overrides,
   });
-  return { relay, statuses, calls };
+  return { relay, statuses, calls, cursorsSeen };
 }
 
 test("dials out with the pairing token, as the daemon role", () => {
@@ -553,5 +566,59 @@ test("without a gate every prover is admitted, so the check is opt-in", async ()
   expect(
     socket.sent.some((raw) => (app.open(JSON.parse(raw)) as { t?: string })?.t === "device.joined"),
   ).toBe(true);
+  relay.stop();
+});
+
+test("a reconnecting phone is answered with everything it missed", async () => {
+  // This is the transport that needs it. A phone reconnects through here every
+  // time the screen locks or the radio switches, and `send` drops anything
+  // emitted while the socket was down — so without this the agent's work during
+  // the gap is gone for good and the phone silently resumes at the live edge.
+  const missed = { t: "session.replay", sessionId: "s1", events: [], catchUp: true, working: true };
+  const { relay, cursorsSeen } = client({}, { catchUp: () => [missed] });
+
+  relay.start();
+  const socket = FakeSocket.instances[0]!;
+  socket.open();
+  socket.sent.length = 0;
+
+  const app = phone();
+  socket.receive({
+    t: "hello",
+    wire: WIRE_VERSION,
+    role: "app",
+    deviceId: "Kens-iPhone",
+    proof: app.proof("Kens-iPhone"),
+    // A fractional seq and a negative one are junk: `hello` is read before the
+    // channel exists, so it is never schema-validated as a whole.
+    cursors: { s1: 41, s2: 2.5, s3: -1 },
+  });
+  await new Promise((r) => setTimeout(r, 20));
+
+  expect(cursorsSeen).toEqual([{ s1: 41 }]);
+  const frames = socket.sent.map((raw) => app.open(JSON.parse(raw)));
+  expect(frames).toContainEqual(missed);
+  relay.stop();
+});
+
+test("a phone that names no cursors is not sent a catch-up it never asked for", async () => {
+  const { relay, cursorsSeen } = client();
+
+  relay.start();
+  const socket = FakeSocket.instances[0]!;
+  socket.open();
+
+  const app = phone();
+  socket.receive({
+    t: "hello",
+    wire: WIRE_VERSION,
+    role: "app",
+    deviceId: "Kens-iPhone",
+    proof: app.proof("Kens-iPhone"),
+  });
+  await new Promise((r) => setTimeout(r, 20));
+
+  // Asked, and answered with nothing — a fresh app holds no sessions.
+  expect(cursorsSeen).toEqual([{}]);
   relay.stop();
 });

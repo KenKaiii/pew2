@@ -9,6 +9,7 @@
  *
  * Pure and React-free so the fold is directly testable.
  */
+import { foldActivity, IDLE_ACTIVITY, type Activity } from "./activity";
 import { isEmptyChunk, readChunk, type Chunk } from "./chunks";
 import { joinChunks } from "./chunkJoin";
 import { readUsage, type ContextUsage } from "./contextUsage";
@@ -64,6 +65,78 @@ interface FoldState {
   busy: boolean;
   permission?: unknown;
   usage?: ContextUsage;
+}
+
+interface CatchUpState extends FoldState {
+  activity: Activity;
+  loadingSession: boolean;
+}
+
+/**
+ * Fold a reconnect catch-up batch — events from a turn that is still running.
+ *
+ * The mirror image of `foldSessionEvents`, and the distinction matters more
+ * than it looks. Both arrive as a `session.replay` frame, but a resume replay
+ * is a transcript of work that finished long ago (so it must not light up the
+ * activity line, and its permission requests were answered by someone else),
+ * while a catch-up is the last few seconds of work happening *now*: the socket
+ * was simply down while it happened. Folding a catch-up as history is what left
+ * a phone that blinked mid-turn showing nothing at all until the agent happened
+ * to start its next tool — twenty seconds of silence, then a shell command out
+ * of nowhere.
+ *
+ * `working` comes from the daemon rather than being inferred from the events:
+ * `session.idle` is broadcast and never logged, so a turn that ended while this
+ * client was away replays nothing that says so.
+ */
+export function foldCatchUp<S extends CatchUpState>(
+  prev: S,
+  sessionId: string | undefined,
+  events: readonly ReplayEvent[],
+  working: boolean,
+  now: number,
+): S {
+  const folded = foldSessionEvents(prev, events);
+  let activity = prev.activity;
+  for (const event of events) activity = foldActivity(activity, event.payload, now);
+  return {
+    ...folded,
+    loadingSession: false,
+    busy: working,
+    // A finished turn has nothing left to name. Its receipt is deliberately not
+    // reconstructed here: this device never timed the turn, and "Answered in 0s"
+    // is a worse answer than no receipt at all.
+    activity: working ? activity : IDLE_ACTIVITY,
+    sessions: folded.sessions.map((session) =>
+      session.id === sessionId && session.busy !== working
+        ? { ...session, busy: working }
+        : session,
+    ),
+  };
+}
+
+/**
+ * Apply a catch-up frame for a conversation that is not the one on screen.
+ *
+ * Only the flag, because only the flag has anywhere to go: this client holds
+ * one transcript at a time, and a background session's events belong to turns
+ * it is not rendering. But the flag matters on its own — reconnecting clears
+ * `busy` on every row (a turn can end while the socket is down, and
+ * `session.idle` is never replayed to say so), so without this a conversation
+ * that really is still working came back from a drop looking finished, and
+ * stayed that way until it happened to produce a notification.
+ */
+export function foldBackgroundCatchUp<S extends { sessions: Session[] }>(
+  prev: S,
+  sessionId: string | undefined,
+  working: boolean,
+): S {
+  if (!sessionId) return prev;
+  const at = prev.sessions.findIndex((session) => session.id === sessionId);
+  if (at < 0 || prev.sessions[at]!.busy === working) return prev;
+  const sessions = [...prev.sessions];
+  sessions[at] = { ...sessions[at]!, busy: working };
+  return { ...prev, sessions };
 }
 
 export function foldSessionEvents<S extends FoldState>(
