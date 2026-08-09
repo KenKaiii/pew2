@@ -179,13 +179,14 @@ function ComposerView({
 
   // Grow with the text, then scroll internally rather than eat the thread.
   //
-  // A shared value and never React state, because state cannot reach the UI
-  // thread without a commit: `contentSize` measured, `setState` re-rendered,
-  // `useAnimatedStyle` closed over the new number, and only then did the box
-  // move. That is a full JS round trip per wrapped line, and it showed as the
-  // box — and the caret riding inside it — lagging behind the text on every
-  // return and every auto-wrap. Written straight from the native event, the
-  // next UI frame already has the number whatever the JS thread is busy with.
+  // A shared value and never React state. The measurement arrives on the JS
+  // thread either way — it is a native event — but what follows it is not the
+  // same amount of work. State meant a re-render, reconciliation of the whole
+  // composer, a fresh `useAnimatedStyle` closure and a commit before the box
+  // could move; a shared value is one write that Reanimated syncs to the UI
+  // runtime with no render at all. Per wrapped line, that difference showed as
+  // the box — and the caret riding inside it — lagging behind the text on every
+  // return and every auto-wrap.
   //
   // The first attempt at this kept a `contentHeight` state beside it for
   // `scrollEnabled`, which put the same render back on the same path: every
