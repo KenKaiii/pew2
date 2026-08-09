@@ -5,8 +5,7 @@ import { expect, test } from "bun:test";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { execFile, spawn } from "node:child_process";
-import { promisify } from "node:util";
+import { spawn } from "node:child_process";
 import {
   DETACH_CHILDREN,
   killOwnedChildren,
@@ -170,7 +169,9 @@ posixTest("a record naming this process is a reused pid, not a live child", asyn
 posixTest("sweepOrphans spares a pid that has been reused by something else", async () => {
   const env = await home();
   const innocent = stubborn();
-  await new Promise((r) => innocent.once("spawn", r));
+  // `armed()`, not the `spawn` event: that fires before bash installs its trap,
+  // and every other test here waits the same way.
+  await armed();
 
   await writeFile(
     join(env.PEW2_HOME!, "children.json"),
