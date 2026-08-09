@@ -5,12 +5,25 @@ coverage that would have caught them. A box is ticked only when a test asserts
 it. Anything that can only be judged on a device stays open no matter how
 confident the change is — "looks fixed" is what produced this list.
 
-Root cause of the whole list: `packages/app/src/useDaemon.ts` is ~2,100 lines of
+Root cause of the whole list: `packages/app/src/useDaemon.ts` is ~2,400 lines of
 connection + session state machine with **zero tests**. Every other package has
-them (`packages/daemon/src` has 30+). That is why this can only be found by hand.
-The fixes below follow the same pattern each time — move the rule into a pure
-module beside the hook, test that, and leave the hook holding the socket — which
-is the extraction the last section asks for, arriving one bug at a time.
+them (`packages/daemon/src` has 40+). That is why this could only be found by
+hand. The fixes below follow the same pattern each time — move the rule into a
+pure module beside the hook, test that, and leave the hook holding the socket —
+which is the extraction the last section asks for, arriving one bug at a time.
+
+The other half is now `packages/daemon/src/e2e.test.ts`: a real daemon in a real
+process, driven over a real socket by a fake phone that performs the same
+handshake the app does (`testing/daemon-process.ts`, `testing/app-client.ts`).
+Every bug on this list lived *between* the parts rather than inside one, which
+is exactly where the unit suites cannot look. It asserts wire facts only — that
+the daemon sends the right frame, to the right socket, with enough in it to tell
+one client's work from another's. What the app then does with a frame stays in
+the pure app-side folds, which are fast and need no processes.
+
+Those scenarios were checked by mutation, not just by passing: breaking the
+`requestId` echo, the `working` flag and the replay window each turn the
+matching test red and nothing else.
 
 ---
 
@@ -180,10 +193,16 @@ Manual passes will not hold this. Priority order:
       tests, no device, no network. Partly begun: `replayFold.ts`,
       `pendingSession.ts` and `cursors.ts` are the reducer's rules for the cases
       above, pure and tested. The socket handler itself is still untested.
-- [ ] **Fake daemon socket in tests.** Script wire messages from
-      `packages/protocol/src` and assert on state: session started while another
-      is visible, `session.started` arriving late, out-of-order events, dropped
-      events, reconnect mid-stream, duplicate ids after a daemon restart.
+- [x] **Real daemon, real socket, fake phone** — `packages/daemon/src/e2e.test.ts`
+      with `testing/daemon-process.ts` and `testing/app-client.ts`. Fourteen
+      scenarios covering the handshake, the single-device claim, a full prompt
+      against a real ACP agent, fan-out to a second socket, a socket killed
+      mid-turn and caught up, cursor de-duplication, and cancellation. Runs in
+      about eight seconds as part of `bun run test`, needs no API key and no
+      network.
+- [ ] The app-side half of the same scenarios. The wire is now covered; what
+      `useDaemon` *does* with those frames still is not, and that is the
+      extraction above rather than more processes.
 - [ ] **Invariant tests** run after every scripted scenario:
       no session busy without an in-flight turn; every started session appears
       exactly once in the drawer; send is never globally disabled.

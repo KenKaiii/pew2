@@ -25,6 +25,31 @@ const sessionCwd = new Map<string, string>();
 let counter = 0;
 
 /**
+ * Sessions whose current turn has been cancelled.
+ *
+ * A real agent stops when the user taps stop, and the client's whole cancel
+ * path — the button, the daemon's notify, the `session.idle` that follows —
+ * only means something if something actually stops. This fixture ignored
+ * `session/cancel` entirely, so every turn ran to completion: a test could not
+ * tell a working cancel from one that had been deleted outright, and one that
+ * tried was quietly asserting nothing.
+ */
+const cancelled = new Set<string>();
+
+/**
+ * Pause between chunks, reporting whether the turn should still continue.
+ *
+ * Every pause in a streamed reply goes through here, so a cancel lands at the
+ * next chunk boundary rather than at the end of the turn — which is what a real
+ * agent does, and the only version of it worth testing a stop button against.
+ */
+async function beat(sessionId: string, ms: number): Promise<boolean> {
+  if (cancelled.has(sessionId)) return false;
+  await new Promise((resolve) => setTimeout(resolve, ms));
+  return !cancelled.has(sessionId);
+}
+
+/**
  * Models and reasoning levels this agent offers. Real agents report their own;
  * this mirrors the shape so the picker can be exercised without an API key.
  * https://agentclientprotocol.com/protocol/v1/session-config-options
@@ -118,12 +143,20 @@ const app = agent({ name: "pew2-echo" })
     // The spec requires replying with the complete list, not just the change.
     return { configOptions };
   })
+  // A notification, not a request: cancellation is fire-and-forget in ACP, and
+  // the turn answers for it by returning `cancelled` as its stop reason.
+  .onNotification("session/cancel", async (ctx: any) => {
+    const { sessionId } = (ctx.params ?? {}) as { sessionId?: string };
+    if (sessionId) cancelled.add(sessionId);
+  })
   .onRequest("session/prompt", async (ctx: any) => {
     const { sessionId, prompt } = ctx.params as {
       sessionId: string;
       prompt: { type: string; text?: string }[];
     };
     const text = prompt.map((p) => p.text ?? "").join(" ").trim();
+    // A cancel that ended the last turn must not end this one before it starts.
+    cancelled.delete(sessionId);
 
     // Ask it where it is and it answers honestly, exactly as a real agent does.
     // This is the only way a test can see the `cwd` the daemon actually sent.
@@ -155,7 +188,7 @@ const app = agent({ name: "pew2-echo" })
           content: { type: "text", text: `${word} ` },
         },
       });
-      await new Promise((r) => setTimeout(r, 40));
+      if (!(await beat(sessionId, 40))) return { stopReason: "cancelled" };
     }
 
     // Exercise the tool-call path on demand: a client's activity line names the
@@ -173,7 +206,7 @@ const app = agent({ name: "pew2-echo" })
           sessionId,
           update: { sessionUpdate: "tool_call", ...call, status: "in_progress" },
         });
-        await new Promise((r) => setTimeout(r, 700));
+        if (!(await beat(sessionId, 700))) return { stopReason: "cancelled" };
       }
       for (const call of calls) {
         await ctx.client.notify("session/update", {
@@ -186,7 +219,7 @@ const app = agent({ name: "pew2-echo" })
             status: call.toolCallId === "echo_test" ? "failed" : "completed",
           },
         });
-        await new Promise((r) => setTimeout(r, 400));
+        if (!(await beat(sessionId, 400))) return { stopReason: "cancelled" };
       }
 
       // A real turn alternates: the agent explains what it found, then picks up
@@ -201,7 +234,7 @@ const app = agent({ name: "pew2-echo" })
             content: { type: "text", text: `${word} ` },
           },
         });
-        await new Promise((r) => setTimeout(r, 60));
+        if (!(await beat(sessionId, 60))) return { stopReason: "cancelled" };
       }
 
       await ctx.client.notify("session/update", {
@@ -214,7 +247,7 @@ const app = agent({ name: "pew2-echo" })
           status: "in_progress",
         },
       });
-      await new Promise((r) => setTimeout(r, 900));
+      if (!(await beat(sessionId, 900))) return { stopReason: "cancelled" };
       await ctx.client.notify("session/update", {
         sessionId,
         update: {
