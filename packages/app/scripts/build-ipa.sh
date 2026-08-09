@@ -17,9 +17,9 @@
 #
 #   ./scripts/build-ipa.sh
 #
-# Needs: an Expo login (`npx eas-cli login`), and a distribution certificate and
-# App Store provisioning profile on the Expo account. EAS creates both on first
-# use and reuses them after; nothing here has to be configured by hand.
+# Needs an Expo login, and a distribution certificate and App Store provisioning
+# profile on that account. EAS creates both on first use and reuses them after,
+# so nothing here has to be configured by hand.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -43,7 +43,7 @@ STAGE="$(mktemp -d)/pew2.ipa"
 # needs a login even though nothing is uploaded: without one the version cannot
 # be resolved and the build stops after the pods are already installed.
 if ! $EAS whoami >/dev/null 2>&1; then
-  echo "Not logged in to Expo. Run: npx eas-cli login" >&2
+  echo "Not logged in to Expo. Run: $EAS login" >&2
   exit 1
 fi
 
@@ -55,18 +55,34 @@ $EAS build --local --platform ios --profile production --output "$STAGE"
 # was actually built is the thing that was built.
 WORK="$(mktemp -d)"
 unzip -q "$STAGE" -d "$WORK"
-PLIST="$WORK/Payload/pew2.app/Info.plist"
+APP="$WORK/Payload/pew2.app"
+PLIST="$APP/Info.plist"
 BUILD=$(plutil -extract CFBundleVersion raw "$PLIST")
 VERSION=$(plutil -extract CFBundleShortVersionString raw "$PLIST")
+
+# Both are used to name the file that replaces the previous one, so an empty
+# read would delete a good build and leave `pew2-build.ipa` behind.
+if [ -z "$BUILD" ] || [ -z "$VERSION" ]; then
+  echo "Could not read a version out of the archive; leaving the Desktop alone." >&2
+  exit 1
+fi
 
 # An .ipa signed for development uploads fine and is then rejected by App Store
 # Connect minutes later, by email, naming nothing useful. The distinguishing
 # mark is `get-task-allow`: true means a debugger may attach, which is exactly
 # what the store forbids. Checked here, where the answer is one line, rather
 # than discovered after Transporter has finished.
-if codesign -d --entitlements - --xml "$WORK/Payload/pew2.app" 2>/dev/null \
-  | plutil -convert xml1 -o - - 2>/dev/null \
-  | grep -A1 -i "get-task-allow" | grep -qi "<true/>"; then
+#
+# Read into a variable first so an unreadable signature is its own failure. As a
+# pipeline straight into `grep` this was fail-open: `codesign` erroring produced
+# no output, nothing matched, and the archive sailed through the check that
+# exists to stop it.
+ENTITLEMENTS=$(codesign -d --entitlements - --xml "$APP" 2>/dev/null | plutil -convert xml1 -o - - 2>/dev/null || true)
+if ! grep -qi "get-task-allow" <<<"$ENTITLEMENTS"; then
+  echo "Could not read entitlements from the archive; refusing to hand it over." >&2
+  exit 1
+fi
+if grep -A1 -i "get-task-allow" <<<"$ENTITLEMENTS" | grep -qi "<true/>"; then
   echo "Built with a development profile; the App Store will reject it." >&2
   echo "Check the credentials on the Expo account: npx eas-cli credentials" >&2
   exit 1
