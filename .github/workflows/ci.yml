@@ -73,10 +73,16 @@ jobs:
       # and a real spawn that would refuse a .cmd with EINVAL.
       - run: bun test ./packages/daemon/src ./packages/protocol/src
 
-      # Proves the CLI actually starts as a Windows process and can resolve
-      # commands here — a crash on startup would otherwise reach users as a
-      # binary that exits instantly with no output.
-      - run: bun run packages/daemon/src/cli/index.ts doctor --json
+      # Proves the CLI actually starts as a Windows process — a crash on startup
+      # would otherwise reach users as a binary that exits instantly with no
+      # output.
+      - run: bun run packages/daemon/src/cli/index.ts --version
+
+      # And that the bundled manifests load and resolve here. Not `doctor`,
+      # which exits non-zero by design on a machine with no pairing and no
+      # daemon — true of every CI runner, so it would fail for the one reason
+      # that is not a bug.
+      - run: bun run packages/daemon/src/cli/index.ts providers validate
 
   # ios/ and android/ are gitignored (CNG), so no native code is checked in and a
   # native break is invisible to typecheck. This job regenerates Android from
