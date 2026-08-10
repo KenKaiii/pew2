@@ -19,6 +19,8 @@ import { theme } from "../theme";
 import { currentTool, queuedTools, type Activity, type ToolKind } from "../activity";
 import { ShimmerText } from "./ShimmerText";
 import { useReducedMotion } from "./useReducedMotion";
+import { STATUS_ROW_MAX_FONT_SCALE } from "./statusRow";
+import { useStatusRowHeight } from "./useStatusRowHeight";
 
 /**
  * One glyph per ACP tool kind, so a glance at the icon says what class of work
@@ -49,6 +51,7 @@ function ActivityLineView({ activity }: { activity: Activity }) {
   const tool = currentTool(activity);
   const queued = queuedTools(activity);
   const reduceMotion = useReducedMotion();
+  const height = useStatusRowHeight();
 
   const fade = useRef(new Animated.Value(1)).current;
   // The row is one component reused across tools rather than one per tool, so
@@ -72,7 +75,7 @@ function ActivityLineView({ activity }: { activity: Activity }) {
 
   return (
     <Animated.View
-      style={[styles.row, { opacity: fade }]}
+      style={[styles.row, { height, opacity: fade }]}
       // Grouped into one node, and announced when it changes rather than
       // stealing focus: this is progress, not something to act on.
       accessible
@@ -89,11 +92,18 @@ function ActivityLineView({ activity }: { activity: Activity }) {
           weight="500"
           duration={SWEEP_DURATION}
           numberOfLines={1}
+          // Capped at exactly what the row height stops at: the two scale
+          // together, so large text grows the line instead of clipping in it.
+          maxFontSizeMultiplier={STATUS_ROW_MAX_FONT_SCALE}
         />
       </View>
       {/* Agents run tools in parallel. Naming one and counting the rest keeps
           the line a single readable row instead of a scrolling log. */}
-      {queued > 0 && <Text style={styles.queued}>+{queued}</Text>}
+      {queued > 0 && (
+        <Text style={styles.queued} maxFontSizeMultiplier={STATUS_ROW_MAX_FONT_SCALE}>
+          +{queued}
+        </Text>
+      )}
     </Animated.View>
   );
 }
@@ -105,7 +115,6 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: theme.space(1.5),
-    height: theme.line.body,
     marginTop: theme.space(5),
     paddingHorizontal: theme.gutter,
   },

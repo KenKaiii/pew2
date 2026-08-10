@@ -1013,6 +1013,30 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
     [dictation.cancel, daemon.sessionId, daemon.prompt, daemon.start, active],
   );
 
+  /**
+   * Sending a failed prompt again, from the transcript.
+   *
+   * The same path as the composer, deliberately: a retry has to start a
+   * conversation when the daemon was restarted under it, and has to queue when
+   * the phone has no signal, exactly as typing it out by hand would.
+   *
+   * What it cannot bring back is the failed message's attachments — they left
+   * the composer when it was sent. It carries whatever is staged now, which is
+   * the same rule the composer follows.
+   *
+   * A refusal has one cause the user can act on: no agent is available to open
+   * a conversation with. That lands the prompt in the composer rather than
+   * nowhere, so the tap is never silent.
+   */
+  const retrySend = useCallback(
+    (text: string) => {
+      if (send(text)) return;
+      composer.current?.setDraft(text);
+      composer.current?.focus();
+    },
+    [send],
+  );
+
   // A mic left listening across a session switch would put the next sentence
   // into a conversation the user has already left.
   useEffect(() => {
@@ -1304,6 +1328,7 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
             indicatorBottom={dockHeight}
             onAtBottomChange={setAtBottom}
             onOpenThought={openThought}
+            onRetry={retrySend}
           />
         ) : !daemon.loadingSession ? (
           // Cancels half the pane's lift, so the greeting settles in the middle

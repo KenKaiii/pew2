@@ -29,15 +29,49 @@ function turn(index: number): Turn {
     text: mine
       ? `Message ${index} — a prompt from me.`
       : `Message ${index} — a reply that runs on for a couple of lines so the ` +
-        `transcript has some real height to it and the last row is easy to spot.`,
+        `transcript has some real height to it and the last row is easy to spot.` +
+        // Every third reply carries a fence, so the two copy controls — the
+        // block's and the message's — can be seen in the same column.
+        (index % 3 === 0 ? "\n\n```ts\nexport const answer = 42;\n```" : ""),
   };
 }
 
+/**
+ * A reply that is nothing but code, which is the case the message-level Copy
+ * has to stay out of: the block's header already carries one, and a second
+ * directly beneath it would copy the identical string.
+ */
+function codeOnlyTurn(index: number): Turn {
+  return {
+    id: `t${index}`,
+    role: "agent",
+    text: "```ts\nexport function answer(): number {\n  return 42;\n}\n```",
+  };
+}
+
+/**
+ * The other thing that cannot be summoned on demand: a rejected turn.
+ *
+ * It is the tail of the thread, which is the only place a retry is offered, and
+ * the control has to read as the way out of the failure rather than as more of
+ * the error text.
+ */
+const FAILURE: Turn = {
+  id: "fail",
+  role: "system",
+  text: "Agent exited before finishing: context length exceeded.",
+};
+
 export default function ChatThreadHarness() {
   const [count, setCount] = useState(12);
+  const [failed, setFailed] = useState(false);
   const [atBottom, setAtBottom] = useState(true);
   const list = useRef<ChatThreadRef>(null);
   const turns = Array.from({ length: count }, (_, i) => turn(i + 1));
+  // Second from the end, so it can be compared against a prose reply's action
+  // row without scrolling.
+  turns.splice(-1, 0, codeOnlyTurn(count + 1));
+  if (failed) turns.push(FAILURE);
 
   return (
     <SafeAreaProvider>
@@ -54,6 +88,7 @@ export default function ChatThreadHarness() {
           indicatorBottom={DOCK_HEIGHT}
           onAtBottomChange={setAtBottom}
           onOpenThought={() => {}}
+          onRetry={() => {}}
         />
 
         {/* Stand-in for the real dock: same job, obvious edge. Anything visible
@@ -66,6 +101,9 @@ export default function ChatThreadHarness() {
             </Pressable>
             <Pressable style={styles.button} onPress={() => setCount(2)}>
               <Text style={styles.buttonText}>short</Text>
+            </Pressable>
+            <Pressable style={styles.button} onPress={() => setFailed((f) => !f)}>
+              <Text style={styles.buttonText}>{failed ? "clear failure" : "fail last turn"}</Text>
             </Pressable>
             <Text style={styles.buttonText}>{atBottom ? "at bottom" : "scrolled up"}</Text>
           </View>

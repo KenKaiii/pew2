@@ -1,7 +1,7 @@
-import { createElement, memo, useEffect, useMemo, useState } from "react";
-import Ionicons from "@expo/vector-icons/Ionicons";
+import { createElement, memo, useMemo } from "react";
 import * as Clipboard from "expo-clipboard";
-import { Linking, Platform, Pressable, StyleSheet, Text, View } from "react-native";
+import * as WebBrowser from "expo-web-browser";
+import { Alert, Linking, Platform, StyleSheet, Text, View } from "react-native";
 import Markdown, {
   type MarkdownStyles,
   type RenderFunction,
@@ -11,6 +11,8 @@ import { theme } from "../theme";
 import { ChatImage } from "./ChatImage";
 import { isDisplayableImage } from "../images";
 import { writeToClipboard } from "./clipboard";
+import { CopyButton } from "./CopyButton";
+import { linkTarget } from "./links";
 import { fencedCodeContainerStyle, fencedCodeTextStyle } from "./markdownCodeStyles";
 import { boundedMarkdownParagraphStyle, boundedMarkdownRootStyle } from "./messageLayoutStyles";
 import { splitMarkdownBlocks } from "./markdownBlocks";
@@ -26,8 +28,6 @@ function trimTrailingNewline(text: string): string {
   return text.endsWith("\n") ? text.slice(0, -1) : text;
 }
 
-type CopyState = "idle" | "copied" | "failed";
-
 function CodeBlock({
   content,
   containerStyle,
@@ -39,56 +39,14 @@ function CodeBlock({
   contentStyle: object;
   textStyle: object;
 }) {
-  const [copyState, setCopyState] = useState<CopyState>("idle");
-
-  useEffect(() => {
-    if (copyState === "idle") return undefined;
-    const reset = setTimeout(() => setCopyState("idle"), 1800);
-    return () => clearTimeout(reset);
-  }, [copyState]);
-
-  const copyCode = async () => {
-    const copied = await writeToClipboard(content, Clipboard.setStringAsync);
-    setCopyState(copied ? "copied" : "failed");
-  };
-
-  const label =
-    copyState === "copied" ? "Copied" : copyState === "failed" ? "Try again" : "Copy";
-  const icon =
-    copyState === "copied"
-      ? "checkmark"
-      : copyState === "failed"
-        ? "alert-circle-outline"
-        : "copy-outline";
-
   return (
     <View style={containerStyle}>
       <View style={codeBlockChrome.header}>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Copy code"
-          accessibilityState={{ selected: copyState === "copied" }}
-          hitSlop={6}
-          onPress={() => void copyCode()}
-          style={({ pressed }) => [
-            codeBlockChrome.copyButton,
-            pressed && codeBlockChrome.copyButtonPressed,
-          ]}
-        >
-          <Ionicons
-            name={icon}
-            size={14}
-            color={copyState === "failed" ? theme.color.danger : theme.color.textDim}
-          />
-          <Text
-            style={[
-              codeBlockChrome.copyLabel,
-              copyState === "failed" && codeBlockChrome.copyLabelFailed,
-            ]}
-          >
-            {label}
-          </Text>
-        </Pressable>
+        {/* The same control the whole reply carries under it. A code block gets
+            its own because a fence is the thing most often wanted on its own —
+            and because holding it selects, but cannot reach past its own
+            scroll. */}
+        <CopyButton text={content} accessibilityLabel="Copy code" />
       </View>
       <View style={contentStyle}>
         <Text selectable style={textStyle}>
@@ -109,17 +67,6 @@ const codeBlockChrome = StyleSheet.create({
     borderBottomColor: theme.color.border,
     backgroundColor: theme.color.surfaceRaised,
   },
-  copyButton: {
-    minHeight: 30,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: theme.space(1),
-    paddingHorizontal: theme.space(2),
-    borderRadius: theme.radius.sm,
-  },
-  copyButtonPressed: { backgroundColor: theme.color.surfacePressed },
-  copyLabel: { color: theme.color.textDim, fontSize: theme.font.tiny, fontWeight: "600" },
-  copyLabelFailed: { color: theme.color.danger },
 });
 
 const renderCodeBlock: RenderFunction = (node, _children, _parents, styles) => {
@@ -368,10 +315,55 @@ const markdownStyles: Record<MarkdownTone, Partial<MarkdownStyles>> = {
   system: stylesFor(theme.color.danger, theme.font.small, 20),
 };
 
+/**
+ * Opening a link from a message.
+ *
+ * A web page opens *inside* the app. Leaving is unusually expensive here: an
+ * agent is running on the other end of this socket, and backgrounding the app
+ * to read a doc page is how a permission request sits unanswered with the
+ * agent stopped, waiting on a phone that is showing Safari. The in-app browser
+ * is one swipe from the conversation and never drops the connection.
+ *
+ * Anything else — `mailto:`, `tel:`, another app's scheme — has no page to
+ * render and goes to the OS, which is the one thing that knows what to do with
+ * it. Whether a scheme is safe to open at all is `links.ts`.
+ *
+ * And a link that cannot be opened now says so. It used to resolve `canOpenURL`
+ * and then quietly drop the URL when the answer was no: the tap did nothing at
+ * all, which reads as the transcript being dead rather than as the link being
+ * unopenable. The alert carries the URL and offers the clipboard, so a link to
+ * an app this phone does not have is still a link the user can use.
+ */
 function openLink(url: string): void {
-  void Linking.canOpenURL(url)
-    .then((supported) => (supported ? Linking.openURL(url) : undefined))
-    .catch(() => undefined);
+  void (async () => {
+    const target = linkTarget(url);
+    try {
+      if (target === "browser") {
+        await WebBrowser.openBrowserAsync(url, {
+          // The transcript's own surface, so the browser arrives as part of
+          // this app rather than as a white flash out of it.
+          toolbarColor: theme.color.surface,
+          controlsColor: theme.color.accent,
+        });
+        return;
+      }
+      if (target === "external") {
+        await Linking.openURL(url);
+        return;
+      }
+    } catch {
+      // Falls through to the same alert as an unsupported scheme: from the
+      // reader's side, a handler that rejected and a handler that does not
+      // exist are the same event.
+    }
+    Alert.alert("Can't open this link", url, [
+      {
+        text: "Copy link",
+        onPress: () => void writeToClipboard(url, Clipboard.setStringAsync),
+      },
+      { text: "OK", style: "cancel" },
+    ]);
+  })();
 }
 
 /**

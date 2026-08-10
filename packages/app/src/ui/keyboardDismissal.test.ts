@@ -56,11 +56,21 @@ test("tapping the transcript takes the keyboard down", () => {
   // covered, and that wrapper had to re-implement the blur itself. Selection is
   // the platform's now, the wrapper is gone, and the rule works unaided.
   //
-  // One Pressable is left in a turn: the thought row, a real button opening a
-  // real sheet. It is a row of its own, not the message body.
+  // What may remain is a *control*: a button occupying its own row, next to the
+  // message rather than over it. Two of them — the thought row, and the retry
+  // under a failed turn — plus the copy button, which is `CopyButton` and not
+  // written here at all. The count is asserted so that a third one has to be a
+  // deliberate addition; what it must never become again is a wrapper.
   const turn = source("Turn.tsx");
-  expect(turn.match(/<Pressable/g) ?? []).toHaveLength(1);
+  expect(turn.match(/<Pressable/g) ?? []).toHaveLength(2);
   expect(turn).toContain("Show thought process");
+  expect(turn).toContain("Send this message again");
+
+  // The shape that is actually forbidden, in the two places a message body is
+  // rendered: no `Pressable` may open before the markdown it would swallow.
+  for (const body of [/<View style={styles.agentRow}>[\s\S]*?<\/View>/, /<View\s+style={\[\s*styles.userBubble[\s\S]*?<\/View>/]) {
+    expect(body.exec(turn)?.[0] ?? "").not.toContain("<Pressable");
+  }
 });
 
 test("an anchored picker keeps the keyboard, on purpose", () => {

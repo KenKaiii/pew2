@@ -54,6 +54,13 @@ export type ShimmerTextProps = {
   gap?: number;
   /** Long tool titles must not wrap the transcript's footer to two lines. */
   numberOfLines?: number;
+  /**
+   * Ceiling on the OS text scale, for a caller whose row is a fixed height.
+   * Both `Text` nodes carry it: they are the same glyphs measured twice, and a
+   * mask that scales differently from the layer under it lights the wrong
+   * pixels.
+   */
+  maxFontSizeMultiplier?: number;
 };
 
 function ShimmerTextView({
@@ -65,6 +72,7 @@ function ShimmerTextView({
   duration = 1800,
   gap = 0,
   numberOfLines,
+  maxFontSizeMultiplier,
 }: ShimmerTextProps) {
   const sweep = useRef(new Animated.Value(0)).current;
   const reduceMotion = useReducedMotion();
@@ -102,7 +110,11 @@ function ShimmerTextView({
       style={styles.host}
       // The text is the mask, so the gradient below paints only the glyphs.
       maskElement={
-        <Text style={label} numberOfLines={numberOfLines}>
+        <Text
+          style={label}
+          numberOfLines={numberOfLines}
+          maxFontSizeMultiplier={maxFontSizeMultiplier}
+        >
           {text}
         </Text>
       }
@@ -120,7 +132,11 @@ function ShimmerTextView({
           setWidth((current) => (current === next ? current : next));
         }}
       >
-        <Text style={[label, styles.invisible]} numberOfLines={numberOfLines}>
+        <Text
+          style={[label, styles.invisible]}
+          numberOfLines={numberOfLines}
+          maxFontSizeMultiplier={maxFontSizeMultiplier}
+        >
           {text}
         </Text>
       </View>

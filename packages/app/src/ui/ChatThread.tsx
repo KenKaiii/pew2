@@ -34,7 +34,9 @@ import { ActivityLine } from "./ActivityLine";
 import { TurnReceipt } from "./TurnReceipt";
 import { useReducedMotion } from "./useReducedMotion";
 import { useAppActive } from "./useAppActive";
+import { useStatusRowHeight } from "./useStatusRowHeight";
 import { currentTool, type Activity, type TurnReceipt as Receipt } from "../activity";
+import { retryTarget } from "../retryPrompt";
 import type { Turn as TurnData } from "../useDaemon";
 
 export type ChatThreadRef = FlashListRef<TurnData>;
@@ -60,6 +62,8 @@ type Props = {
   onAtBottomChange: (atBottom: boolean) => void;
   /** Opens a thinking turn's full text. Must be stable: cells memo on it. */
   onOpenThought: (text: string) => void;
+  /** Sends a failed prompt again. Must be stable: cells memo on it. */
+  onRetry: (text: string) => void;
 };
 
 function ChatThreadView(
@@ -74,9 +78,21 @@ function ChatThreadView(
     indicatorBottom,
     onAtBottomChange,
     onOpenThought,
+    onRetry,
   }: Props,
   ref: React.Ref<ChatThreadRef>,
 ) {
+  // Never while the agent is working: a turn in flight is not a turn that
+  // failed, and the tail is a system line for as long as the next prompt takes
+  // to produce anything.
+  //
+  // Decomposed to its two strings before `renderItem` closes over it, so the
+  // cells are not re-rendered by a fresh object on every streamed chunk. Both
+  // are undefined for the whole of an ordinary conversation.
+  const retry = useMemo(() => (working ? undefined : retryTarget(turns)), [turns, working]);
+  const retryKey = retry?.key;
+  const retryPrompt = retry?.prompt;
+
   const renderItem = useCallback(
     ({ item, index }: ListRenderItemInfo<TurnData>) => {
       // An agent turn is committed empty and filled by later chunks. Rendering
@@ -88,11 +104,16 @@ function ChatThreadView(
       // padding on the scroll content is not part of the list's layout math.
       return (
         <View style={index === 0 ? styles.firstRow : styles.row}>
-          <Turn turn={item} onOpenThought={onOpenThought} />
+          <Turn
+            turn={item}
+            onOpenThought={onOpenThought}
+            retryPrompt={keyExtractor(item) === retryKey ? retryPrompt : undefined}
+            onRetry={onRetry}
+          />
         </View>
       );
     },
-    [onOpenThought],
+    [onOpenThought, onRetry, retryKey, retryPrompt],
   );
 
   // Mirrored into a ref so the inset effect below can read "is the reader at the
@@ -237,17 +258,31 @@ function ChatThreadView(
       keyboardDismissMode="on-drag"
       onScrollBeginDrag={handleScrollBeginDrag}
       keyboardShouldPersistTaps="handled"
-      // The transcript stops where its content stops.
+      // The transcript gives at both ends, and springs back.
       //
-      // Both edges of this list run under something translucent — the floating
-      // nav above, the composer dock below — so rubber-banding does not read as
-      // the usual give at the end of a list. It drags the newest message *under*
-      // the composer, where it is still legible through the blur but half
-      // covered, which looks like a layout fault rather than a gesture. The
-      // reading area is deliberately inset to clear both; letting a drag undo
-      // that gives the inset away.
-      bounces={false}
-      overScrollMode="never"
+      // It used to stop dead. The reason was real but narrower than the fix:
+      // this list's reading insets are real children, and a *short* thread is
+      // bottom-aligned by `startRenderingFromBottom`, so a downward drag there
+      // slid the newest message under the composer — the one place the inset is
+      // load-bearing, undone by a gesture, looking like a layout fault rather
+      // than a stretch. Killing the bounce outright also took the give away
+      // from every scrollable transcript, where the end of a conversation
+      // arrived like a wall and nothing distinguished "the top of the history"
+      // from "the list is stuck".
+      //
+      // `alwaysBounceVertical` is the seam between those two cases: a thread
+      // that does not fill the screen cannot be dragged at all, so the inset it
+      // depends on stays intact, while a thread long enough to scroll bounces
+      // at both ends like every other list on the platform. Nothing is under
+      // the composer to expose there — the content that moves is mid-thread,
+      // which already passes under the translucent dock while scrolling.
+      bounces
+      alwaysBounceVertical={false}
+      // Android's equivalent, and the same bargain: on 12+ this is the stretch
+      // — a spring driven by the platform, not by us — and a glow below that.
+      // "never" was the pair of `bounces={false}` and would otherwise leave the
+      // two platforms feeling different at the same edge.
+      overScrollMode="auto"
       automaticallyAdjustsScrollIndicatorInsets={false}
       // The whole pane is lifted by one transform instead (see `useKeyboardLift`).
       // UIKit's own keyboard inset would be a second, differently-timed
@@ -281,6 +316,17 @@ const SHORT_TRANSCRIPT_TURNS = 2;
 const MAINTAIN_POSITION = {
   startRenderingFromBottom: true,
   autoscrollToBottomThreshold: FOLLOW_THRESHOLD,
+  // Same reasoning as the `threadBottom` catch-up above, for the same reason.
+  //
+  // FlashList animates this by default, which suits a chat where a whole
+  // message arrives at once. A streamed reply is not that: the last row grows
+  // by a fraction of a line many times a second, and each growth starts its own
+  // curve over the one still running. The text then trails the bottom edge and
+  // settles a beat after it stops — motion that carries nothing, since the
+  // reader is already at the end and only the slack below is moving. Unanimated,
+  // the offset changes in the frame the line was added, so the reply simply
+  // grows downward.
+  animateAutoScrollToBottom: false,
 } as const;
 
 // `key` where the turn has one: an optimistic prompt's `id` is replaced by the
@@ -300,11 +346,16 @@ const getItemType = (turn: TurnData) => turn.role;
  * the transcript jumped by that height — visible on every first prompt as the
  * message sliding upward just before the reply began.
  *
+ * All four read that line from `useStatusRowHeight`, because at a large Dynamic
+ * Type setting a body line is not `theme.line.body` — see `statusRow.ts`.
+ *
  * Only the first turn showed it: after that the list is long enough to be
  * scrolled rather than bottom-aligned, so the growth goes below the fold where
  * nobody sees it.
  */
-const SpacerOnly = () => <View style={styles.footerSpacer} />;
+const SpacerOnly = () => (
+  <View style={[styles.footerSpacer, { height: useStatusRowHeight() }]} />
+);
 
 /** Three dots that fade in sequence. Calm, and it costs no layout. */
 function Working() {
@@ -313,6 +364,7 @@ function Working() {
   const three = useRef(new Animated.Value(0.25)).current;
   const reduceMotion = useReducedMotion();
   const appActive = useAppActive();
+  const height = useStatusRowHeight();
 
   // Stopped while backgrounded. Three native-driven loops that run for exactly
   // as long as an agent is thinking — which is when someone is most likely to
@@ -337,7 +389,7 @@ function Working() {
   return (
     // `accessible` groups the dots into one node; without it the label is
     // attached to a container VoiceOver never focuses.
-    <View style={styles.workingRow} accessible accessibilityLabel="Agent is working">
+    <View style={[styles.workingRow, { height }]} accessible accessibilityLabel="Agent is working">
       <Animated.View style={[styles.dot, { opacity: one }]} />
       <Animated.View style={[styles.dot, { opacity: two }]} />
       <Animated.View style={[styles.dot, { opacity: three }]} />
@@ -354,14 +406,13 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     gap: theme.space(1.5),
     alignItems: "center",
-    height: theme.line.body,
     marginTop: theme.space(5),
     paddingHorizontal: theme.gutter,
   },
-  // Mirrors `workingRow` exactly. If one changes, so must the other, or the
-  // transcript will shift the moment an agent starts working.
+  // Mirrors `workingRow` exactly, height included — that one comes from
+  // `useStatusRowHeight` at both call sites. If one changes, so must the other,
+  // or the transcript will shift the moment an agent starts working.
   footerSpacer: {
-    height: theme.line.body,
     marginTop: theme.space(5),
   },
   dot: {

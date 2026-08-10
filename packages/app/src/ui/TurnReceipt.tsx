@@ -14,12 +14,15 @@ import { Animated, StyleSheet, Text } from "react-native";
 import { theme } from "../theme";
 import { receiptText, type TurnReceipt as Receipt } from "../activity";
 import { useReducedMotion } from "./useReducedMotion";
+import { STATUS_ROW_MAX_FONT_SCALE } from "./statusRow";
+import { useStatusRowHeight } from "./useStatusRowHeight";
 
 /** Slower than a control's transition: this arrives, it does not respond. */
 const FADE_DURATION = 260;
 
 function TurnReceiptView({ receipt }: { receipt: Receipt }) {
   const reduceMotion = useReducedMotion();
+  const height = useStatusRowHeight();
   const fade = useRef(new Animated.Value(reduceMotion ? 1 : 0)).current;
 
   useEffect(() => {
@@ -39,10 +42,18 @@ function TurnReceiptView({ receipt }: { receipt: Receipt }) {
   const text = receiptText(receipt);
 
   return (
-    <Animated.View style={[styles.row, { opacity: fade }]} accessible accessibilityLabel={text}>
+    <Animated.View
+      style={[styles.row, { height, opacity: fade }]}
+      accessible
+      accessibilityLabel={text}
+    >
       {/* The mark that says this row is the app talking, not the agent. */}
-      <Text style={styles.mark}>✻</Text>
-      <Text style={styles.text} numberOfLines={1}>
+      <Text style={styles.mark} maxFontSizeMultiplier={STATUS_ROW_MAX_FONT_SCALE}>
+        ✻
+      </Text>
+      {/* Capped where the row stops growing, so large text lengthens the line
+          rather than clipping inside it. */}
+      <Text style={styles.text} numberOfLines={1} maxFontSizeMultiplier={STATUS_ROW_MAX_FONT_SCALE}>
         {text}
       </Text>
     </Animated.View>
@@ -55,7 +66,6 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: theme.space(1.5),
-    height: theme.line.body,
     marginTop: theme.space(5),
     paddingHorizontal: theme.gutter,
   },
