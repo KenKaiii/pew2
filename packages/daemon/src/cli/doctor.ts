@@ -19,7 +19,7 @@ import {
   pairingPath,
   pairingUrl,
 } from "../pairing.js";
-import { serviceStatus } from "./service.js";
+import { isCompiled, serviceStatus } from "./service.js";
 import { readFile } from "node:fs/promises";
 
 export interface StoredPairing {
@@ -101,6 +101,18 @@ export interface DoctorReport {
   problems: Problem[];
 }
 
+/**
+ * How to start a daemon by hand, for whichever install this is.
+ *
+ * The hardcoded `bun run packages/daemon/src/server.ts` is only true inside a
+ * source checkout. Someone who ran the curl installer has no such directory,
+ * and being handed a path that does not exist reads as pew2 not knowing what it
+ * shipped — on the screen whose entire job is telling them what to do next.
+ */
+function daemonStartCommand(): string {
+  return isCompiled() ? "pew2 serve" : "PEW2_EXPERIMENTAL=1 bun run packages/daemon/src/server.ts";
+}
+
 export interface DoctorOptions {
   env?: NodeJS.ProcessEnv;
   /** Directories scanned for manifests. Defaults to `providerDirs(env)`. */
@@ -110,7 +122,10 @@ export interface DoctorOptions {
   /** Injectable so tests never depend on the host's real network interfaces. */
   addresses?: () => string[];
   /** Injectable so tests never inspect the real launchd domain. */
-  service?: () => Promise<{ state: string }>;
+  // `lastExitCode` distinguishes a service that has never run from one that is
+  // restarting on a loop, which is the difference between "not started" and
+  // "starts and dies".
+  service?: () => Promise<{ state: string; lastExitCode?: number }>;
   /**
    * Read the stored pairing. Injectable so a diagnosis never mints one as a
    * side effect — `doctor` must be safe to run without changing anything.
@@ -194,12 +209,26 @@ export async function doctor(options: DoctorOptions = {}): Promise<DoctorReport>
 
   const url = daemonUrl(env);
   const reachable = await (options.probeDaemon ?? defaultProbe)(url);
+  const service = await (options.service ?? serviceStatus)();
+
   if (!reachable) {
+    // A service that launchd holds *installed* while nothing answers is not the
+    // same problem as no daemon at all: it is one that starts and dies, and
+    // launchd's `KeepAlive` hides the loop by restarting it for ever. That is
+    // the state every binary install was in — the plist named `pew2 run
+    // /$bunfs/server.ts`, pew2 printed its help and exited 1, and doctor said
+    // only "nothing serving", which reads as "not started yet".
+    const crashLooping = service.state === "installed" && service.lastExitCode !== 0;
     problems.push({
       id: "daemon-unreachable",
       severity: "error",
-      detail: `Nothing serving on ${url}.`,
-      fix: "PEW2_EXPERIMENTAL=1 bun run packages/daemon/src/server.ts",
+      detail: crashLooping
+        ? `The daemon service is installed but keeps exiting (last exit code ${service.lastExitCode}). Nothing is serving on ${url}.`
+        : `Nothing serving on ${url}.`,
+      // Reinstalling rewrites the plist, which is exactly what repairs a bad
+      // one. The old fix named a path inside a source checkout — advice nobody
+      // who installed a binary could follow.
+      fix: crashLooping ? "pew2 service install" : daemonStartCommand(),
     });
   }
 
@@ -221,7 +250,6 @@ export async function doctor(options: DoctorOptions = {}): Promise<DoctorReport>
     });
   }
 
-  const service = await (options.service ?? serviceStatus)();
   const autostart = service.state === "running" || service.state === "installed";
   // Only worth raising once the daemon is actually up: before that,
   // `daemon-unreachable` is the more useful thing to say.

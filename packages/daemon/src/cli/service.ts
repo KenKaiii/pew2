@@ -46,15 +46,54 @@ export function plistPath(home = homedir()): string {
 export { logDir };
 
 /**
+ * Is this a compiled binary rather than a source checkout?
+ *
+ * Bun serves a compiled binary's own modules out of a virtual filesystem rooted
+ * at `/$bunfs/`, so `import.meta.url` says so directly. Everything downstream of
+ * this question was wrong before it was asked.
+ */
+export function isCompiled(): boolean {
+  return import.meta.url.includes("/$bunfs/");
+}
+
+/**
  * The daemon entry point, resolved from this file.
  *
  * launchd has no working directory and no shell, so every path in the plist has
  * to be absolute. Deriving it here means a moved or reinstalled checkout is
  * picked up by re-running `install` rather than silently pointing at a path that
  * no longer exists.
+ *
+ * Only meaningful for a source checkout. In a compiled binary this resolves to
+ * `/$bunfs/server.ts` — a path inside the executable's virtual filesystem that
+ * no other process can open, and which was being written into the plist as if
+ * it were a real file. See `buildPlist`.
  */
 export function serverEntry(): string {
   return resolve(fileURLToPath(new URL("../server.ts", import.meta.url)));
+}
+
+/**
+ * What launchd should actually execute.
+ *
+ * Two different programs, because there are two ways pew2 is installed.
+ *
+ * From a checkout, `bun run <abs path to server.ts>` — the original arrangement,
+ * and still correct there.
+ *
+ * From a compiled binary, the binary itself with `serve`. The old code took
+ * `process.execPath` (the pew2 binary, not bun) and paired it with `run` and a
+ * `/$bunfs/` path, producing `pew2 run /$bunfs/server.ts`: a subcommand that did
+ * not exist, pointed at a file nothing outside the binary can read. pew2 printed
+ * its help and exited 1, `KeepAlive` restarted it, and the result was a daemon
+ * that crash-looped for ever while `pew2 setup` kept reporting it unreachable.
+ * Every binary install has been in that state since binaries started shipping;
+ * only people whose install predated them, running from source, had a daemon
+ * that worked.
+ */
+export function programArguments(bunPath?: string): string[] {
+  if (isCompiled()) return [process.execPath, "serve"];
+  return [bunPath ?? process.execPath, "run", serverEntry()];
 }
 
 export interface CommandResult {
@@ -119,8 +158,11 @@ export interface InstallOptions {
 }
 
 export function buildPlist(options: InstallOptions = {}): string {
+  const program = programArguments(options.bunPath);
+  // The directory the runtime lives in is prepended to PATH below. For a source
+  // install that is bun's own directory, which is what makes `npx` reachable;
+  // for a binary it is wherever pew2 was installed, which is harmless.
   const bun = options.bunPath ?? process.execPath;
-  const entry = serverEntry();
   const logs = logDir(options.env);
   const port = options.port ?? Number(options.env?.PEW2_PORT ?? 8787);
 
@@ -150,9 +192,7 @@ export function buildPlist(options: InstallOptions = {}): string {
 
     <key>ProgramArguments</key>
     <array>
-      <string>${escapeXml(bun)}</string>
-      <string>run</string>
-      <string>${escapeXml(entry)}</string>
+${program.map((part) => `      <string>${escapeXml(part)}</string>`).join("\n")}
     </array>
 
     <key>EnvironmentVariables</key>

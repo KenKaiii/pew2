@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { doctor } from "./doctor.js";
 import { setup } from "./setup.js";
 import { fakeExecutable } from "../testing/platform.js";
+import { isCompiled } from "./service.js";
 
 /** An isolated machine: empty PATH, empty home, no daemon. */
 async function sandbox() {
@@ -282,4 +283,42 @@ test("a legacy disabled list is retired, and every agent re-checked once", async
   // exactly the bug being undone.
   expect(result.restored).toEqual(["opencode"]);
   expect(result.agents.find((a) => a.id === "opencode")?.disabled).toBe(false);
+});
+
+test("a daemon that starts and dies is named as that, not as 'not started'", async () => {
+  // Every binary install was in this state: the plist named `pew2 run
+  // /$bunfs/server.ts` - a subcommand that did not exist, pointed at a path
+  // inside the executable - so pew2 printed its help and exited 1, KeepAlive
+  // restarted it for ever, and doctor said only "nothing serving on ...",
+  // which reads as "you have not started it yet".
+  const { providersDir, env } = await sandbox();
+
+  const report = await doctor({
+    env,
+    searchDirs: [providersDir],
+    probeDaemon: noDaemon,
+    service: async () => ({ state: "installed", lastExitCode: 1 }),
+  });
+
+  const problem = report.problems.find((p) => p.id === "daemon-unreachable")!;
+  expect(problem.detail).toContain("keeps exiting");
+  // Reinstalling rewrites the plist, which is what repairs a bad one.
+  expect(problem.fix).toBe("pew2 service install");
+});
+
+test("a daemon that was simply never started still says so plainly", async () => {
+  const { providersDir, env } = await sandbox();
+
+  const report = await doctor({
+    env,
+    searchDirs: [providersDir],
+    probeDaemon: noDaemon,
+    service: async () => ({ state: "not-installed" }),
+  });
+
+  const problem = report.problems.find((p) => p.id === "daemon-unreachable")!;
+  expect(problem.detail).not.toContain("keeps exiting");
+  // And never a path from a source checkout when this is a compiled binary:
+  // someone who ran the installer has no such directory.
+  if (isCompiled()) expect(problem.fix).toBe("pew2 serve");
 });

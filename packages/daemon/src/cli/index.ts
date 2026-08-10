@@ -695,6 +695,24 @@ async function cmdRegistry(command: string | undefined, flags: Set<string>) {
   return 0;
 }
 
+/**
+ * Become the daemon.
+ *
+ * Imported dynamically so the module is pulled into the compiled bundle — which
+ * is the fix: `server.ts` was reachable only as a *string* path in the plist
+ * builder, so `bun build --compile` never saw it and the binary shipped without
+ * a daemon in it at all.
+ *
+ * Never returns: `server.ts` starts listening at import and installs its own
+ * signal handlers, so returning a code here would exit the process out from
+ * under it.
+ */
+async function cmdServe(): Promise<number> {
+  await import("../server.js");
+  await new Promise(() => {});
+  return 0;
+}
+
 async function main() {
   const argv = process.argv.slice(2);
   const flags = new Set(argv.filter((a) => a.startsWith("--")));
@@ -706,6 +724,21 @@ async function main() {
     console.log(VERSION);
     return 0;
   }
+
+  // The daemon itself.
+  //
+  // A compiled binary has no `server.ts` on disk to point launchd at — the
+  // module lives inside the executable — so the binary has to be able to *be*
+  // the daemon rather than describe where one is. Without this, a plist could
+  // only ever name a file that does not exist outside the process.
+  //
+  // `run` is accepted as well, and deliberately ignores its argument. Plists
+  // reading `pew2 run /$bunfs/server.ts` are already installed on users'
+  // machines, crash-looping; treating that as `serve` means installing this
+  // build repairs them on the next restart, with nothing for the user to run.
+  // A binary is the only thing that can reach those machines — nobody can be
+  // told to re-run a command they do not know they need.
+  if (group === "serve" || group === "run") return cmdServe();
 
   if (group === "setup") return cmdSetup(flags);
   if (group === "pair") return cmdPair(flags);
@@ -722,6 +755,7 @@ async function main() {
     console.log("    --no-wait                      Print the code and exit instead of waiting");
     console.log("  pew2 relay <url|off>             Reach this machine from anywhere");
     console.log("  pew2 service install|restart     Keep the daemon running across reboots");
+    console.log("  pew2 serve                       Run the daemon in this terminal");
     console.log("  pew2 doctor [--json]             What is wrong, and the command that fixes it");
     console.log("  pew2 detect [--json]             Find installed agents and configure them");
     console.log("  pew2 registry sync               Add every agent in the public ACP registry");

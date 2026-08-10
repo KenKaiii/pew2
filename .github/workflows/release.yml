@@ -84,6 +84,44 @@ jobs:
             exit 1
           fi
 
+      # A binary that cannot be the daemon is not a release, it is a crash loop
+      # with a version number.
+      #
+      # `pew2 service install` wrote a plist naming `pew2 run /$bunfs/server.ts`
+      # - a subcommand that did not exist, pointing at a path inside the
+      # executable's own virtual filesystem. launchd started it, pew2 printed
+      # its help and exited 1, KeepAlive restarted it for ever, and `pew2 setup`
+      # reported the daemon unreachable with no hint why. Every binary install
+      # shipped that way; only people running from a source checkout, whose
+      # plist named a real server.ts, ever had a working daemon.
+      #
+      # `providers list` passed the whole time, because listing manifests never
+      # touches the server module - so this asks the one question that failed:
+      # does the daemon actually come up and answer.
+      - name: Verify the binary can run the daemon
+        if: matrix.target == 'bun-linux-x64'
+        run: |
+          set -u
+          PEW2_HOME=$(mktemp -d) PEW2_PORT=8791 ./${{ matrix.asset }} serve > serve.log 2>&1 &
+          pid=$!
+
+          ok=0
+          for _ in $(seq 1 30); do
+            if curl -fsS -o /dev/null http://127.0.0.1:8791/health; then ok=1; break; fi
+            # A dead process will never start answering, so stop waiting on one.
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 1
+          done
+
+          kill "$pid" 2>/dev/null || true
+          if [ "$ok" -ne 1 ]; then
+            echo "::error::The compiled binary cannot run the daemon."
+            echo "'pew2 serve' never answered /health - a plist pointing at it would crash-loop."
+            cat serve.log
+            exit 1
+          fi
+          echo "daemon answered /health"
+
       - name: Checksum
         run: sha256sum ${{ matrix.asset }} > ${{ matrix.asset }}.sha256
 
