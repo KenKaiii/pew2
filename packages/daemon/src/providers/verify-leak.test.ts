@@ -36,6 +36,26 @@ const MARK = `pew2-verify-leak-${process.pid}`;
  */
 const liveChildren = () => countProcessesMatching(MARK);
 
+/**
+ * Wait for every marked child to be gone, or give up and report what is left.
+ *
+ * Polling rather than one fixed sleep, because "killed" is not instantaneous
+ * and the delay differs by platform in a way a single number cannot express.
+ * POSIX gets a SIGTERM the stub dies on at once; Windows has no SIGTERM at all,
+ * so `terminateChild` closes stdio, waits out its grace period and only then
+ * runs `taskkill /T /F`. A 1.5s sleep passed on macOS and failed on Windows
+ * against code that was working correctly - the test was measuring the grace
+ * period, not the leak.
+ */
+async function settle(deadlineMs = 15_000): Promise<number> {
+  const until = Date.now() + deadlineMs;
+  for (;;) {
+    const alive = liveChildren();
+    if (alive === 0 || Date.now() > until) return alive;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+}
+
 /** An agent that answers `initialize` and then goes silent, as a wedged one does. */
 async function stallingAgent(stage: "handshake" | "session"): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), "pew2-leak-"));
@@ -93,8 +113,7 @@ test("an agent that never answers the handshake is killed, not abandoned", async
 
   // Generous, because killing is asynchronous — but bounded, because "it exits
   // eventually" is exactly what was untrue before.
-  await new Promise((r) => setTimeout(r, 1500));
-  expect(liveChildren()).toBe(0);
+  expect(await settle()).toBe(0);
   // 30s, because Bun's 5s default is not a budget anyone chose: a cold spawn on
   // a Windows runner plus the deliberate 2s stall and the kill wait runs past
   // it, and a timeout here would read as a leak rather than a slow machine.
@@ -121,8 +140,7 @@ test("an agent that stalls after the handshake is killed too", async () => {
   const report = await verifyProvider(provider(script), { timeoutMs: 2000 });
   expect(report.status).toBe("failed");
 
-  await new Promise((r) => setTimeout(r, 1500));
-  expect(liveChildren()).toBe(0);
+  expect(await settle()).toBe(0);
   // 30s, because Bun's 5s default is not a budget anyone chose: a cold spawn on
   // a Windows runner plus the deliberate 2s stall and the kill wait runs past
   // it, and a timeout here would read as a leak rather than a slow machine.
