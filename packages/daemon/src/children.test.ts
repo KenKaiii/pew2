@@ -243,3 +243,49 @@ posixTest("killOwnedChildren finishes off an agent that ignored the shutdown SIG
   // killed, which by then may belong to someone else.
   expect(killOwnedChildren()).toEqual([]);
 });
+
+posixTest("Ctrl-C kills the agents this process owns, and still ends it", async () => {
+  // The half `exit` cannot reach. A default-disposition signal terminates
+  // without running exit hooks, so Ctrl-C on the CLI — or on a `bun test` run
+  // that spawned a probe — left its agents reparented to pid 1. A real child
+  // process is signalled here rather than a stubbed one, because the property
+  // under test is precisely what the kernel does to a process that has a
+  // listener installed.
+  const dir = await mkdtemp(join(tmpdir(), "pew2-signal-"));
+  const pidFile = join(dir, "pid");
+  const script = join(dir, "owner.ts");
+  await writeFile(
+    script,
+    [
+      `import { spawn } from "node:child_process";`,
+      `import { writeFile } from "node:fs/promises";`,
+      `import { registerChild } from ${JSON.stringify(join(import.meta.dir, "children.ts"))};`,
+      `const child = spawn("bash", ["-c", "sleep 30 & wait"], { stdio: "ignore", detached: true });`,
+      `await registerChild(`,
+      `  { pid: child.pid, providerId: "echo", fallbackCommand: "bash" },`,
+      `  { PEW2_HOME: ${JSON.stringify(dir)} },`,
+      `);`,
+      `await writeFile(${JSON.stringify(pidFile)}, String(child.pid));`,
+      // Keep the loop alive, the way a daemon's server does, so the only way
+      // out of this process is the signal.
+      `setInterval(() => {}, 1000);`,
+    ].join("\n"),
+  );
+
+  const owner = spawn("bun", ["run", script], { stdio: "ignore" });
+  let agent = 0;
+  for (let attempt = 0; attempt < 100 && !agent; attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    agent = Number((await readFile(pidFile, "utf8").catch(() => "")).trim());
+  }
+  expect(agent).toBeGreaterThan(0);
+
+  const ended = new Promise<void>((resolve) => owner.once("exit", () => resolve()));
+  owner.kill("SIGINT");
+  await ended;
+  await settled();
+
+  // Both halves matter: the agent is gone, and the process it belonged to did
+  // not survive its own Ctrl-C by virtue of having installed a listener.
+  expect(() => process.kill(agent, 0)).toThrow();
+}, 15_000);

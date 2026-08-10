@@ -1,0 +1,8 @@
+# Bun configuration.
+#
+# `preload` under [test] runs before any test file, which is the only hook early
+# enough to retarget TMPDIR for the whole run. See `scripts/test-setup.ts`: the
+# suite creates `mkdtemp` directories it never removes, and pointing them at one
+# per-run root is what makes them sweepable in a single step.
+[test]
+preload = ["./scripts/test-setup.ts"]

@@ -43,6 +43,7 @@ import { advance, alreadySeen, type Cursors } from "./cursors";
 import { findDuplicateError } from "./errorDedup";
 import { isEmptyChunk, readChunk } from "./chunks";
 import type { ChatImage } from "./images";
+import { emptyImageCache, putImage, type ImageCache } from "./imageCache";
 import {
   attachmentImages,
   toWireAttachments,
@@ -597,6 +598,13 @@ export function useDaemon(
   // never mirrored into history, and a resumed thread re-requests what it can
   // actually see. Inline `data:` sources never enter here at all.
   const [images, setImages] = useState<Record<string, ImageEntry>>({});
+  // The same pictures, plus the recency and byte accounting that bounds them.
+  //
+  // The ref is the source of truth and state is its published copy: eviction has
+  // to drop the uri from `requestedImages` as well, and a `setImages` updater is
+  // the one place that must not do it — React may run an updater twice, and
+  // mutating a ref in one is exactly the impurity `sessionRef` exists to avoid.
+  const imagesCache = useRef<ImageCache<ImageEntry>>(emptyImageCache<ImageEntry>());
   // Commands per provider, kept outside the session so opening a conversation
   // does not blank the menu for agents that never send the ACP notification and
   // are served from their project's files instead.
@@ -687,6 +695,36 @@ export function useDaemon(
   // Images already asked for. A ref, not the state map: the request has to be
   // deduped at the moment of asking, which happens outside any updater.
   const requestedImages = useRef(new Set<string>());
+
+  /**
+   * Record one image, evicting whatever no longer fits.
+   *
+   * Both maps move together, always. `requestedImages` is the guard that stops
+   * the transcript re-asking for a picture it already has, so an entry evicted
+   * from the cache but left in the guard is a picture that can never be fetched
+   * again — a spinner for the rest of the app's life. `ChatImage` re-requests on
+   * every mount and cells recycle, so forgetting both is all a re-scroll needs.
+   */
+  const storeImage = useCallback((uri: string, entry: ImageEntry) => {
+    const { cache, evicted } = putImage(imagesCache.current, uri, entry);
+    imagesCache.current = cache;
+    for (const gone of evicted) requestedImages.current.delete(gone);
+    setImages(cache.images);
+  }, []);
+
+  /**
+   * Drop every cached picture.
+   *
+   * For the moments where the pictures stop being about anything on screen:
+   * leaving a conversation, switching agent, losing the pairing. Holding tens of
+   * megabytes for a transcript nobody is looking at is the leak this cache
+   * exists to stop.
+   */
+  const clearImages = useCallback(() => {
+    imagesCache.current = emptyImageCache<ImageEntry>();
+    requestedImages.current.clear();
+    setImages({});
+  }, []);
   // Daemon session ids the daemon says it currently holds.
   //
   // Session ids belong to a daemon *process*, but this list survives restarts
@@ -1040,6 +1078,9 @@ export function useDaemon(
           if (code === "wire-version" || code === "unpaired" || code === "device-refused") {
             const detail = (frame as { message?: unknown }).message;
             fatal.current = true;
+            // Nothing will ever be fetched from that machine again, and these
+            // are pictures of its filesystem. Forget them with the pairing.
+            clearImages();
             setState((s) => ({
               ...s,
               status: "offline",
@@ -1571,12 +1612,12 @@ export function useDaemon(
         // here and kept out of the transcript state entirely.
         if (message.t === "image" && typeof message.uri === "string") {
           const uri: string = message.uri;
-          setImages((known) => ({
-            ...known,
-            [uri]: message.dataUri
+          storeImage(
+            uri,
+            message.dataUri
               ? { status: "ready", dataUri: message.dataUri, mimeType: message.mimeType }
               : { status: "error", message: message.error ?? "Could not load this image" },
-          }));
+          );
           return;
         }
 
@@ -2010,7 +2051,13 @@ export function useDaemon(
         ws.close();
       }
     };
-  }, [url]);
+    // `pairingKey` and `deviceId` belong here beside `url`: the key is stripped
+    // from the url before it is stored (`pairingLink.ts`), so re-pairing to the
+    // same machine with a rotated key leaves this effect — and the
+    // `SecureChannel` built inside it — holding the key that no longer opens
+    // anything. `storeImage` and `clearImages` are `useCallback([])` and never
+    // change identity, so listing them costs no reconnects.
+  }, [url, deviceId, pairingKey, storeImage, clearImages]);
 
   /**
    * Send one sealed message.
@@ -2038,16 +2085,16 @@ export function useDaemon(
         sessionId: sessionRef.current,
         uri,
       });
-      setImages((known) => ({
-        ...known,
-        [uri]: sent
+      storeImage(
+        uri,
+        sent
           ? { status: "loading" }
           : // Offline: say so rather than spinning forever on a request that was
             // never written to a socket.
             { status: "error", message: "Not connected to your computer" },
-      }));
+      );
     },
-    [post],
+    [post, storeImage],
   );
 
   /**
@@ -2553,6 +2600,9 @@ export function useDaemon(
         awaitingResume.current = false;
         providerRef.current = providerId;
         queued.current = undefined;
+        // The pictures belong to the transcript being closed, and they are the
+        // largest thing this hook holds. See `imageCache.ts`.
+        clearImages();
         setState((s) => ({
           ...s,
           activeProviderId: providerId,
@@ -2601,6 +2651,9 @@ export function useDaemon(
         // no longer has a claim on it.
         awaitingResume.current = false;
         queued.current = undefined;
+        // Same reasoning as `select`: nothing on screen refers to these bytes
+        // any more, and a re-opened conversation re-requests what it can see.
+        clearImages();
         setState((s) => ({
           ...s,
           sessionId: undefined,
@@ -2626,7 +2679,7 @@ export function useDaemon(
     }),
     // `deviceId` identifies this phone in the ids `start` mints. It does not
     // change in practice, and listing it costs nothing if it ever does.
-    [post, deliverPrompt, sendImageRequest, deviceId],
+    [post, deliverPrompt, sendImageRequest, clearImages, deviceId],
   );
 
   // Give up on a conversation that is taking impossibly long to open.
@@ -2669,23 +2722,26 @@ export function useDaemon(
   // edits are covered by the `session.idle` refresh in the socket handler, and
   // the cases that clear the row without changing any of these carry the nonce.
   const workspaceProviderId = state.activeProviderId ?? fallbackProviderId;
+  // Before a session exists this is what the context row describes: the project
+  // the next prompt will open in, rather than whichever one the agent happened
+  // to use last. Named here rather than inline in the dependency array so the
+  // one value that matters is what the effect keys on — the whole `projectPath`
+  // map changes when any *other* agent's project is chosen.
+  const workspaceCwd = workspaceProviderId ? state.projectPath[workspaceProviderId] : undefined;
   useEffect(() => {
     if (state.status !== "online") return;
     post({
       t: "workspace.status",
       sessionId: state.sessionId,
       providerId: workspaceProviderId,
-      // Before a session exists this is what the context row describes: the
-      // project the next prompt will open in, rather than whichever one the
-      // agent happened to use last.
-      cwd: workspaceProviderId ? state.projectPath[workspaceProviderId] : undefined,
+      cwd: workspaceCwd,
     });
   }, [
     post,
     state.status,
     state.sessionId,
     workspaceProviderId,
-    workspaceProviderId ? state.projectPath[workspaceProviderId] : undefined,
+    workspaceCwd,
     // Leaving a conversation changes none of the above when the project is
     // already the chosen one, and the row would stay empty until a prompt.
     state.workspaceNonce,

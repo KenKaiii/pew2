@@ -174,10 +174,36 @@ export function killOwnedChildren(): number[] {
 // the CLI's probe and `providers verify` — and every one of them reaches this
 // module through `connectProvider`. Registering it here is what makes "no agent
 // outlives its daemon" true of all of them instead of whichever was remembered.
-// 'exit' is the only hook every ending shares: signals, a fatal error, an
-// explicit `process.exit`, or the loop simply draining. Nothing owned means
-// nothing happens, so the cost on a process that never spawns one is a no-op.
+// 'exit' covers every *orderly* ending: a fatal error, an explicit
+// `process.exit`, or the loop simply draining. Nothing owned means nothing
+// happens, so the cost on a process that never spawns one is a no-op.
 process.on("exit", () => killOwnedChildren());
+
+/**
+ * The signals a terminal or a service manager uses to stop this process.
+ *
+ * What `exit` does *not* cover. A default-disposition signal terminates without
+ * running exit hooks at all, so Ctrl-C on the CLI — or on a `bun test` run that
+ * spawned a probe — left its agents reparented to pid 1, holding hundreds of MB
+ * each until some future daemon start swept them. Five such orphans were live
+ * on the machine this was written on.
+ */
+for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
+  process.on(signal, () => {
+    // Someone else — `server.ts` — has a graceful shutdown for this signal, and
+    // it wants its half-second for agents to finish writing before the `exit`
+    // hook above kills whatever is left. Registering a listener is enough to
+    // suppress the default action, so the *only* job here is to be the backstop
+    // for a process that has no handler of its own. This one counts as one.
+    if (process.listenerCount(signal) > 1) return;
+    killOwnedChildren();
+    // Re-raise with the default disposition, or a process would survive its own
+    // Ctrl-C purely because this module was imported. Removing the listener
+    // first is what restores that default.
+    process.removeAllListeners(signal);
+    process.kill(process.pid, signal);
+  });
+}
 
 function alive(pid: number): boolean {
   try {

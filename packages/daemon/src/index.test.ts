@@ -12,6 +12,7 @@
  * therefore stored against the provider and applied when the session opens.
  */
 import { test, expect } from "bun:test";
+import { existsSync } from "node:fs";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -21,6 +22,7 @@ import { readConfigPrefs, writeConfigPref } from "./config-prefs.js";
 import { readSessionPrefs, writeSessionPrefs } from "./session-prefs.js";
 import { withStoredPrefs } from "./index.js";
 import type { AcpSessionHandle } from "./acp/connect.js";
+import { storeAttachments } from "./attachments.js";
 
 function daemonWithCollector() {
   const sent: unknown[] = [];
@@ -741,6 +743,69 @@ test("a turn still running is never reaped, however quiet it has gone", () => {
 
   expect(daemon.reapIdleSessions(2 * 60 * 60 * 1000)).toEqual([]);
   expect(working.wasClosed()).toBe(false);
+});
+
+test("a session stuck on an unanswered permission is released after an hour", () => {
+  // `working` is true for the whole wait, so this session was invisible to the
+  // reaper: a request nobody ever saw pinned a whole agent, and one of the four
+  // live slots, for as long as the daemon ran. Closing is not answering — the
+  // conversation resumes when it is reopened.
+  const { daemon } = daemonWithCollector();
+  const stuck = plantIdleSession(daemon, "stuck", {
+    working: true,
+    permissions: new Map([["perm_1", {}]]),
+  });
+
+  expect(daemon.reapIdleSessions(2 * 60 * 60 * 1000)).toEqual(["stuck"]);
+  expect(stuck.wasClosed()).toBe(true);
+});
+
+test("a permission asked minutes ago is still the user's to answer", () => {
+  // The whole reason nothing times a permission out: a phone that lost signal
+  // mid-request comes back and answers. Only an hour of silence is evidence
+  // that nobody is coming.
+  const { daemon } = daemonWithCollector();
+  const asked = plantIdleSession(daemon, "asked", {
+    working: true,
+    permissions: new Map([["perm_1", {}]]),
+    lastUsedAt: 60 * 60 * 1000,
+  });
+
+  // Twenty minutes later: well past the idle TTL, nowhere near the blocked one.
+  expect(daemon.reapIdleSessions(60 * 60 * 1000 + 20 * 60 * 1000)).toEqual([]);
+  expect(asked.wasClosed()).toBe(false);
+});
+
+test("a long turn with nothing pending is not reaped by the blocked clock", () => {
+  // The gate is a pending permission, not elapsed time on a turn. An agent that
+  // has been grinding for two hours is doing exactly what it was asked to.
+  const { daemon } = daemonWithCollector();
+  const grinding = plantIdleSession(daemon, "grinding", {
+    working: true,
+    permissions: new Map(),
+  });
+
+  expect(daemon.reapIdleSessions(5 * 60 * 60 * 1000)).toEqual([]);
+  expect(grinding.wasClosed()).toBe(false);
+});
+
+test("a reaped session's attachments go with it", async () => {
+  // Attachment files used to be discarded only on shutdown, so every photo sent
+  // to a conversation that was later reaped stayed in the tempdir for the
+  // daemon's lifetime. Every close path runs through `closeSession` now.
+  const { daemon } = daemonWithCollector();
+  const { session } = plantIdleSession(daemon, "withfiles");
+  const [stored] = await storeAttachments(session.log.sessionId, [
+    { name: "shot.png", mimeType: "image/png", data: btoa("png bytes") },
+  ]);
+  expect(existsSync(stored!.path)).toBe(true);
+
+  daemon.reapIdleSessions(2 * 60 * 60 * 1000);
+  // `discardAttachments` is fire-and-forget by design — a close must not wait on
+  // a disk — so this waits for the unlink rather than assuming it has landed.
+  await until(() => (existsSync(stored!.path) ? undefined : true), "attachments removed");
+
+  expect(existsSync(stored!.path)).toBe(false);
 });
 
 test("a conversation used recently is left alone", () => {

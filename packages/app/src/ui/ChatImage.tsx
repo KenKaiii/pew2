@@ -63,11 +63,16 @@ function useResolvedSource(src: string, origin?: "device"): Resolved {
   const kind = origin === "device" ? "remote" : imageSourceKind(src);
   const entry = kind === "local" ? resolver?.images[src] : undefined;
   const fetchImage = resolver?.fetchImage;
+  // The picture store is a bounded LRU (`imageCache.ts`), so an entry can
+  // vanish under a cell that is still on screen. Asking again is what turns
+  // that from a permanent spinner into a round trip; the hook dedupes, so the
+  // ordinary transitions through this effect cost nothing.
+  const missing = entry === undefined;
 
   useEffect(() => {
-    if (kind !== "local" || !fetchImage) return;
+    if (kind !== "local" || !fetchImage || !missing) return;
     fetchImage(src);
-  }, [kind, src, fetchImage]);
+  }, [kind, src, fetchImage, missing]);
 
   if (kind !== "local") return { status: "ready", uri: src };
   if (!resolver) return { status: "error", message: "This image is on your computer" };

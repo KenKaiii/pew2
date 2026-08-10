@@ -604,7 +604,14 @@ export async function connectProvider(options: ConnectOptions): Promise<AcpSessi
     });
   }
 
-  const pending = new Map<string, (optionId: string) => void>();
+  // Open permission requests, keyed by the id the app answers with.
+  //
+  // `null` is settled-without-an-answer: closing the connection has to resolve
+  // every entry it still holds, or the `session/request_permission` handler
+  // awaits a promise nobody can ever fulfil — which retains the request, its
+  // handler and the closure around this whole connection for the life of the
+  // daemon process.
+  const pending = new Map<string, (optionId: string | null) => void>();
   let permissionCounter = 0;
 
   const { input, output } = toWebStreams(child);
@@ -670,7 +677,7 @@ export async function connectProvider(options: ConnectOptions): Promise<AcpSessi
       const requestId = `perm_${++permissionCounter}`;
       // Register the resolver *before* notifying, otherwise a caller that answers
       // synchronously finds no pending entry and the agent waits forever.
-      const answered = new Promise<string>((resolve) => {
+      const answered = new Promise<string | null>((resolve) => {
         pending.set(requestId, resolve);
       });
       const sid = (ctx.params as { sessionId?: string })?.sessionId;
@@ -680,6 +687,10 @@ export async function connectProvider(options: ConnectOptions): Promise<AcpSessi
         options.onPermissionRequest;
       handler({ requestId, params: ctx.params });
       const optionId = await answered;
+      // Null means the connection went away with the question unanswered. ACP
+      // has a word for that, and saying it lets the agent unwind instead of
+      // sitting on a request whose client no longer exists.
+      if (optionId === null) return { outcome: { outcome: "cancelled" } };
       return { outcome: { outcome: "selected", optionId } };
     });
 
@@ -1043,6 +1054,11 @@ export async function connectProvider(options: ConnectOptions): Promise<AcpSessi
       return true;
     },
     close() {
+      // Settle before tearing the transport down: an unresolved promise here is
+      // a permission request the agent is still blocked on, and its resolver
+      // keeps this connection's entire closure reachable.
+      for (const resolve of pending.values()) resolve(null);
+      pending.clear();
       connection.close();
       stop();
     },

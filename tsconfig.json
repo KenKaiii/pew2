@@ -13,7 +13,13 @@
     "noEmit": true,
     "types": ["node", "bun"]
   },
-  "include": ["packages/protocol/src/**/*.ts", "packages/daemon/src/**/*.ts"],
+  "include": [
+    "packages/protocol/src/**/*.ts",
+    "packages/daemon/src/**/*.ts",
+    // The `bun test` preload. Not a package, but it is TypeScript that runs on
+    // every test run, so it is checked and linted with everything else.
+    "scripts/**/*.ts"
+  ],
   // packages/relay is typechecked separately against @cloudflare/workers-types
   // (see packages/relay/tsconfig.json); its globals conflict with Node's.
   "exclude": ["node_modules", "packages/app", "packages/relay"]

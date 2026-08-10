@@ -498,6 +498,21 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
     return () => subscription.remove();
   }, [resumeDaemon]);
 
+  // The rest of the hook's actions, pulled out for the same reason as
+  // `resumeDaemon` above: `daemon` is a fresh object every render (it spreads
+  // state over actions), while each function on it is stable. Naming them here
+  // lets every callback below depend on exactly what it calls, instead of on an
+  // identity that changes on every streamed chunk — which would rebuild the
+  // memoised dock and transcript cells for each token that arrives.
+  const {
+    answer: answerDaemon,
+    leave: leaveDaemon,
+    openSession: openDaemonSession,
+    prompt: promptDaemon,
+    selectProject: selectDaemonProject,
+    start: startDaemon,
+  } = daemon;
+
   // Tell the notification layer which conversation is open, so a push that
   // arrives for the one already on screen is dropped instead of covering the
   // reply it is announcing. The daemon pushes without knowing what this phone is
@@ -612,19 +627,24 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
   // sessions array itself, which is rebuilt on every streamed chunk. See
   // `projectSourceKey`: `daemon.sessions` is still what the computation reads,
   // but it is no longer what decides whether to run it.
-  const projectKey = projectSourceKey(daemon.sessions, active?.id);
+  const activeId = active?.id;
+  const daemonSessions = daemon.sessions;
+  const projectKey = projectSourceKey(daemonSessions, activeId);
   const projects = useMemo(
-    () => projectsForProvider(daemon.projects[active?.id ?? ""], daemon.sessions, active?.id),
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- `projectKey` stands
-    // in for `daemon.sessions` on purpose; including the array would defeat it.
-    [daemon.projects, projectKey, active?.id],
+    () => projectsForProvider(daemon.projects[activeId ?? ""], daemonSessions, activeId),
+    // `projectKey` stands in for `daemonSessions` on purpose — the array is
+    // rebuilt on every streamed chunk, and listing it would recompute the fold
+    // for every token that arrives. The rule cannot see that one summarises the
+    // other, so this is the one place it is overruled by hand.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [daemon.projects, projectKey, activeId],
   );
-  const selectedProjectPath = active ? daemon.projectPath[active.id] : undefined;
+  const selectedProjectPath = activeId ? daemon.projectPath[activeId] : undefined;
   const selectProject = useCallback(
     (path?: string) => {
-      if (active) daemon.selectProject(active.id, path);
+      if (activeId) selectDaemonProject(activeId, path);
     },
-    [active?.id, daemon.selectProject],
+    [activeId, selectDaemonProject],
   );
 
   const inThread = daemon.turns.length > 0;
@@ -925,10 +945,10 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
         // optimistic first prompt before the daemon assigns an id, and keying on
         // that would tear the list down mid-reply the moment the id landed.
         setThreadKey(id);
-        daemon.openSession(id);
+        openDaemonSession(id);
       });
     },
-    [daemon.openSession],
+    [openDaemonSession],
   );
 
   // Deferred until the conversation the banner named is in the list: a banner
@@ -936,13 +956,13 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
   // and addressing an unknown id is a no-op that would silently lose it.
   useEffect(() => {
     if (!choice) return;
-    if (!daemon.sessions.some((session) => session.id === choice.sessionId)) return;
+    if (!daemonSessions.some((session) => session.id === choice.sessionId)) return;
     setChoice(undefined);
     if (choice.text) {
       // Replied from the banner: answer that agent where it is and leave the
       // user wherever they were. Being pulled into another project because you
       // dashed off one line is the thing the reply box exists to avoid.
-      if (daemon.prompt(choice.text, choice.sessionId)) {
+      if (promptDaemon(choice.text, choice.sessionId)) {
         haptics.sent();
         return;
       }
@@ -952,7 +972,7 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
       composer.current?.setDraft(choice.text);
     }
     openSession(choice.sessionId);
-  }, [choice, daemon.sessions, daemon.prompt, openSession]);
+  }, [choice, daemonSessions, promptDaemon, openSession]);
 
   /**
    * Dictation writes straight into the draft.
@@ -969,6 +989,9 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
       Alert.alert("Dictation", message);
     }, []),
   });
+  // Same reason as the daemon actions above: the hook's object is new each
+  // render, the function on it is not.
+  const cancelDictation = dictation.cancel;
 
   // Handed the text by the dock, which owns it.
   //
@@ -987,7 +1010,7 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
       // Whatever the recogniser still holds is not going into a message that has
       // already gone, and a live mic outliving the send is what leaves the OS
       // recording indicator on.
-      dictation.cancel();
+      cancelDictation();
 
       // Asked at the moment it earns itself: the user is about to wait on an
       // agent, which is the only thing this app notifies about. Not awaited — the
@@ -1000,17 +1023,17 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
       // draft and its attachments stay put, because destroying a message that
       // was never delivered is the one outcome there is no way back from.
       const taken = daemon.sessionId
-        ? daemon.prompt(text, undefined, staged)
+        ? promptDaemon(text, undefined, staged)
         : // No session yet: start one with the chosen available agent and let
           // the daemon deliver this prompt as soon as it is ready.
-          daemon.start(active!.id, text, staged);
+          startDaemon(active!.id, text, staged);
       if (!taken) return false;
       setAttachments([]);
       return true;
     },
     // Attachments are read through their ref, so staging a photo does not
     // rebuild this and re-render the memoised dock beneath it.
-    [dictation.cancel, daemon.sessionId, daemon.prompt, daemon.start, active],
+    [cancelDictation, daemon.sessionId, promptDaemon, startDaemon, active],
   );
 
   /**
@@ -1040,8 +1063,8 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
   // A mic left listening across a session switch would put the next sentence
   // into a conversation the user has already left.
   useEffect(() => {
-    dictation.cancel();
-  }, [daemon.sessionId, dictation.cancel]);
+    cancelDictation();
+  }, [daemon.sessionId, cancelDictation]);
 
   const openAttach = useCallback(() => {
     Keyboard.dismiss();
@@ -1096,12 +1119,12 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
    */
   const startNewChat = useCallback(
     (cwd?: string) => {
-      if (cwd && active) daemon.selectProject(active.id, cwd);
-      daemon.leave();
+      if (cwd && activeId) selectDaemonProject(activeId, cwd);
+      leaveDaemon();
       setNewChatOpen(false);
       setMenuOpen(false);
     },
-    [active?.id, daemon.selectProject, daemon.leave],
+    [activeId, selectDaemonProject, leaveDaemon],
   );
   const closeNewChat = useCallback(() => setNewChatOpen(false), []);
   // The drawer only ever offers this beside a named project, so it always has
@@ -1136,9 +1159,9 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
     (requestId: string, optionId: string, deny: boolean) => {
       if (deny) haptics.warned();
       else haptics.sent();
-      daemon.answer(requestId, optionId);
+      answerDaemon(requestId, optionId);
     },
-    [daemon.answer],
+    [answerDaemon],
   );
 
   const closePicker = useCallback(() => setPicker(null), []);

@@ -379,6 +379,23 @@ export class Daemon {
    * mean twenty in the worst case.
    */
   private static readonly REAP_INTERVAL_MS = 2 * 60 * 1000;
+  /**
+   * How long a session may sit blocked on an unanswered permission.
+   *
+   * Nothing times a permission out — deliberately, because a phone that lost
+   * signal mid-request must still be able to answer, and an agent stopped
+   * mid-task is better than one that guessed. But `working` is true for the
+   * whole wait, so the idle reaper never touched such a session: a request the
+   * user never saw pinned an agent, and its slot under `MAX_LIVE_SESSIONS`, for
+   * as long as the daemon ran.
+   *
+   * An hour is far past the point where anyone is coming back to that tap, and
+   * closing is not answering: the whole session goes, the app sees the id leave
+   * `activeSessions`, and reopening resumes the conversation — the same path a
+   * daemon restart already takes. A long turn with no pending permission is
+   * untouched.
+   */
+  private static readonly BLOCKED_TTL_MS = 60 * 60 * 1000;
   private reaper?: NodeJS.Timeout;
   /**
    * How many conversations may hold an agent process at once.
@@ -707,6 +724,11 @@ export class Daemon {
         // registered before the UI is notified: an answer can come back on the
         // very next frame, and it must find this here to remove.
         (session.permissions ??= new Map()).set(requestId, params);
+        // The blocked clock starts at the question, not at the last thing the
+        // user did: `reapIdleSessions` measures the wait from here, and without
+        // this stamp a request raised late in a busy session would be measured
+        // from before it was even asked.
+        session.lastUsedAt = Date.now();
         this.record(session, { kind: "permission_request", requestId, params });
       },
       onConfigOptions: (configOptions: ConfigOption[]) =>
@@ -937,6 +959,28 @@ export class Daemon {
   }
 
   /**
+   * End one conversation and release everything it holds.
+   *
+   * The single close path, because there are four callers — the idle reaper, the
+   * live-session cap, an agent being disabled, and shutdown — and each used to
+   * do its own subset. Only shutdown discarded the attachment files, so every
+   * photo sent to a conversation that was later reaped stayed in the tempdir for
+   * the daemon's lifetime.
+   *
+   * Deliberately silent: the callers batch one `announceProviders` per pass,
+   * because the message is a full snapshot of `activeSessions`.
+   */
+  private closeSession(sessionId: string, session: ActiveSession) {
+    if (session.replayTimer) clearTimeout(session.replayTimer);
+    session.replayTimer = undefined;
+    session.handle?.close();
+    // The files were only ever a delivery mechanism for the agent that is now
+    // gone. Best effort, and in the tempdir either way.
+    void discardAttachments(session.log.sessionId);
+    this.sessions.delete(sessionId);
+  }
+
+  /**
    * Close agents for conversations nobody has touched in a long time.
    *
    * The process is the expensive part, not the conversation: the transcript is
@@ -959,17 +1003,19 @@ export class Daemon {
     const reaped: string[] = [];
     for (const [sessionId, session] of this.sessions) {
       // A turn in flight is never idle, however quiet it has gone: an agent can
-      // spend minutes inside one tool call without emitting anything.
-      if (session.working) continue;
-      if (now - session.lastUsedAt < Daemon.SESSION_TTL_MS) continue;
+      // spend minutes inside one tool call without emitting anything. Unless it
+      // is not working at all but waiting on an approval nobody answered, which
+      // is the one kind of stopped that lasts for ever.
+      const blocked = (session.permissions?.size ?? 0) > 0;
+      if (session.working && !blocked) continue;
+      const ttl = blocked ? Daemon.BLOCKED_TTL_MS : Daemon.SESSION_TTL_MS;
+      if (now - session.lastUsedAt < ttl) continue;
       // Nothing to resume from means nothing to come back to. A conversation
       // the agent never named would be lost rather than closed, so it is kept
       // — these are rare and short-lived, since the id arrives during the
       // handshake.
       if (!session.agentSessionId) continue;
-      if (session.replayTimer) clearTimeout(session.replayTimer);
-      session.handle?.close();
-      this.sessions.delete(sessionId);
+      this.closeSession(sessionId, session);
       reaped.push(sessionId);
     }
     // Announce once for the whole pass, not once per session: the message is a
@@ -1000,9 +1046,7 @@ export class Daemon {
     const excess = this.sessions.size - Daemon.MAX_LIVE_SESSIONS;
     const closed: string[] = [];
     for (const [sessionId, session] of closable.slice(0, Math.max(0, excess))) {
-      if (session.replayTimer) clearTimeout(session.replayTimer);
-      session.handle?.close();
-      this.sessions.delete(sessionId);
+      this.closeSession(sessionId, session);
       closed.push(sessionId);
     }
     // Same announce the reaper sends, and for the same reason: `activeSessions`
@@ -1048,9 +1092,7 @@ export class Daemon {
       // work the user is waiting on, and the session is reaped on its own clock
       // once it finishes.
       if (session.working) continue;
-      if (session.replayTimer) clearTimeout(session.replayTimer);
-      session.handle?.close();
-      this.sessions.delete(sessionId);
+      this.closeSession(sessionId, session);
     }
   }
 
@@ -1932,12 +1974,8 @@ export class Daemon {
       clearInterval(this.reaper);
       this.reaper = undefined;
     }
-    for (const session of this.sessions.values()) {
-      if (session.replayTimer) clearTimeout(session.replayTimer);
-      session.handle?.close();
-      // The files were only ever a delivery mechanism for the agent that is
-      // now gone. Best effort, and in the tempdir either way.
-      void discardAttachments(session.log.sessionId);
+    for (const [sessionId, session] of [...this.sessions]) {
+      this.closeSession(sessionId, session);
     }
     this.sessions.clear();
     for (const spare of this.spares.values()) {

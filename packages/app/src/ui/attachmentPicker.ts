@@ -15,7 +15,12 @@
 import * as DocumentPicker from "expo-document-picker";
 import { File } from "expo-file-system";
 import * as ImagePicker from "expo-image-picker";
-import { ImageManipulator, SaveFormat } from "expo-image-manipulator";
+import {
+  ImageManipulator,
+  SaveFormat,
+  type ImageManipulatorContext,
+  type ImageRef,
+} from "expo-image-manipulator";
 import type { PendingAttachment } from "../attachments";
 import { MAX_ATTACHMENTS } from "../attachments";
 
@@ -30,6 +35,29 @@ const MAX_IMAGE_EDGE = 1568;
 
 /** Below this an image is sent untouched — re-encoding would only lose quality. */
 const RECOMPRESS_ABOVE_BYTES = 512 * 1024;
+
+/**
+ * Hand a native bitmap back before the garbage collector gets round to it.
+ *
+ * `ImageManipulator` objects hold their pixels in native memory that JS heap
+ * pressure knows nothing about — a 12MP photo is ~48MB per retained reference,
+ * and the picker holds two of them (loaded and resized) plus the context. Left
+ * to the collector, attaching a few photos is enough for iOS to kill the app for
+ * memory before a single frame is dropped.
+ *
+ * Failures are swallowed: this runs in a `finally`, and a throw there would
+ * replace a perfectly good attachment with an error.
+ */
+// Structural rather than `SharedObject`: expo-modules-core exports that name as
+// the constructor type, so it does not describe an instance.
+function release(object: { release(): void } | undefined): void {
+  try {
+    object?.release();
+  } catch {
+    // Already released, or a platform without a native counterpart. Nothing to
+    // do either way, and nothing worth telling the user.
+  }
+}
 
 let nextId = 0;
 function makeId(): string {
@@ -110,17 +138,22 @@ async function readImage(uri: string, name: string, mimeType: string): Promise<P
     };
   }
 
+  // Declared out here so the `finally` can hand every native bitmap back,
+  // whichever step threw.
+  let context: ImageManipulatorContext | undefined;
+  let loaded: ImageRef | undefined;
+  let rendered: ImageRef | undefined;
   try {
-    const context = ImageManipulator.manipulate(uri);
+    context = ImageManipulator.manipulate(uri);
     // The cap is on the *long* edge, and only the source knows which one that
     // is: a portrait photo constrained by `width` comes back taller than the
     // limit, and a narrow one is scaled *up* — the opposite of why this runs.
     // So the image is loaded once to be measured, then resized on the edge
     // that is actually too big; only that dimension is passed, and the other
     // follows from the aspect ratio.
-    const loaded = await context.renderAsync();
+    loaded = await context.renderAsync();
     const longEdge = Math.max(loaded.width, loaded.height);
-    const rendered =
+    rendered =
       longEdge > MAX_IMAGE_EDGE
         ? await context
             .resize(
@@ -153,6 +186,14 @@ async function readImage(uri: string, name: string, mimeType: string): Promise<P
       size: originalSize,
       localUri: uri,
     };
+  } finally {
+    // The bytes that matter are already on disk (`saved.uri`) or read into the
+    // returned string, so nothing here is still needed. `rendered` is the same
+    // object as `loaded` when the image needed no resize — releasing it twice
+    // would be a call on a detached native object.
+    if (rendered !== loaded) release(rendered);
+    release(loaded);
+    release(context);
   }
 }
 
