@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdtemp, mkdir, rm, writeFile, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { POSIX_PATHS } from "./testing/platform.js";
 import {
   historyImages,
   imageMimeType,
@@ -23,6 +24,12 @@ async function project() {
 }
 
 test("agent paths resolve the way agents actually write them", () => {
+  // POSIX literals: on Windows the same code correctly yields a backslash path
+  // with a drive letter attached, so the expectations here cannot be spelled
+  // portably without saying less than they mean. The Windows shape of this is
+  // covered by "a windows drive letter is a path, not a URI scheme" below.
+  if (!POSIX_PATHS) return;
+
   expect(toLocalPath("out/plot.png", "/work/app")).toBe("/work/app/out/plot.png");
   expect(toLocalPath("/work/app/out/plot.png", "/work/app")).toBe("/work/app/out/plot.png");
   expect(toLocalPath("file:///work/app/out/plot.png", "/work")).toBe("/work/app/out/plot.png");

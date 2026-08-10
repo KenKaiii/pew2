@@ -11,7 +11,7 @@
 import { expect, test } from "bun:test";
 import { mkdir, mkdtemp, realpath, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { discoverRepos, listDirectory, resolveBrowsePath } from "./workspaces.js";
 
 /**
@@ -90,7 +90,9 @@ test("suggestions are ordered by recency, because that is how projects are chose
    */
   const order = async (roots: string[]) =>
     (await discoverRepos({ roots }))
-      .map((entry) => entry.path.split("/").pop())
+      // `basename`, not a split on "/": on Windows these are backslash paths, so
+      // splitting on a forward slash returns the whole path and matches nothing.
+      .map((entry) => basename(entry.path))
       .filter((name) => name === "api" || name === "web");
 
   // Asserted both ways round, because one arrangement or the other must
