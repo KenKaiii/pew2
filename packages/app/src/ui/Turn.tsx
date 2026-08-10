@@ -12,6 +12,7 @@
  */
 import { memo, type ReactNode } from "react";
 import {
+  Keyboard,
   Pressable,
   StyleSheet,
   Text,
@@ -90,14 +91,33 @@ function Copyable({
   children: ReactNode;
 }) {
   // Without a handler this is a plain view: no press state, no accessibility
-  // node wrapped around the turn, nothing to explain.
+  // node wrapped around the turn, nothing to explain. Taps then fall through to
+  // the list's own `keyboardShouldPersistTaps="handled"`, which blurs.
   if (!onCopy) return <View style={style}>{children}</View>;
 
   return (
     // See above: this must never become an accessibility element. It is a touch
     // target laid over text, not a control, and the text underneath keeps its
     // own nodes.
-    <Pressable accessible={false} onLongPress={() => onCopy(text)} style={style}>
+    <Pressable
+      accessible={false}
+      // Tapping a message puts the keyboard away, exactly as dragging the
+      // transcript does.
+      //
+      // This wrapper is why it had to be said here. `keyboardShouldPersistTaps`
+      // is `"handled"` on the list, so an unclaimed tap blurs the composer — but
+      // every turn is wrapped in this Pressable for the copy-hold, and a
+      // Pressable claims the touch. Messages cover nearly the whole transcript,
+      // so "tap away from the input" landed on one of them and did nothing: the
+      // keyboard stayed up and the composer stayed expanded, with only a drag or
+      // the keyboard's own control to get out of it.
+      //
+      // Free of the hold it shares this view with: a press that becomes a long
+      // press never fires `onPress`, so taking the text still does only that.
+      onPress={Keyboard.dismiss}
+      onLongPress={() => onCopy(text)}
+      style={style}
+    >
       {children}
     </Pressable>
   );

@@ -44,6 +44,16 @@ test("every sheet takes the keyboard down, from the one place they share", () =>
   }
 });
 
+test("tapping the transcript takes the keyboard down", () => {
+  // The list already asks for this with `keyboardShouldPersistTaps="handled"`,
+  // which blurs on any tap a child does not claim. Every turn is wrapped in a
+  // Pressable for the copy-hold, though, and a Pressable claims the touch — so
+  // the one gesture the rule exists for, tapping away from the composer onto the
+  // conversation, was the one it never covered.
+  expect(source("ChatThread.tsx")).toContain('keyboardShouldPersistTaps="handled"');
+  expect(source("Turn.tsx")).toContain("onPress={Keyboard.dismiss}");
+});
+
 test("an anchored picker keeps the keyboard, on purpose", () => {
   // The opposite decision, and the more fragile one: it looks like an oversight,
   // so it is the one somebody would "fix". Switching model or project is not
