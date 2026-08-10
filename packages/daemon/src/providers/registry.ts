@@ -7,7 +7,7 @@
  */
 import { readdir, readFile } from "node:fs/promises";
 import { join, resolve, isAbsolute, delimiter, dirname } from "node:path";
-import { existsSync } from "node:fs";
+import { statSync } from "node:fs";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { BUNDLED_MANIFESTS } from "./bundled.js";
@@ -32,6 +32,75 @@ export interface LoadedProvider {
 }
 
 /**
+ * The platform whose rules apply.
+ *
+ * Injectable purely so the Windows half can be tested — CI is Linux-only and
+ * macOS runners bill 10x, so a `process.platform` read here means the rules that
+ * broke Windows are the one part of resolution nothing can ever exercise. That
+ * is exactly how a detector that could not work on Windows shipped.
+ */
+export type Platform = "win32" | "posix";
+
+function platformOf(env: NodeJS.ProcessEnv): Platform {
+  // An env override rather than an argument threaded through six call sites:
+  // the tests that need it are about resolution, and everything else should not
+  // have to know this exists.
+  if (env.PEW2_FAKE_PLATFORM === "win32") return "win32";
+  if (env.PEW2_FAKE_PLATFORM === "posix") return "posix";
+  return process.platform === "win32" ? "win32" : "posix";
+}
+
+/**
+ * The extensions that make a file runnable on Windows.
+ *
+ * PATHEXT is what the shell uses, so it is what decides whether a name resolves.
+ * The fallback matches the system default; each is matched case-insensitively
+ * because the registry value is conventionally uppercase and the files on disk
+ * are not.
+ */
+function windowsExtensions(env: NodeJS.ProcessEnv): string[] {
+  const raw = env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD";
+  return raw.split(";").map((ext) => ext.trim().toLowerCase()).filter(Boolean);
+}
+
+/**
+ * Is this file one the current platform would actually run?
+ *
+ * On Windows the name has to carry a PATHEXT suffix. That single rule is the
+ * whole Windows bug: `npm install -g` writes *three* files per binary —
+ * `agent.cmd`, `agent.ps1`, and an extensionless `agent` which is a **Bash**
+ * script for Git Bash and Cygwin. An extensionless `existsSync` matched that sh
+ * script, so every npm-installed agent was reported installed on Windows and
+ * then failed at spawn with ENOENT, because libuv only ever tries `.com` and
+ * `.exe` (it does not read PATHEXT at all). The same check missed
+ * `cursor-agent.exe` entirely, since nothing on disk is named `cursor-agent`.
+ *
+ * On POSIX existence is not enough either: a non-executable file of the right
+ * name is not a command, and reporting it as one produces EACCES at spawn.
+ */
+function runnable(path: string, env: NodeJS.ProcessEnv, platform: Platform): boolean {
+  let stats;
+  try {
+    stats = statSync(path);
+  } catch {
+    return false;
+  }
+  // A directory named `goose` is not the goose command.
+  if (!stats.isFile()) return false;
+
+  if (platform === "win32") {
+    const lower = path.toLowerCase();
+    return windowsExtensions(env).some((ext) => lower.endsWith(ext));
+  }
+
+  // Any execute bit. Which one applies depends on the file's owner and group
+  // versus this process's, and the kernel is the authority on that — so this is
+  // deliberately the permissive check: a false positive fails informatively at
+  // spawn, while a false negative hides an agent the user definitely has.
+  return (stats.mode & 0o111) !== 0;
+}
+
+/**
  * Resolve an executable the way a shell would, or `undefined` if it is not
  * installed. Checked up front so an uninstalled agent is shown as unavailable
  * in the app rather than failing at spawn time, and reused by `detect` to work
@@ -41,18 +110,52 @@ export interface LoadedProvider {
  * package: those fetch on demand, so a missing `npx` is the only thing that can
  * be known ahead of time — and it is worth knowing, since without it the
  * provider cannot start at all.
+ *
+ * Returns the **full path**, extension included, so callers spawn the exact file
+ * that was found rather than a bare name the platform has to resolve a second
+ * time by different rules.
  */
 export function findOnPath(
   command: string,
   env: NodeJS.ProcessEnv = process.env,
 ): string | undefined {
-  if (isAbsolute(command) || command.includes("/")) {
-    return existsSync(command) ? command : undefined;
-  }
-  const paths = (env.PATH ?? "").split(delimiter).filter(Boolean);
-  for (const dir of paths) {
-    const candidate = join(dir, command);
-    if (existsSync(candidate)) return candidate;
+  const platform = platformOf(env);
+  const windows = platform === "win32";
+
+  // A path, not a name. Backslashes count on Windows, where `.\agent.cmd` is as
+  // much a path as `./agent` is here — matching only `/` sent it to the PATH
+  // scan, which then joined a path onto a directory and found nothing.
+  const looksLikePath =
+    isAbsolute(command) || command.includes("/") || (windows && command.includes("\\"));
+
+  const candidates = (dir: string): string[] => {
+    const base = dir ? join(dir, command) : command;
+    if (!windows) return [base];
+    // An explicit extension is honoured as given; otherwise every PATHEXT
+    // suffix is tried, in the order the system lists them.
+    const exts = windowsExtensions(env);
+    const hasExt = exts.some((ext) => base.toLowerCase().endsWith(ext));
+    return hasExt ? [base] : exts.map((ext) => base + ext);
+  };
+
+  // PATH uses `;` on Windows and `:` elsewhere, and `path.delimiter` reports the
+  // *host's* — which is the wrong one whenever the platform is being simulated.
+  const sep = windows ? ";" : delimiter;
+
+  const dirs = looksLikePath
+    ? [""]
+    : // Windows resolves the current directory before PATH, and a user who
+      // installed an agent into the folder they are standing in should not be
+      // told it is missing.
+      [...(windows ? [process.cwd()] : []), ...(env.PATH ?? "").split(sep).filter(Boolean)]
+        // PATH entries are conventionally quoted on Windows when they contain
+        // spaces; the quotes are syntax, not part of the directory name.
+        .map((dir) => dir.replace(/^"(.*)"$/, "$1"));
+
+  for (const dir of dirs) {
+    for (const candidate of candidates(dir)) {
+      if (runnable(candidate, env, platform)) return candidate;
+    }
   }
   return undefined;
 }

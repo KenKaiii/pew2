@@ -96,6 +96,141 @@ export function needsSetup(detail: string | undefined): boolean {
   );
 }
 
+/**
+ * What went wrong, in words a person can act on.
+ *
+ * The broken section used to print the agent's raw failure under the heading
+ * "Not working", which answers none of the three questions someone actually has:
+ * is it me, is it the agent, or is it pew2? "'Gemini CLI' failed to start: ACP
+ * connection closed. It was started with: npx …" reads as pew2 being broken, and
+ * the one useful line — what the process printed on its way out — was on the
+ * *second* line of the message, which this screen drops.
+ *
+ * So a failure is sorted into the small number of things it can actually be,
+ * each with a fixed sentence, and the agent's own words are kept as evidence
+ * underneath rather than used as the explanation.
+ */
+export type FailureKind = "outdated" | "stalled" | "crashed" | "unknown";
+
+export interface Failure {
+  kind: FailureKind;
+  /** Two or three words, shown beside the agent's name. */
+  label: string;
+  /** One sentence: what happened, and what it means. */
+  explain: string;
+  /** The agent's own words, when they say more than the sentence does. */
+  evidence?: string;
+}
+
+/** The agent does not speak ACP — almost always a version from before it did. */
+const OUTDATED =
+  /method not found|-32601|unknown (?:option|argument|flag|command)|unrecognized (?:option|argument)|invalid option|unsupported protocol|protocol version/i;
+
+/**
+ * It never answered. Distinct from crashing: the process is alive, just mute.
+ *
+ * "never opened a session" is the same condition one step later — the agent
+ * answered the handshake and then went quiet on `session/new` — so it reads as
+ * the same thing to the user and must not fall through to "did not start",
+ * which would be a lie about an agent that plainly did.
+ */
+const STALLED =
+  /did not respond to the acp handshake|never opened a session|timed out|timeout/i;
+
+/** It answered with an exit rather than a handshake. */
+const CRASHED =
+  /failed to start|connection closed|exited|not found on path|eacces|spawn \w+/i;
+
+/** Wrapper text that says nothing on its own, so it must not be shown as a reason. */
+const EMPTY_REASON =
+  /^(?:acp )?connection closed$|^internal error$|^the agent failed without saying why$/i;
+
+/**
+ * The agent's message with pew2's own framing taken back off.
+ *
+ * `connect.ts` wraps every failure as "'Name' failed to start: <message>. It was
+ * started with: <command>" so a log line is attributable to something. On this
+ * screen the name is already the row and the command is already known, so both
+ * are noise around the only part worth reading.
+ */
+function coreMessage(detail: string): string {
+  const first = detail.split("\n")[0]!.trim();
+  return first
+    .replace(/^'[^']*'\s+(?:failed to start:\s*)?/i, "")
+    .replace(/\s*It was started with:.*$/i, "")
+    .replace(/[.\s]+$/, "")
+    .trim();
+}
+
+/**
+ * What the process printed before dying.
+ *
+ * `failureContext()` in `connect.ts` appends the captured stderr after a
+ * newline, and `wrapDetail` keeps only the first line — so the single most
+ * useful thing about a crash (`npm error 404`, `Node 20 or later is required`)
+ * was being collected by the daemon and then dropped by the renderer.
+ */
+function stderrLine(detail: string): string | undefined {
+  for (const line of detail.split("\n").slice(1)) {
+    const trimmed = line.trim();
+    if (trimmed) return trimmed;
+  }
+  return undefined;
+}
+
+/** Classify a broken agent's failure. Only meaningful for the `broken` bucket. */
+export function failureFor(agent: AgentState): Failure {
+  const detail = agent.verify?.detail ?? "";
+  const reason = coreMessage(detail);
+  const printed = stderrLine(detail);
+  const said = reason && !EMPTY_REASON.test(reason) ? reason : undefined;
+
+  // Order matters: the wrapper says "failed to start" for every one of these, so
+  // the specific causes have to be tested before the generic crash.
+  if (OUTDATED.test(detail)) {
+    return {
+      kind: "outdated",
+      label: "too old",
+      explain:
+        "This version does not speak ACP, the protocol pew2 drives it with. Update the agent, then run pew2 setup again.",
+      evidence: said ?? printed,
+    };
+  }
+
+  if (STALLED.test(detail)) {
+    return {
+      kind: "stalled",
+      label: "no answer",
+      // Said plainly because it is usually not a fault at all: the first run of
+      // an npx-launched agent downloads the package, and on a slow connection
+      // that can outlast the check.
+      explain:
+        "It started but never finished connecting. A first run downloads the agent, so this often passes on a second try.",
+      evidence: printed,
+    };
+  }
+
+  if (CRASHED.test(detail)) {
+    return {
+      kind: "crashed",
+      label: "quit at startup",
+      explain: "The agent started, then exited before pew2 could connect to it.",
+      // Its own words first — "connection closed" is only pew2 noticing the
+      // exit, so where that is all there is, what it printed is the whole story.
+      evidence: said ?? printed,
+    };
+  }
+
+  return {
+    kind: "unknown",
+    label: "did not start",
+    explain:
+      said ??
+      "The agent stopped without saying why. Running it once in a terminal usually shows the reason.",
+    evidence: said ? printed : undefined,
+  };
+}
+
 /** Sort one agent into its bucket. */
 export function bucketFor(agent: AgentState): Bucket {
   // Checked first: an agent that is not on the machine cannot have an auth
@@ -122,6 +257,49 @@ export function group(agents: AgentState[]): Record<Bucket, AgentState[]> {
 }
 
 /**
+ * The parenthetical after an agent's name in the picker.
+ *
+ * A couple of words on why a row is not ready — never a verdict. It used to say
+ * "not working" for every failed verification, which lumped an agent that has
+ * merely not been signed into yet with one that genuinely crashed, and told
+ * three of the agents on a normal machine they were broken when the only thing
+ * missing was a login.
+ *
+ * Sorted by the same bucket the report below uses, so the picker and the
+ * sections printed under it can no longer disagree about what state an agent is
+ * in — which they did, since one read `verify.status` directly and the other did
+ * not.
+ */
+export function pickerNote(agent: AgentState): string | undefined {
+  switch (bucketFor(agent)) {
+    case "not-installed":
+      return "not installed";
+    case "needs-setup":
+      return "needs signing in";
+    case "missing-key":
+      return agent.missingEnv.length > 0 ? `needs ${agent.missingEnv[0]}` : "needs a key";
+    case "broken":
+      return failureFor(agent).label;
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * Can this agent be turned on for the phone?
+ *
+ * Installed and startable is the bar — not signed in. Logging in is a
+ * thirty-second job someone may well do straight after this screen, and
+ * refusing to let them select it meant setup wrote the agent into the disabled
+ * list on their behalf: an agent they authenticated an hour later stayed hidden
+ * from the phone until they found `pew2 providers enable`.
+ */
+export function canPick(agent: AgentState): boolean {
+  const bucket = bucketFor(agent);
+  return bucket !== "not-installed" && bucket !== "broken";
+}
+
+/**
  * The agent sections.
  *
  * Order matters and is not alphabetical: what works comes first, because that is
@@ -134,7 +312,15 @@ export function agentSections(agents: AgentState[], options: RenderOptions = {})
   const s = options.style ?? styler();
   const g = options.glyph ?? glyphs();
   const r = rail(options);
-  const buckets = group(agents);
+  // Turned-off agents are pulled out before bucketing.
+  //
+  // Since setup stopped starting them, they have no verification behind them —
+  // and `bucketFor` reads "no report" as ready, so they would take a green tick
+  // under "Ready to use" that nothing on this run actually checked. Worse, it
+  // contradicts the closing count, which has always counted only what the phone
+  // gets: five ticks above "2 agents ready" reads as a bug in the count.
+  const off = agents.filter((agent) => agent.disabled);
+  const buckets = group(agents.filter((agent) => !agent.disabled));
   const out: string[] = [];
 
   if (buckets.ready.length > 0) {
@@ -142,6 +328,23 @@ export function agentSections(agents: AgentState[], options: RenderOptions = {})
     for (const agent of buckets.ready) {
       out.push(r.line(`${s.hex(PALETTE.success, g.tick)} ${agent.name}`));
     }
+  }
+
+  if (off.length > 0) {
+    // Stated as the user's own decision, with the way back. Not a fault, not a
+    // chore, and never checked — starting an agent someone has switched off is
+    // the thing that made this section necessary.
+    out.push(...r.step("Turned off", "your choice — not checked"));
+    out.push(
+      r.line(
+        `${s.hex(PALETTE.faint, off.map((agent) => agent.name).sort((a, b) => a.localeCompare(b)).join(", "))}`,
+      ),
+    );
+    out.push(
+      r.line(
+        `${s.hex(PALETTE.faint, "pew2 providers enable <id>")}   ${s.hex(PALETTE.faint, "to use one again")}`,
+      ),
+    );
   }
 
   if (buckets["needs-setup"].length > 0) {
@@ -166,16 +369,35 @@ export function agentSections(agents: AgentState[], options: RenderOptions = {})
   if (buckets.broken.length > 0) {
     // The only section that gets a cross, and only for agents that are on the
     // machine and genuinely will not run.
-    out.push(...r.step("Not working", "these are installed but would not start"));
+    //
+    // The heading names the agent as the subject, not the verdict: "Not working"
+    // above a pew2 screen reads as pew2 not working, which is the opposite of
+    // what happened — the check ran fine and found something on this computer.
+    out.push(...r.step("Installed, but not starting", "what each one did"));
     for (const agent of buckets.broken) {
-      out.push(r.line(`${s.hex(PALETTE.danger, g.cross)} ${s.bold(agent.name)}`));
-      const detail = agent.verify?.detail;
-      if (detail) {
-        for (const part of wrapDetail(detail, detailWidth(options))) {
+      const failure = failureFor(agent);
+      out.push(
+        r.line(
+          `${s.hex(PALETTE.danger, g.cross)} ${s.bold(agent.name)}${s.hex(PALETTE.faint, `  ${failure.label}`)}`,
+        ),
+      );
+      for (const part of wrapDetail(failure.explain, detailWidth(options))) {
+        out.push(r.line(`  ${s.hex(PALETTE.faint, part)}`));
+      }
+      if (failure.evidence) {
+        // Quoted, so it is obvious which words are the agent's and which are
+        // ours. Without that, a cryptic `npm error 404` reads as pew2's own.
+        for (const part of wrapDetail(`"${failure.evidence}"`, detailWidth(options))) {
           out.push(r.line(`  ${s.hex(PALETTE.faint, part)}`));
         }
       }
-      out.push(r.line(`  ${s.hex(PALETTE.faint, `pew2 providers verify ${agent.id}`)}`));
+      // For an outdated agent the useful command is the one that updates it;
+      // for anything else it is the one that shows the failure in full.
+      const next =
+        failure.kind === "outdated" && agent.install
+          ? agent.install
+          : `pew2 providers verify ${agent.id}`;
+      out.push(r.line(`  ${s.hex(PALETTE.faint, next)}`));
     }
   }
 
@@ -326,14 +548,18 @@ export function providerList(agents: AgentState[], options: RenderOptions = {}):
 
   const broken = on(buckets.broken);
   if (broken.length > 0) {
-    out.push(...r.step("Not working", "installed but would not start"));
+    out.push(...r.step("Installed, but not starting", "one line on what happened"));
     for (const agent of broken) {
-      out.push(r.line(`${s.hex(PALETTE.danger, g.cross)} ${s.bold(agent.name)}`));
-      const detail = agent.verify?.detail;
-      if (detail) {
-        for (const part of wrapDetail(detail, width - 2)) {
-          out.push(r.line(`  ${s.hex(PALETTE.faint, part)}`));
-        }
+      const failure = failureFor(agent);
+      out.push(
+        r.line(
+          `${s.hex(PALETTE.danger, g.cross)} ${s.bold(agent.name)}${s.hex(PALETTE.faint, `  ${failure.label}`)}`,
+        ),
+      );
+      // A catalogue, so one sentence each and no evidence dump: the screen that
+      // exists to explain a single failure is `pew2 providers verify <id>`.
+      for (const part of wrapDetail(failure.explain, width - 2)) {
+        out.push(r.line(`  ${s.hex(PALETTE.faint, part)}`));
       }
     }
   }

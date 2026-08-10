@@ -13,6 +13,7 @@
 import { detectProviders, type DetectResult } from "../providers/detect.js";
 import { verifyAll, type VerifyReport } from "../providers/verify.js";
 import { loadProviders, providerDirs, isAvailable } from "../providers/registry.js";
+import { readDisabled, retireLegacyDisabled } from "../providers/enabled.js";
 import { doctor, type DoctorReport } from "./doctor.js";
 import { CATALOG } from "../providers/detect.js";
 import type { AgentState } from "./setup-view.js";
@@ -33,6 +34,15 @@ export interface SetupResult {
   agents: AgentState[];
   /** Commands to run next, in order. Empty when setup is complete. */
   nextSteps: string[];
+  /**
+   * Agents turned back on by retiring a version 1 `disabled.json`.
+   *
+   * Reported rather than done quietly: an earlier setup wrote agents into that
+   * file on the user's behalf whenever a check failed, so the list cannot be
+   * read as their decision. Undoing it silently would be the same mistake in
+   * the other direction — they get told, once, and choose again.
+   */
+  restored: string[];
 }
 
 export interface SetupOptions {
@@ -75,6 +85,22 @@ export async function setup(options: SetupOptions = {}): Promise<SetupResult> {
   progress("detect");
   const detected = await detectProviders({ env, searchDirs, targetDir: searchDirs[0] });
 
+  // Agents the user has explicitly turned off.
+  //
+  // Verification is not a read: it starts the agent for real. Checking one that
+  // has been switched off means spawning a process on someone's machine, on
+  // every run of setup, for an agent they have already said they do not want —
+  // and then reporting on it, which invites them to fix something they were
+  // never going to use.
+  //
+  // Only what is *already* off, so the first run still checks everything: that
+  // is the run whose whole purpose is to find out what works.
+  //
+  // Retired first, so a list this tool wrote on the user's behalf is not then
+  // used as grounds for skipping the very agents it wrongly recorded.
+  const restored = await retireLegacyDisabled(env);
+  const disabled = await readDisabled(env);
+
   let verify: VerifyReport[] = [];
   if (options.verify !== false) {
     const { providers } = await loadProviders(searchDirs, env, { bundled });
@@ -82,7 +108,10 @@ export async function setup(options: SetupOptions = {}): Promise<SetupResult> {
     // missing produces a failure that says nothing `doctor` has not already said
     // more precisely.
     const runnable = providers.filter(
-      (p) => isAvailable(p) && p.manifest.pew.transport === "acp",
+      (p) =>
+        isAvailable(p) &&
+        p.manifest.pew.transport === "acp" &&
+        !disabled.has(p.manifest.id),
     );
     for (const provider of runnable) progress("verify", provider.manifest.id);
     verify = await (options.verifyProviders ?? verifyAll)(runnable);
@@ -154,11 +183,14 @@ export async function setup(options: SetupOptions = {}): Promise<SetupResult> {
       command: provider.command,
       missingEnv: provider.missingEnv,
       notInstalled: provider.commandMissing,
+      // Carried so the screen can say "off" rather than silently showing an
+      // agent as untested — which is what a skipped verification looks like.
+      disabled: disabled.has(provider.manifest.id),
       verify: report
         ? { status: report.status, detail: report.detail }
         : undefined,
     };
   });
 
-  return { ok, detect: detected, verify, doctor: report, agents, nextSteps };
+  return { ok, detect: detected, verify, doctor: report, agents, nextSteps, restored };
 }

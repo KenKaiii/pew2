@@ -37,7 +37,23 @@ export interface VerifyOptions {
   timeoutMs?: number;
 }
 
-const DEFAULT_TIMEOUT_MS = 60_000;
+/**
+ * How long an agent gets to come up.
+ *
+ * Was 60s, which is under half the handshake budget `connect.ts` allows (180s)
+ * — so a slow-but-working agent was cut off by the check rather than by the
+ * thing that actually runs it, and reported as broken on the strength of a
+ * timer. That is a false accusation on exactly the machines least able to
+ * afford one: the first run of an npx-launched agent downloads its package, and
+ * `setup` starts four of them at once on a connection that may be someone's
+ * hotel wifi.
+ *
+ * 150s stays under the handshake budget, so a timeout here still means the
+ * agent is genuinely wedged rather than merely slower than pew2's patience.
+ * The wait is visible — setup names the agent it is checking — so the cost of
+ * the higher ceiling is paid only by a machine that has something wrong with it.
+ */
+const DEFAULT_TIMEOUT_MS = 150_000;
 
 export async function verifyProvider(
   provider: LoadedProvider,
@@ -60,26 +76,46 @@ export async function verifyProvider(
   let handle: Awaited<ReturnType<typeof connectProvider>> | undefined;
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
-  // An agent that never answers must not hang the whole run. Racing rather than
-  // `process.exit` keeps every other provider verifiable, which matters when
-  // `setup` verifies all of them in one pass.
+  // The backstop, not the mechanism.
+  //
+  // Giving up out here used to be the *only* limit, and it left the agent
+  // running: this function abandons the attempt, but the process belongs to
+  // `connectProvider`, which had its own much longer budget and was still
+  // patiently waiting on a child nobody would ever collect. A health check that
+  // leaves a process per agent behind is worse than no health check.
+  //
+  // So the real deadline is handed to `connectProvider` below, which owns the
+  // child and can kill it. This race only covers a hang that is not the
+  // handshake — hence the grace, so the specific error wins the ordinary case.
+  const GRACE_MS = 5_000;
   let expire: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => {
     expire = setTimeout(
       () =>
         reject(
+          // Written for the person who ran `pew2 setup`, not for whoever wrote
+          // the manifest: "check the adapter's flags" was an instruction only a
+          // contributor could act on, on a screen aimed at everyone else.
           new Error(
-            `Timed out after ${Math.round(timeoutMs / 1000)}s — the process started but never completed the ACP handshake. Check the adapter's flags.`,
+            `Timed out after ${Math.round(timeoutMs / 1000)}s — it started but never finished connecting.`,
           ),
         ),
-      timeoutMs,
+      timeoutMs + GRACE_MS,
     );
   });
+
+  // Set once the race is over, so the losing side knows there is nobody left to
+  // return a handle to.
+  let abandoned = false;
 
   try {
     const run = (async () => {
       handle = await connectProvider({
         provider,
+        // The check's deadline is the connection's deadline. Anything else is
+        // two clocks disagreeing about who owns the process, which is exactly
+        // how it came to be left running.
+        handshakeTimeoutMs: timeoutMs,
         // A scratch directory, not the user's. Verification really starts each
         // agent and sends it a prompt, and agents write files where they are
         // pointed — running `pew2 setup` inside a project left junk in it, which
@@ -89,6 +125,15 @@ export async function verifyProvider(
         // Auto-approve during verification so the round trip can complete.
         onPermissionRequest: ({ requestId }) => handle?.answerPermission(requestId, "allow"),
       });
+      // The timeout may already have won, in which case `finally` has been and
+      // gone and nothing else will ever close this. Left alone, a slow agent
+      // that came up at 151s stayed running for the life of the terminal — the
+      // exact opposite of what a health check should leave behind, and multiplied
+      // by every agent on the machine.
+      if (abandoned) {
+        handle.close();
+        throw new Error("verification had already given up");
+      }
       // No prompt. Reaching this line already proves everything the check is
       // for: the process started, spoke ACP, agreed a protocol version and
       // opened a session.
@@ -107,6 +152,7 @@ export async function verifyProvider(
     return { id, status: "failed", detail: describe(error) };
   } finally {
     clearTimeout(expire);
+    abandoned = true;
     handle?.close();
   }
 }

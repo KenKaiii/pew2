@@ -12,9 +12,12 @@ import {
   agentSections,
   providerList,
   bucketFor,
+  canPick,
+  failureFor,
   group,
   needsSetup,
   outroFor,
+  pickerNote,
   type AgentState,
 } from "./setup-view.js";
 import { glyphs, stripAnsi, styler } from "./ui.js";
@@ -81,10 +84,124 @@ test("a real breakage is still called out, and only that", () => {
   expect(bucketFor(broken)).toBe("broken");
 
   const text = stripAnsi(agentSections([broken], plain).join("\n"));
-  expect(text).toContain("Not working");
+  expect(text).toContain("Installed, but not starting");
   expect(text).toContain("✗");
   // With the command that investigates it.
   expect(text).toContain("pew2 providers verify goose");
+
+  // The heading names the agent, never the tool. "Not working" on a pew2 screen
+  // reads as pew2 not working, which is the opposite of what was found: the
+  // check ran perfectly and reported something about this computer.
+  expect(text).not.toContain("Not working");
+});
+
+test("a failure says which kind of failure it is", () => {
+  // "Why?" is the only question this section is asked, and printing the raw
+  // wrapper answered none of it: not installed properly, out of date, what?
+  const outdated = agent({
+    verify: {
+      status: "failed",
+      detail: "'Gemini CLI' failed to start: Method not found. It was started with: npx -y @google/gemini-cli --acp",
+    },
+  });
+  expect(failureFor(outdated).kind).toBe("outdated");
+  expect(failureFor(outdated).explain).toMatch(/does not speak ACP/);
+
+  const stalled = agent({
+    verify: { status: "failed", detail: "Timed out after 150s — it started but never finished connecting." },
+  });
+  expect(failureFor(stalled).kind).toBe("stalled");
+
+  // The same condition one step later: the agent answered the handshake and
+  // then went quiet on `session/new`. It must not fall through to "did not
+  // start", which would be a lie about an agent that plainly did.
+  const stalledLate = agent({
+    verify: {
+      status: "failed",
+      detail: "'Qwen' answered the handshake but never opened a session. It was started with: npx -y qwen",
+    },
+  });
+  expect(failureFor(stalledLate).kind).toBe("stalled");
+  // Named as the ordinary thing it usually is, since the first run of an
+  // npx-launched agent downloads a package before it can answer anything.
+  expect(failureFor(stalled).explain).toMatch(/second try/);
+
+  const crashed = agent({
+    verify: {
+      status: "failed",
+      detail:
+        "'OpenCode' failed to start: ACP connection closed. It was started with: npx -y opencode-ai\nnpm error 404 Not Found",
+    },
+  });
+  expect(failureFor(crashed).kind).toBe("crashed");
+  // The stderr tail is the whole story when the message is only pew2 noticing
+  // an exit — and it lives on the second line, which the renderer used to drop.
+  expect(failureFor(crashed).evidence).toBe("npm error 404 Not Found");
+
+  const silent = agent({ verify: { status: "failed", detail: "the agent failed without saying why" } });
+  expect(failureFor(silent).kind).toBe("unknown");
+  expect(failureFor(silent).explain).toMatch(/terminal/);
+});
+
+test("the broken section explains rather than quotes", () => {
+  const text = stripAnsi(
+    agentSections(
+      [
+        agent({
+          id: "gemini-cli",
+          name: "Gemini CLI",
+          install: "npm install -g @google/gemini-cli",
+          verify: {
+            status: "failed",
+            detail:
+              "'Gemini CLI' failed to start: Method not found. It was started with: npx -y @google/gemini-cli --acp",
+          },
+        }),
+      ],
+      plain,
+    ).join("\n"),
+  );
+
+  // A label beside the name, so the answer is readable before the sentence is.
+  expect(text).toContain("too old");
+  // Never pew2's own framing of the error: the row is already the agent's name
+  // and the command is already known, so both are noise around the reason.
+  expect(text).not.toContain("failed to start");
+  expect(text).not.toContain("It was started with");
+  // An out-of-date agent needs updating, not investigating, so the next line is
+  // the command that does it.
+  expect(text).toContain("npm install -g @google/gemini-cli");
+});
+
+test("the picker says why a row is not ready, never that it is broken", () => {
+  // Two words is all this screen has room for, and in a terminal it is the only
+  // report the user gets — so they have to be the *right* two words. "Not
+  // working" for all three of these was the complaint: it reads as pew2 being
+  // broken, on a machine where nothing is.
+  expect(pickerNote(agent({ verify: { status: "failed", detail: "Please log in first" } }))).toBe(
+    "needs signing in",
+  );
+  expect(pickerNote(agent({ missingEnv: ["GEMINI_API_KEY"] }))).toBe("needs GEMINI_API_KEY");
+  expect(pickerNote(agent({ notInstalled: true }))).toBe("not installed");
+  expect(
+    pickerNote(agent({ verify: { status: "failed", detail: "'X' failed to start: Method not found" } })),
+  ).toBe("too old");
+  // A working agent gets nothing: the note exists to explain a problem.
+  expect(pickerNote(agent())).toBeUndefined();
+});
+
+test("an agent that only needs signing in can still be chosen", () => {
+  // Setup records what is *off*, so an unselectable row was written down as a
+  // deliberate "no". Someone who ran setup, then logged into Qwen, found it
+  // still missing from their phone with nothing on screen having said so.
+  expect(canPick(agent({ verify: { status: "failed", detail: "authenticate first" } }))).toBe(true);
+  expect(canPick(agent({ missingEnv: ["GEMINI_API_KEY"] }))).toBe(true);
+  expect(canPick(agent())).toBe(true);
+
+  // The two that genuinely cannot run: choosing one would promise the phone an
+  // agent this machine will not start.
+  expect(canPick(agent({ notInstalled: true }))).toBe(false);
+  expect(canPick(agent({ verify: { status: "failed", detail: "ACP connection closed" } }))).toBe(false);
 });
 
 test("auth failures are recognised across the wordings agents actually use", () => {
@@ -178,7 +295,7 @@ test("sections are skipped entirely when empty", () => {
 
   expect(text).toContain("Ready to use");
   expect(text).not.toContain("Also available");
-  expect(text).not.toContain("Not working");
+  expect(text).not.toContain("not starting");
   expect(text).not.toContain("Available with a key");
 });
 
@@ -303,7 +420,7 @@ test("a turned-off agent is listed as a choice, not a fault", () => {
   expect(text).toContain("Turned off");
   expect(text).toContain("OpenCode");
   expect(text).toContain("pew2 providers enable");
-  expect(text).not.toContain("Not working");
+  expect(text).not.toContain("not starting");
   expect(text).not.toMatch(/error|fail/i);
 });
 
@@ -358,4 +475,29 @@ test("a test fixture is not counted, since the phone never gets one", () => {
 
   const allOff = stripAnsi(outroFor(withFixture, true, plain, new Set(["a"])).join(" "));
   expect(allOff).toContain("No agents selected");
+});
+test("an agent that was never checked does not get a tick", () => {
+  // Setup no longer starts an agent the user turned off. That leaves it with no
+  // verification behind it, and `bucketFor` reads "no report" as ready — so
+  // without pulling it out first it takes a green tick under "Ready to use"
+  // that nothing on this run earned, above a closing count that excludes it.
+  const text = stripAnsi(
+    agentSections(
+      [
+        agent({ id: "claude-code", name: "Claude Code", verify: { status: "ok" } }),
+        agent({ id: "opencode", name: "OpenCode", disabled: true }),
+      ],
+      plain,
+    ).join("\n"),
+  );
+
+  expect(text).toContain("Turned off");
+  expect(text).toContain("OpenCode");
+  expect(text).toContain("pew2 providers enable");
+  // The ready section is for what was checked and passed, and holds only that.
+  const ready = text.slice(text.indexOf("Ready to use"), text.indexOf("Turned off"));
+  expect(ready).toContain("Claude Code");
+  expect(ready).not.toContain("OpenCode");
+  // And it is never described as a problem.
+  expect(text).not.toMatch(/error|fail|not starting/i);
 });

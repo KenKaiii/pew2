@@ -180,3 +180,106 @@ test("one working agent is enough, whatever the others are doing", async () => {
   expect(none.ok).toBe(false);
   expect(none.nextSteps.join(" ")).toContain("pew2 providers verify");
 });
+
+/** Long enough to clear the 32-character floor the pairing token must meet. */
+const FAKE_TOKEN = "t".repeat(40);
+
+test("an agent the user turned off is never started again", async () => {
+  // Verification is not a read: it spawns the agent for real. Running it against
+  // an agent that has been switched off means booting a process on someone's
+  // machine, every single run, for something they have already said they do not
+  // want — and then reporting on it, which invites them to go and fix it.
+  const { bin, providersDir, env } = await sandbox();
+  await install(bin, "claude");
+  await install(bin, "npx");
+  await install(bin, "opencode");
+
+  // Version 2: a choice the user actually made in the fixed picker. A version 1
+  // file means the opposite — that an older setup may have written this entry
+  // on their behalf — and is retired rather than obeyed, which is its own test.
+  await writeFile(
+    join(providersDir, "..", "disabled.json"),
+    JSON.stringify({ version: 2, disabled: ["opencode"] }),
+  );
+
+  const started: string[] = [];
+  const result = await setup({
+    env,
+    searchDirs: [providersDir],
+    probeDaemon: daemonUp,
+    pairing: async () => ({ token: FAKE_TOKEN, relay: "wss://relay.test" }),
+    service: async () => ({ state: "running" }),
+    verifyProviders: async (providers) => {
+      for (const p of providers) started.push(p.manifest.id);
+      return providers.map((p) => ({ id: p.manifest.id, status: "ok" as const, updates: 1 }));
+    },
+  });
+
+  expect(started).not.toContain("opencode");
+  expect(started).toContain("claude-code");
+  // It is still listed — as a choice the user made, not a gap in the report.
+  expect(result.agents.find((a) => a.id === "opencode")?.disabled).toBe(true);
+});
+
+test("the first run still checks everything", async () => {
+  // The rule is "already off", not "off by default". A machine with no
+  // disabled.json is someone's first run, and that run exists precisely to find
+  // out what works — skipping anything there would leave the picker guessing.
+  const { bin, providersDir, env } = await sandbox();
+  await install(bin, "claude");
+  await install(bin, "npx");
+  await install(bin, "opencode");
+
+  const started: string[] = [];
+  await setup({
+    env,
+    searchDirs: [providersDir],
+    probeDaemon: daemonUp,
+    pairing: async () => ({ token: FAKE_TOKEN, relay: "wss://relay.test" }),
+    service: async () => ({ state: "running" }),
+    verifyProviders: async (providers) => {
+      for (const p of providers) started.push(p.manifest.id);
+      return providers.map((p) => ({ id: p.manifest.id, status: "ok" as const, updates: 1 }));
+    },
+  });
+
+  expect(started).toContain("opencode");
+  expect(started).toContain("claude-code");
+});
+
+test("a legacy disabled list is retired, and every agent re-checked once", async () => {
+  // The end-to-end shape of the migration. An older setup made an agent
+  // unselectable whenever verification failed — including "not signed in yet"
+  // and a first `npx` download that outran a too-short timeout — and then wrote
+  // every unselected row to disabled.json. Those entries were never choices, so
+  // the whole list is retired and the agents are checked again.
+  const { bin, providersDir, env } = await sandbox();
+  await install(bin, "claude");
+  await install(bin, "npx");
+  await install(bin, "opencode");
+
+  await writeFile(
+    join(providersDir, "..", "disabled.json"),
+    JSON.stringify({ version: 1, disabled: ["opencode"] }),
+  );
+
+  const started: string[] = [];
+  const result = await setup({
+    env,
+    searchDirs: [providersDir],
+    probeDaemon: daemonUp,
+    pairing: async () => ({ token: FAKE_TOKEN, relay: "wss://relay.test" }),
+    service: async () => ({ state: "running" }),
+    verifyProviders: async (providers) => {
+      for (const p of providers) started.push(p.manifest.id);
+      return providers.map((p) => ({ id: p.manifest.id, status: "ok" as const, updates: 1 }));
+    },
+  });
+
+  // Checked again rather than skipped on the strength of a list we wrote.
+  expect(started).toContain("opencode");
+  // And reported, because a setting that changes itself without saying so is
+  // exactly the bug being undone.
+  expect(result.restored).toEqual(["opencode"]);
+  expect(result.agents.find((a) => a.id === "opencode")?.disabled).toBe(false);
+});
