@@ -44,6 +44,40 @@ jobs:
       # needs no API key and no network.
       - run: npm test
 
+  # The daemon ships a Windows binary, and until this job existed nothing ever
+  # ran a line of it on Windows.
+  #
+  # That is not theoretical. Executable detection was `existsSync(join(dir,
+  # command))` with no extension, which on Windows matched the *bash* script npm
+  # installs beside `agent.cmd` — so every npm-installed agent was reported
+  # present and then failed at spawn, while `cursor-agent.exe` was reported
+  # missing because nothing on disk is named `cursor-agent`. Both directions
+  # wrong, on a platform with a published binary, invisible to four green jobs.
+  #
+  # Scoped to daemon and protocol: those are what the Windows binary contains.
+  # The app is built on a Mac and shipped as an IPA, so running its tests here
+  # would buy nothing and pay 2x for it.
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: latest
+
+      - run: bun install --frozen-lockfile
+
+      # The real thing, not the PEW2_FAKE_PLATFORM simulation the Linux job
+      # runs: real PATHEXT, a real `npx.cmd` shim from the runner's own Node,
+      # and a real spawn that would refuse a .cmd with EINVAL.
+      - run: bun test ./packages/daemon/src ./packages/protocol/src
+
+      # Proves the CLI actually starts as a Windows process and can resolve
+      # commands here — a crash on startup would otherwise reach users as a
+      # binary that exits instantly with no output.
+      - run: bun run packages/daemon/src/cli/index.ts doctor --json
+
   # ios/ and android/ are gitignored (CNG), so no native code is checked in and a
   # native break is invisible to typecheck. This job regenerates Android from
   # app.json and compiles it: the only check that proves the plugin set still
