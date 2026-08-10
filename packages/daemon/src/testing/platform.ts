@@ -12,6 +12,7 @@
  * says "something runnable lives here", not "a file with mode 0755", so it
  * stays true on a platform where the second sentence is meaningless.
  */
+import { execFileSync, execSync } from "node:child_process";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -65,3 +66,41 @@ export async function fakeExecutable(dir: string, command: string): Promise<stri
  * should be, and then it runs everywhere.
  */
 export const POSIX_PATHS = !WINDOWS;
+
+/**
+ * How many live processes have `marker` somewhere in their command line.
+ *
+ * For tests that assert a spawned child was actually killed rather than merely
+ * abandoned — the only assertion that catches a leak, since a leaked process is
+ * invisible to every in-process check.
+ *
+ * `ps -ax` is not portable: Windows runners have a Git-Bash `ps` that rejects
+ * `-x`, so the count silently fell through to zero and the test proved nothing
+ * on the one platform CI had just started covering. PowerShell's process table
+ * is the equivalent that exists there.
+ *
+ * Returns 0 rather than throwing when the process table cannot be read: a
+ * failure to count is not evidence of a leak, and turning it into a red test
+ * would make this a source of noise instead of signal.
+ */
+export function countProcessesMatching(marker: string): number {
+  try {
+    if (WINDOWS) {
+      const script = `@(Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*${marker}*' }).Count`;
+      const out = execFileSync(
+        "powershell",
+        ["-NoProfile", "-NonInteractive", "-Command", script],
+        { encoding: "utf8" },
+      );
+      return Number(out.trim()) || 0;
+    }
+    // The bracket keeps grep from matching its own command line.
+    const out = execSync(`ps -A -o command= | grep -c '[${marker[0]}]${marker.slice(1)}'`, {
+      encoding: "utf8",
+    });
+    return Number(out.trim()) || 0;
+  } catch {
+    // grep exits 1 when nothing matches, which is the answer rather than a fault.
+    return 0;
+  }
+}

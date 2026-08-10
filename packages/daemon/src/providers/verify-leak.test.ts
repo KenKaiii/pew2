@@ -19,22 +19,22 @@ import { test, expect } from "bun:test";
 import { writeFile, mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { execSync } from "node:child_process";
 import { verifyProvider } from "./verify.js";
+import { countProcessesMatching } from "../testing/platform.js";
 import type { LoadedProvider } from "./registry.js";
 
 /** A marker in argv, so only this test's children are ever counted or killed. */
 const MARK = `pew2-verify-leak-${process.pid}`;
 
-function liveChildren(): number {
-  try {
-    const out = execSync(`ps -ax -o command | grep -c '[${MARK[0]}]${MARK.slice(1)}'`).toString();
-    return Number(out.trim()) || 0;
-  } catch {
-    // grep exits 1 when nothing matches, which is the answer, not an error.
-    return 0;
-  }
-}
+/**
+ * Counting is shared and platform-aware.
+ *
+ * This was `ps -ax`, which the Git-Bash `ps` on a Windows runner rejects - so
+ * the count fell through to zero and the test quietly proved nothing on the one
+ * platform CI had just started covering. A leak check that cannot fail is worse
+ * than none, because it reads as coverage.
+ */
+const liveChildren = () => countProcessesMatching(MARK);
 
 /** An agent that answers `initialize` and then goes silent, as a wedged one does. */
 async function stallingAgent(stage: "handshake" | "session"): Promise<string> {
@@ -95,7 +95,10 @@ test("an agent that never answers the handshake is killed, not abandoned", async
   // eventually" is exactly what was untrue before.
   await new Promise((r) => setTimeout(r, 1500));
   expect(liveChildren()).toBe(0);
-});
+  // 30s, because Bun's 5s default is not a budget anyone chose: a cold spawn on
+  // a Windows runner plus the deliberate 2s stall and the kill wait runs past
+  // it, and a timeout here would read as a leak rather than a slow machine.
+}, 30_000);
 
 test("an agent that stalls after the handshake is killed too", async () => {
   // The ordinary not-signed-in shape: the agent comes up fine and then never
@@ -120,4 +123,7 @@ test("an agent that stalls after the handshake is killed too", async () => {
 
   await new Promise((r) => setTimeout(r, 1500));
   expect(liveChildren()).toBe(0);
-});
+  // 30s, because Bun's 5s default is not a budget anyone chose: a cold spawn on
+  // a Windows runner plus the deliberate 2s stall and the kill wait runs past
+  // it, and a timeout here would read as a leak rather than a slow machine.
+}, 30_000);
