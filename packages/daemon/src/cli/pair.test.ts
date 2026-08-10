@@ -143,21 +143,29 @@ test("printing a code for a claimed pairing re-mints it", () => {
   });
 });
 
-test("an unclaimed pairing is printed as it stands", () => {
-  // Running the command twice while walking to your phone must not invalidate
-  // the QR you are halfway through scanning.
-  expect(rotationFor(undefined, false)).toEqual({ rotate: false });
+test("running the command at all is the request for a fresh code", () => {
+  // Someone typing `pew2 pair` wants to pair a phone, and only a new code can
+  // do that. Printing the existing one used to be the default whenever the
+  // pairing merely *looked* unclaimed - which is exactly how a half-failed
+  // attempt looks, so the command handed back the code the phone had already
+  // refused, over and over.
+  expect(rotationFor(undefined)).toEqual({ rotate: true });
+  expect(rotationFor(undefined, false)).toEqual({ rotate: true });
 });
 
-test("--rotate replaces a code nobody has claimed", () => {
-  // The case judgement cannot see: a link that leaked before first use looks
-  // untouched, and is exactly the one that has to be replaced.
+test("a pre-gate placeholder rotates without being named as a device", () => {
+  // `phone` is what an older app called itself. It still gets a fresh code -
+  // otherwise that user is the one person the command cannot help - but there
+  // is no real device to tell them has been unpaired.
+  expect(rotationFor("phone")).toEqual({ rotate: true });
+});
+
+test("--rotate is still accepted, and no longer decides anything", () => {
+  // It existed to escape the cases above. Keeping it means every README line
+  // and everyone's muscle memory keeps working.
   expect(rotationFor(undefined, true)).toEqual({ rotate: true });
-});
-
-test("a pre-gate placeholder does not trigger a rotation", () => {
-  // `phone` is treated as unclaimed so an older app keeps working until it
-  // updates. Rotating on its account would break the upgrade path it exists to
-  // keep open, and would name a device that is not really there.
-  expect(rotationFor("phone", false)).toEqual({ rotate: false });
+  expect(rotationFor("phone-aaaa", true)).toEqual({
+    rotate: true,
+    supersededDevice: "phone-aaaa",
+  });
 });

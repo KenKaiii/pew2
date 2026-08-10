@@ -22,7 +22,7 @@ import { hostname } from "node:os";
 import { SecureChannel, e2e, wire } from "@pew2/protocol";
 import { daemonPort, daemonUrl } from "./doctor.js";
 import { lanAddresses, loadPairing, pairingUrl, qrCode, rotatePairing } from "../pairing.js";
-import { isRealClaim } from "../device-claim.js";
+import { CLI_DEVICE_PREFIX, isRealClaim } from "../device-claim.js";
 import {
   PALETTE,
   colorLevel,
@@ -179,10 +179,11 @@ export function waitForDevice(options: {
         if (!opened) return;
         const message = opened as { t?: string; deviceId?: string };
         if (message.t !== "device.joined") return;
-        // This socket deliberately never sends `hello`, so it does not announce
-        // itself and should never see its own id here. The guard costs nothing
-        // and means the day that changes, the command does not congratulate the
-        // user on pairing with the machine they are already sitting at.
+        // This socket *does* send `hello` — it has to, or the daemon seals
+        // nothing to it and the join it is waiting for never arrives. So it can
+        // genuinely see itself announced here, and without this guard the
+        // command congratulates the user on pairing with the machine they are
+        // already sitting at, then exits before their phone ever shows up.
         if (message.deviceId === cliDeviceId()) return;
         finish({ deviceId: message.deviceId ?? "a device", elapsedMs: Date.now() - started });
       } catch {
@@ -195,9 +196,20 @@ export function waitForDevice(options: {
   });
 }
 
-/** Stable, obviously-not-a-phone identity for the watching socket. */
+/**
+ * Stable, obviously-not-a-phone identity for the watching socket.
+ *
+ * The prefix is not decoration: `decideClaim` reads it to admit this socket
+ * *without* recording it as the owner. Proving is unavoidable — the daemon seals
+ * broadcasts only to a proved sender, so an unproved watcher never hears the
+ * `device.joined` it exists to wait for — but proving used to make it a device
+ * like any other, and it took the pairing it was printing. The phone that then
+ * scanned the QR was refused as the second device and told to run
+ * `pew2 pair --rotate`, which minted a new code and claimed that one too: the
+ * command whose only job is letting you in was locking you out.
+ */
 export function cliDeviceId(): string {
-  return `pew2-cli@${hostname()}`;
+  return `${CLI_DEVICE_PREFIX}${hostname()}`;
 }
 
 /** Human-facing device name. Ids are opaque; this is the part worth reading. */
@@ -211,28 +223,35 @@ export function deviceLabel(deviceId: string): string {
 /**
  * Whether printing a code should also re-mint it, and what that supersedes.
  *
- * A claimed pairing is re-minted without being asked, because in that state
- * there is nobody left for the old code to serve. A phone that already holds it
- * never needs to scan again — it reconnects on its own — so anyone reading this
- * screen is either onboarding a different phone or has reinstalled the app,
- * which clears the keychain and yields a new device id. The code on disk refuses
- * both. Printing it anyway is a dead end, and the app's own refusal message
- * sends people here to escape one.
+ * Always, now. Someone typing `pew2 pair` is asking to pair a phone, and the
+ * only code that can serve that is a fresh one — so the command mints one rather
+ * than judging whether they need it.
  *
- * An unclaimed pairing is left alone, so running the command twice while walking
- * to your phone does not invalidate the QR you are halfway through scanning.
- * `--rotate` covers the case this cannot see: a code that leaked before anyone
- * claimed it, which looks untouched and must still be replaced.
+ * This used to reason about the stored claim, and every branch of that reasoning
+ * had a way to strand somebody. A claimed pairing rotated, which was right. An
+ * unclaimed one printed as it stood, to protect a QR being scanned mid-walk —
+ * but the commonest reason a pairing looks unclaimed is that the last attempt
+ * half-failed, and reprinting the code the phone already refused is a loop with
+ * no exit. A pre-gate `phone` placeholder also printed as-is, so anyone on an
+ * older app got the dead code twice. `--rotate` existed to escape all of it,
+ * which is the tell: a flag whose purpose is making the command do the thing
+ * people already meant by running it.
+ *
+ * Rotating every time costs a QR that is being scanned at this exact moment —
+ * rare, caused by running the command twice, and fixed by scanning the new one
+ * already on screen. Not rotating cost people the ability to connect at all.
+ *
+ * `--rotate` is still accepted, so muscle memory and every README line keep
+ * working; it simply no longer decides anything.
  */
 export function rotationFor(
   claimedBy: string | undefined,
-  forced: boolean,
+  _forced?: boolean,
 ): { rotate: boolean; supersededDevice?: string } {
-  // A placeholder from a pre-gate app is not a real owner, and rotating on its
-  // account would break the upgrade path it exists to keep open.
+  // Named only when a real device is being displaced, so the screen can say what
+  // has just stopped working. A pre-gate placeholder is nobody's phone.
   const claimed = isRealClaim(claimedBy) ? claimedBy : undefined;
-  if (claimed) return { rotate: true, supersededDevice: claimed };
-  return { rotate: forced };
+  return { rotate: true, supersededDevice: claimed };
 }
 
 export interface PairOptions {

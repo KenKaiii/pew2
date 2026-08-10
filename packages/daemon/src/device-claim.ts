@@ -57,6 +57,27 @@ export function isRealClaim(claimedBy: string | undefined): claimedBy is string 
   return Boolean(claimedBy) && claimedBy !== PLACEHOLDER_DEVICE_ID;
 }
 
+/**
+ * The prefix `pew2 pair`'s own watching socket identifies itself with.
+ *
+ * Lives here rather than in the CLI because both sides need it and they must
+ * not disagree: the CLI decides what to send, the daemon decides what that
+ * means, and a copy in each is a rule that can drift.
+ */
+export const CLI_DEVICE_PREFIX = "pew2-cli@";
+
+/**
+ * Is this the local CLI watching, rather than a phone?
+ *
+ * Prefix rather than an exact string because the hostname is appended, and the
+ * `@` is what keeps it unforgeable-by-accident: a phone's id is a name and a
+ * uuid, so it cannot collide. This is not a security boundary either way —
+ * anything reaching this point already proved it holds the pairing key.
+ */
+export function isLocalWatcher(deviceId: string): boolean {
+  return deviceId.startsWith(CLI_DEVICE_PREFIX);
+}
+
 /** The outcome of offering a device id to a pairing. */
 export type ClaimDecision =
   /** Admitted. `claim` is set when this handshake is what took the pairing. */
@@ -87,6 +108,17 @@ export function decideClaim(claimedBy: string | undefined, deviceId: string): Cl
   // An empty id is never a claim. The callers already reject one, but a blank
   // stored value must not become a wildcard that matches the next blank.
   if (!deviceId) return { ok: false, message: REFUSED_MESSAGE };
+
+  // `pew2 pair` opens a socket of its own to notice the phone arriving, and it
+  // has to prove itself or the daemon seals nothing to it. Proving made it a
+  // *device*, so it took the very pairing it was printing — and the phone that
+  // then scanned the QR was refused as the second device, told to run
+  // `pew2 pair --rotate`, which minted a fresh code and claimed that one too.
+  // The user is locked out by the command whose only job is letting them in.
+  //
+  // Admitted, never recorded: this id watches, and ownership stays with
+  // whichever phone actually turns up.
+  if (isLocalWatcher(deviceId)) return { ok: true };
 
   // A device still calling itself `phone` is running a build from before the
   // gate. Refusing it would lock out someone who has not updated yet, on a

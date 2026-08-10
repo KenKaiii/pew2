@@ -7,7 +7,7 @@
  * every agent on the machine.
  */
 import { test, expect } from "bun:test";
-import { decideClaim, isRealClaim, REFUSED_MESSAGE } from "./device-claim.js";
+import { decideClaim, isRealClaim, REFUSED_MESSAGE, isLocalWatcher } from "./device-claim.js";
 
 test("an unclaimed pairing is taken by the first device to arrive", () => {
   const decision = decideClaim(undefined, "phone-aaaa");
@@ -86,4 +86,34 @@ test("only the placeholder counts as unclaimed", () => {
   expect(isRealClaim(undefined)).toBe(false);
   expect(isRealClaim("")).toBe(false);
   expect(isRealClaim("phone-aaaa")).toBe(true);
+});
+
+test("the local CLI can watch a pairing without owning it", () => {
+  // `pew2 pair` opens its own socket to notice the phone arriving, and has to
+  // prove itself or the daemon seals nothing to it. Proving made it a device,
+  // so it claimed the very pairing it was printing - and the phone that then
+  // scanned the QR was refused as a second device, told to run
+  // `pew2 pair --rotate`, which minted a new code and claimed that one too.
+  // The command whose only job is letting you in was locking you out.
+  const cli = "pew2-cli@Kens-MacBook-Pro.local";
+
+  // Admitted, and no claim recorded.
+  expect(decideClaim(undefined, cli)).toEqual({ ok: true });
+  // So the phone that follows is still the first real device, and owns it.
+  expect(decideClaim(undefined, "iPhone-3f2a")).toEqual({ ok: true, claim: "iPhone-3f2a" });
+  // And it can keep watching a pairing a phone already owns, which is the
+  // ordinary case: the CLI is running while the phone connects.
+  expect(decideClaim("iPhone-3f2a", cli)).toEqual({ ok: true });
+});
+
+test("a phone cannot pass itself off as the local CLI", () => {
+  // The prefix is a marker, not a credential - anything reaching this point
+  // already proved it holds the pairing key, so this only decides bookkeeping.
+  // Still, a name that merely mentions it must not skip the claim.
+  expect(decideClaim(undefined, "my-pew2-cli@phone")).toEqual({
+    ok: true,
+    claim: "my-pew2-cli@phone",
+  });
+  expect(isLocalWatcher("iPhone-3f2a")).toBe(false);
+  expect(isLocalWatcher("pew2-cli@host")).toBe(true);
 });
