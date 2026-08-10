@@ -86,7 +86,16 @@ export const POSIX_PATHS = !WINDOWS;
 export function countProcessesMatching(marker: string): number {
   try {
     if (WINDOWS) {
-      const script = `@(Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*${marker}*' }).Count`;
+      // Split so the whole marker never appears in PowerShell's own command
+      // line - otherwise the query process matches itself and the count is
+      // never zero. Exactly what the bracket does for grep below; without it
+      // the check failed before the child under test had even been spawned.
+      const head = marker.slice(0, 1);
+      const tail = marker.slice(1);
+      const script =
+        `$m = '${head}' + '${tail}'; ` +
+        "@(Get-CimInstance Win32_Process | " +
+        "Where-Object { $_.CommandLine -like \"*$m*\" }).Count";
       const out = execFileSync(
         "powershell",
         ["-NoProfile", "-NonInteractive", "-Command", script],
