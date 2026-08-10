@@ -54,7 +54,6 @@ export default function ChatThreadHarness() {
           indicatorBottom={DOCK_HEIGHT}
           onAtBottomChange={setAtBottom}
           onOpenThought={() => {}}
-          onCopyMessage={() => {}}
         />
 
         {/* Stand-in for the real dock: same job, obvious edge. Anything visible

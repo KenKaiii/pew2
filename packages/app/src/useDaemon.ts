@@ -12,7 +12,7 @@ import { SecureChannel, e2e, envelopeHeader, wire } from "@pew2/protocol";
 const { WIRE_VERSION } = wire;
 import { USE_FIXTURES, isFixtureSession, sampleSessions } from "./fixtures";
 import { mergeAgentSessions, needsResume, replaceAgentSessionStub } from "./agentHistory";
-import { receiptOnOpen, recordReceipt } from "./turnReceipts";
+import { receiptOnOpen, receiptOnReplay, recordReceipt } from "./turnReceipts";
 import {
   adoptPendingSession,
   dropPendingSessions,
@@ -1151,7 +1151,12 @@ export function useDaemon(
               // clock would report a minutes-old turn as taking an instant. A
               // clock this device started is a different thing and is kept.
               activity: running ? prev.activity : IDLE_ACTIVITY,
-              receipt: undefined,
+              // The finished turn under the restored transcript, taken from the
+              // conversation rather than from the screen: what is on screen may
+              // still belong to the thread being left. Clearing it outright is
+              // what made the line disappear on every reopen that goes through a
+              // resume. See `receiptOnReplay`.
+              receipt: receiptOnReplay(folded.sessions, message.sessionId, running),
               // The drawer entry too, and this is the flag the user actually
               // sees: the pulsing dot beside the conversation's name. Resuming
               // marks the session working on the way in, `session.started`

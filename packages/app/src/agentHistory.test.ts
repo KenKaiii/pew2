@@ -9,6 +9,7 @@ import {
   agentSessionKey,
   isAgentSessionStub,
   needsResume,
+  replaceAgentSessionStub,
 } from "./agentHistory";
 import type { Session } from "./useDaemon";
 
@@ -177,4 +178,37 @@ test("nothing to add returns the same array, so no re-render is queued", () => {
   const before = [local];
   expect(mergeAgentSessions(before, "claude-code", [], true, NOW)).toBe(before);
   expect(mergeAgentSessions(before, undefined, undefined, true, NOW)).toBe(before);
+});
+
+test("a resumed conversation keeps what the phone knew about it", () => {
+  const stub: Session = {
+    id: "agent:claude-code:s1",
+    providerId: "claude-code",
+    title: "Fix the build",
+    startedAt: NOW,
+    turns: [],
+    configOptions: [],
+    agentSessionId: "s1",
+    cwd: "/repo",
+    messageCount: 12,
+    receipt: { verb: "Answered", duration: "5s", tools: 0, failed: 0 },
+  };
+  const live: Session = {
+    id: "claude-code-live",
+    providerId: "claude-code",
+    title: "Fix the build",
+    startedAt: NOW + 1,
+    turns: [],
+    configOptions: [],
+    agentSessionId: "s1",
+  };
+
+  const [resumed] = replaceAgentSessionStub([stub], live);
+
+  expect(resumed!.id).toBe("claude-code-live");
+  expect(resumed!.cwd).toBe("/repo");
+  expect(resumed!.messageCount).toBe(12);
+  // The turn this device timed before the daemon forgot the session. Losing it
+  // here is why "Answered in 5s" vanished on every reopen that resumes.
+  expect(resumed!.receipt).toEqual({ verb: "Answered", duration: "5s", tools: 0, failed: 0 });
 });

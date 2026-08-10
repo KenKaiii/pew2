@@ -45,13 +45,22 @@ test("every sheet takes the keyboard down, from the one place they share", () =>
 });
 
 test("tapping the transcript takes the keyboard down", () => {
-  // The list already asks for this with `keyboardShouldPersistTaps="handled"`,
-  // which blurs on any tap a child does not claim. Every turn is wrapped in a
-  // Pressable for the copy-hold, though, and a Pressable claims the touch — so
-  // the one gesture the rule exists for, tapping away from the composer onto the
-  // conversation, was the one it never covered.
+  // The list asks for this with `keyboardShouldPersistTaps="handled"`, which
+  // blurs on any tap a child does not claim.
   expect(source("ChatThread.tsx")).toContain('keyboardShouldPersistTaps="handled"');
-  expect(source("Turn.tsx")).toContain("onPress={Keyboard.dismiss}");
+
+  // So a message body must not claim one. Turns used to be wrapped in a
+  // Pressable for the copy-hold, and a Pressable claims the touch — messages
+  // cover nearly the whole transcript, so the one gesture the rule exists for,
+  // tapping away from the composer onto the conversation, was the one it never
+  // covered, and that wrapper had to re-implement the blur itself. Selection is
+  // the platform's now, the wrapper is gone, and the rule works unaided.
+  //
+  // One Pressable is left in a turn: the thought row, a real button opening a
+  // real sheet. It is a row of its own, not the message body.
+  const turn = source("Turn.tsx");
+  expect(turn.match(/<Pressable/g) ?? []).toHaveLength(1);
+  expect(turn).toContain("Show thought process");
 });
 
 test("an anchored picker keeps the keyboard, on purpose", () => {

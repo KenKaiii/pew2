@@ -68,6 +68,11 @@ export function replaceAgentSessionStub(existing: Session[], live: Session): Ses
       ...live,
       cwd: live.cwd ?? stub?.cwd,
       messageCount: live.messageCount ?? stub?.messageCount,
+      // The last turn this device timed in this conversation. `session.started`
+      // carries no such thing, so without this a resume swapped the row for one
+      // that had never heard of it and "Answered in 5s" was gone for good — the
+      // state every conversation is in once the daemon has been restarted.
+      receipt: live.receipt ?? stub?.receipt,
     },
     ...existing.filter((session) => session.agentSessionId !== live.agentSessionId),
   ];

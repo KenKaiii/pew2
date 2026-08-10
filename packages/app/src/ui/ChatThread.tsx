@@ -60,8 +60,6 @@ type Props = {
   onAtBottomChange: (atBottom: boolean) => void;
   /** Opens a thinking turn's full text. Must be stable: cells memo on it. */
   onOpenThought: (text: string) => void;
-  /** Opens a held message for copying. Must be stable, for the same reason. */
-  onCopyMessage: (text: string) => void;
 };
 
 function ChatThreadView(
@@ -76,7 +74,6 @@ function ChatThreadView(
     indicatorBottom,
     onAtBottomChange,
     onOpenThought,
-    onCopyMessage,
   }: Props,
   ref: React.Ref<ChatThreadRef>,
 ) {
@@ -91,11 +88,11 @@ function ChatThreadView(
       // padding on the scroll content is not part of the list's layout math.
       return (
         <View style={index === 0 ? styles.firstRow : styles.row}>
-          <Turn turn={item} onOpenThought={onOpenThought} onCopyMessage={onCopyMessage} />
+          <Turn turn={item} onOpenThought={onOpenThought} />
         </View>
       );
     },
-    [onOpenThought, onCopyMessage],
+    [onOpenThought],
   );
 
   // Mirrored into a ref so the inset effect below can read "is the reader at the

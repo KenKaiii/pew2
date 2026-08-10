@@ -160,17 +160,35 @@ const renderImage: RenderFunction = (node) => {
 };
 
 const markdownRules: Partial<RenderRules> = {
+  // Every inline run that is *not* a paragraph — a heading, a list item, a table
+  // cell — bottoms out here, and this is the outermost Text of those blocks.
+  //
+  // That is why `selectable` is said twice, here and on the paragraph below.
+  // Nested Text is virtual on both platforms: it is flattened into the one
+  // native text view its top-level Text creates, and the native selection
+  // gesture belongs to that view. So the flag only does anything on the
+  // outermost Text of a block, and there are two kinds of those.
+  textgroup: (node, children, _parents, styles) =>
+    createElement(
+      Text,
+      { ["key"]: node.key, selectable: true, style: styles.text as never },
+      children,
+    ),
   // A paragraph must be one measured Text block. The library's default uses a
   // wrapping row of Text children; inside a list that row reports one-line
   // height while its text paints several lines, so following items overlap it.
   // One exception: a paragraph holding an image becomes a column, because
   // nesting a View in text layout collapses a percentage-width picture on iOS.
+  // Only the Text branch is selectable — a View is not text and `selectable`
+  // means nothing on it.
   paragraph: (node, children, _parents, styles) =>
-    createElement(
-      hasImageChild(node) ? View : Text,
-      { ["key"]: node.key, style: styles.paragraph as never },
-      children,
-    ),
+    hasImageChild(node)
+      ? createElement(View, { ["key"]: node.key, style: styles.paragraph as never }, children)
+      : createElement(
+          Text,
+          { ["key"]: node.key, selectable: true, style: styles.paragraph as never },
+          children,
+        ),
   code_block: renderCodeBlock,
   fence: renderCodeBlock,
   image: renderImage,

@@ -60,7 +60,6 @@ import { pickFiles, pickPhotos, takePhoto } from "./src/ui/attachmentPicker";
 import { useDictation } from "./src/ui/useDictation";
 import { ApprovalSheet } from "./src/ui/ApprovalSheet";
 import { ThoughtSheet } from "./src/ui/ThoughtSheet";
-import { MessageSheet } from "./src/ui/MessageSheet";
 import { applyCommand, type SlashCommand } from "./src/slashCommands";
 import { CircleButton, Pill } from "./src/ui/controls";
 import { haptics } from "./src/ui/haptics";
@@ -521,8 +520,6 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
   // so the sheet lives outside the recycling list — a cell scrolled off screen
   // must not take the sheet down with it.
   const [thought, setThought] = useState<string | null>(null);
-  /** The held message, open for copying and hand selection. */
-  const [message, setMessage] = useState<string | null>(null);
   // The draft lives inside the dock, not here.
   //
   // Holding it at the root meant every keystroke re-rendered the entire app,
@@ -1111,17 +1108,6 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
   }, []);
   const closeThought = useCallback(() => setThought(null), []);
 
-  // Stable for the same reason as `openThought`. The pulse is the whole
-  // confirmation that a hold was recognised: the finger is still down and the
-  // sheet has not arrived yet, so without it a long press reads as a dead spot
-  // in the transcript.
-  const openMessage = useCallback((text: string) => {
-    haptics.tap();
-    Keyboard.dismiss();
-    setMessage(text);
-  }, []);
-  const closeMessage = useCallback(() => setMessage(null), []);
-
   const answerPermission = useCallback(
     (requestId: string, optionId: string, deny: boolean) => {
       if (deny) haptics.warned();
@@ -1318,7 +1304,6 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
             indicatorBottom={dockHeight}
             onAtBottomChange={setAtBottom}
             onOpenThought={openThought}
-            onCopyMessage={openMessage}
           />
         ) : !daemon.loadingSession ? (
           // Cancels half the pane's lift, so the greeting settles in the middle
@@ -1483,7 +1468,6 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
       <AttachmentSheet visible={attachOpen} onSelect={pickAttachment} onClose={closeAttach} />
 
       <ThoughtSheet visible={thought !== null} text={thought ?? ""} onClose={closeThought} />
-      <MessageSheet visible={message !== null} text={message ?? ""} onClose={closeMessage} />
 
       {/* One picker, pointed at whichever pill opened it. The mode selector is
           excluded from the model menu so each pill owns exactly one list. */}

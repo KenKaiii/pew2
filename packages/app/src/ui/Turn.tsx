@@ -10,16 +10,8 @@
  * no longer means "a new message arrived" — a per-mount fade would fire while
  * scrolling through old history.
  */
-import { memo, type ReactNode } from "react";
-import {
-  Keyboard,
-  Pressable,
-  StyleSheet,
-  Text,
-  View,
-  type StyleProp,
-  type ViewStyle,
-} from "react-native";
+import { memo } from "react";
+import { Pressable, StyleSheet, Text, View } from "react-native";
 import Ionicons from "@expo/vector-icons/Ionicons";
 import { theme } from "../theme";
 import { MarkdownText } from "./MarkdownText";
@@ -38,95 +30,37 @@ interface TurnProps {
   turn: TurnModel;
   /** Opens this turn's reasoning in the thought sheet. */
   onOpenThought?: (text: string) => void;
-  /** Opens this turn's text for copying and selection. */
-  onCopyMessage?: (text: string) => void;
 }
 
 /**
- * Press and hold any message to take its text.
+ * ## Taking text out of a message
  *
- * A hold rather than a visible button: every turn would need one, and a copy
- * control on each of them is more chrome than transcript. Hold is where the
- * platform already puts "do something with this text", so nothing has to be
- * taught — and the sheet it opens is the discovery, since it shows both what
- * will be copied and that it can be selected by hand.
+ * Nothing here does it. Message text is rendered `selectable` (`MarkdownText`),
+ * so the gesture is the platform's own: hold to get Android's selection handles
+ * and its action bar, hold to get the iOS edit menu over that block.
  *
- * ## Why this wrapper is not an accessibility element
+ * It used to be ours. Every turn was wrapped in a `Pressable` whose long press
+ * opened a sheet holding the whole message as one selectable node, because iOS
+ * cannot drag a selection across separate `Text` nodes and a rendered reply is
+ * dozens of them. The sheet did buy whole-message selection — and cost the
+ * gesture every other app has: a hold anywhere in the transcript stopped
+ * meaning "select this" and started meaning "open a modal", including over a
+ * code block, whose own loupe it took away. Copying by block is the smaller
+ * loss, and it is the behaviour nobody has to be taught.
  *
- * A `Pressable` is `accessible` by default, and that flag is a *grouping*: it
- * collapses everything inside into one VoiceOver node whose announcement is
- * React Native's concatenation of the children. Applied here it would turn a
- * long agent reply — headings, paragraphs, list items, code — into a single
- * unstoppable utterance, when today it is navigable a block at a time. Skimming
- * by swiping between paragraphs is *how* a screen reader reads a long answer,
- * so grouping would take the most structure away from the readers who depend on
- * it most, in exchange for one action. Not worth it: `accessible={false}` keeps
- * the transcript exactly as navigable as it was.
+ * The wrapper is gone rather than merely muted, which matters twice:
  *
- * The cost of that choice is the rotor. Custom actions are offered per focused
- * element, so a wrapper VoiceOver cannot focus has nowhere to hang "Copy". The
- * remaining route is VoiceOver's own double-tap-and-hold, which passes a real
- * touch to the view under the focused text and so reaches `onLongPress` here.
- * That path is untested on a device — if it turns out not to fire, the answer is
- * a focusable copy control per turn, not grouping the reply.
- *
- * The thought row keeps its rotor action, because it is already one focusable
- * button with one label and nothing inside to flatten.
- *
- * A held code block opens this sheet rather than the platform's own selection
- * loupe, which is the one thing this wrapper takes away. It is a fair trade in
- * both directions: the block keeps its own Copy button for the code alone, and
- * the sheet's text is selectable too — so selecting part of a snippet is one
- * more step, while selecting part of a *reply* becomes possible at all.
+ * - A `Pressable` claims the touch, and messages cover nearly the whole
+ *   transcript, so it also had to re-implement the blur that tapping away from
+ *   the composer used to do for free. With plain views, the list's own
+ *   `keyboardShouldPersistTaps="handled"` sees an unclaimed tap and blurs.
+ * - A `Pressable` is `accessible` by default, and that flag *groups*: it would
+ *   collapse a long reply — headings, paragraphs, list items, code — into one
+ *   unstoppable VoiceOver utterance. It carried `accessible={false}` to avoid
+ *   exactly that, and with the wrapper gone the exemption is no longer needed:
+ *   the transcript is navigable a block at a time because it is just text.
  */
-function Copyable({
-  text,
-  onCopy,
-  style,
-  children,
-}: {
-  text: string;
-  onCopy?: (text: string) => void;
-  style?: StyleProp<ViewStyle>;
-  children: ReactNode;
-}) {
-  // Without a handler this is a plain view: no press state, no accessibility
-  // node wrapped around the turn, nothing to explain. Taps then fall through to
-  // the list's own `keyboardShouldPersistTaps="handled"`, which blurs.
-  if (!onCopy) return <View style={style}>{children}</View>;
-
-  return (
-    // See above: this must never become an accessibility element. It is a touch
-    // target laid over text, not a control, and the text underneath keeps its
-    // own nodes.
-    <Pressable
-      accessible={false}
-      // Tapping a message puts the keyboard away, exactly as dragging the
-      // transcript does.
-      //
-      // This wrapper is why it had to be said here. `keyboardShouldPersistTaps`
-      // is `"handled"` on the list, so an unclaimed tap blurs the composer — but
-      // every turn is wrapped in this Pressable for the copy-hold, and a
-      // Pressable claims the touch. Messages cover nearly the whole transcript,
-      // so "tap away from the input" landed on one of them and did nothing: the
-      // keyboard stayed up and the composer stayed expanded, with only a drag or
-      // the keyboard's own control to get out of it.
-      //
-      // Free of the hold it shares this view with: a press that becomes a long
-      // press never fires `onPress`, so taking the text still does only that.
-      onPress={Keyboard.dismiss}
-      onLongPress={() => onCopy(text)}
-      style={style}
-    >
-      {children}
-    </Pressable>
-  );
-}
-
-/** Only for the thought row, which is a single focusable button. */
-const COPY_ACTIONS = [{ name: "copy", label: "Copy message" }] as const;
-
-function TurnView({ turn, onOpenThought, onCopyMessage }: TurnProps) {
+function TurnView({ turn, onOpenThought }: TurnProps) {
   const images = turn.images ?? [];
   // A turn with pictures and no words is normal: an image generation tool's
   // result arrives as content alone. Only a turn with neither renders nothing.
@@ -143,12 +77,7 @@ function TurnView({ turn, onOpenThought, onCopyMessage }: TurnProps) {
 
     return (
       <View style={styles.userRow}>
-        <Copyable
-          text={text}
-          // A prompt that is only pictures has no text to take, so it gets no
-          // hold either — a gesture that opens an empty sheet is worse than one
-          // that is not there.
-          onCopy={hasText ? onCopyMessage : undefined}
+        <View
           style={[
             styles.userBubble,
             // Pictures need the same definite rail block markdown does: the
@@ -169,7 +98,7 @@ function TurnView({ turn, onOpenThought, onCopyMessage }: TurnProps) {
             hasText && <MarkdownText text={text} />
           )}
           <ChatImages images={images} />
-        </Copyable>
+        </View>
         {/* A message typed with no signal. Shown as what it is — sent, waiting
             on the network — rather than as an error, because nothing has
             failed: the reconnect delivers it. Under the bubble and quiet, so a
@@ -187,10 +116,10 @@ function TurnView({ turn, onOpenThought, onCopyMessage }: TurnProps) {
 
   if (turn.role === "system") {
     return (
-      <Copyable text={text} onCopy={hasText ? onCopyMessage : undefined} style={styles.systemRow}>
+      <View style={styles.systemRow}>
         {hasText && <MarkdownText text={text} tone="system" />}
         <ChatImages images={images} />
-      </Copyable>
+      </View>
     );
   }
 
@@ -204,16 +133,13 @@ function TurnView({ turn, onOpenThought, onCopyMessage }: TurnProps) {
         {hasText && (
           <Pressable
             onPress={() => onOpenThought?.(text)}
-            // The reasoning is text like any other, and it is the turn people
-            // most often want out of the app verbatim.
-            onLongPress={onCopyMessage ? () => onCopyMessage(text) : undefined}
+            // No long press of its own: the sheet it opens renders the
+            // reasoning as selectable text like any other message, so holding
+            // the row would only be a second, worse way to reach the same
+            // text.
             disabled={!onOpenThought}
             accessibilityRole="button"
             accessibilityLabel="Show thought process"
-            accessibilityActions={onCopyMessage ? COPY_ACTIONS : undefined}
-            onAccessibilityAction={(event) => {
-              if (event.nativeEvent.actionName === "copy") onCopyMessage?.(text);
-            }}
             hitSlop={touchSlop(theme.space(1.5))}
             style={({ pressed }) => [styles.thoughtToggle, pressed && styles.thoughtPressed]}
           >
@@ -227,10 +153,10 @@ function TurnView({ turn, onOpenThought, onCopyMessage }: TurnProps) {
   }
 
   return (
-    <Copyable text={text} onCopy={hasText ? onCopyMessage : undefined} style={styles.agentRow}>
+    <View style={styles.agentRow}>
       {hasText && <MarkdownText text={text} />}
       <ChatImages images={images} />
-    </Copyable>
+    </View>
   );
 }
 
@@ -246,7 +172,6 @@ export const Turn = memo(
   TurnView,
   (before, after) =>
     before.onOpenThought === after.onOpenThought &&
-    before.onCopyMessage === after.onCopyMessage &&
     before.turn.text === after.turn.text &&
     before.turn.role === after.turn.role &&
     // The one flag that is drawn: without it the label would outlive the

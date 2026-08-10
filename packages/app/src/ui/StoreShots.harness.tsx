@@ -193,7 +193,6 @@ function Conversation({ drawerOpen }: { drawerOpen: boolean }) {
           indicatorBottom={dockHeight}
           onAtBottomChange={() => {}}
           onOpenThought={() => {}}
-          onCopyMessage={() => {}}
         />
         <View style={styles.dock}>
           <Composer value="" onChangeText={() => {}} onSend={() => {}} />

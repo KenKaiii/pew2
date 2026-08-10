@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { TurnReceipt } from "./activity";
-import { receiptOnOpen, recordReceipt } from "./turnReceipts";
+import { receiptOnOpen, receiptOnReplay, recordReceipt } from "./turnReceipts";
 import type { Session } from "./useDaemon";
 
 const answered: TurnReceipt = { verb: "Answered", duration: "3s", tools: 0, failed: 0 };
@@ -55,6 +55,31 @@ test("a conversation still working shows no summary, since none is measured yet"
   expect(receiptOnOpen(running)).toBeUndefined();
   // Still kept, so it comes back when this turn ends.
   expect(running.receipt).toEqual(answered);
+});
+
+test("a resumed conversation gets its summary back with its transcript", () => {
+  // Resuming marks the session working on the way in, so the flag says nothing
+  // about whether a turn is being timed; only `running` does.
+  const sessions = recordReceipt([session({ busy: true })], "s1", answered);
+
+  expect(receiptOnReplay(sessions, "s1", false)).toEqual(answered);
+});
+
+test("a replay that lands mid-turn names no finished turn", () => {
+  const sessions = recordReceipt([session()], "s1", answered);
+
+  // The live activity line is what belongs under a running turn; a summary here
+  // would date-stamp a reply that has not been given yet.
+  expect(receiptOnReplay(sessions, "s1", true)).toBeUndefined();
+});
+
+test("a replay never borrows the summary of another conversation", () => {
+  const sessions = recordReceipt([session()], "s1", answered);
+
+  // The reason the old code cleared on replay: screen state belongs to the
+  // thread being left. Reading from the session makes that impossible.
+  expect(receiptOnReplay(sessions, "s2", false)).toBeUndefined();
+  expect(receiptOnReplay(sessions, undefined, false)).toBeUndefined();
 });
 
 test("a summary for a conversation the drawer does not hold changes nothing", () => {

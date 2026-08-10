@@ -46,3 +46,28 @@ export function recordReceipt(
 export function receiptOnOpen(session: Pick<Session, "busy" | "receipt">): TurnReceipt | undefined {
   return session.busy === true ? undefined : session.receipt;
 }
+
+/**
+ * The summary to show once a resumed conversation's transcript lands.
+ *
+ * A resume rebuilds the thread from the agent's own copy, and that frame used to
+ * clear the line unconditionally — correct when the summary was screen state
+ * (it described the conversation being left), wrong now that it is stored on the
+ * conversation. Reopening anything the daemon had forgotten therefore lost it
+ * again, which is every conversation after a daemon restart.
+ *
+ * Read from the session rather than from what is on screen, for the reason the
+ * old clear existed: the value on screen may belong to the previous thread.
+ * `busy` is not consulted — the open marks a resuming conversation working on
+ * the way in, and `running` is the honest question: is a turn being timed by
+ * *this* device right now, in which case there is a live activity line to show
+ * and no finished turn to name.
+ */
+export function receiptOnReplay(
+  sessions: readonly Session[],
+  sessionId: string | undefined,
+  running: boolean,
+): TurnReceipt | undefined {
+  if (running || !sessionId) return undefined;
+  return sessions.find((session) => session.id === sessionId)?.receipt;
+}
