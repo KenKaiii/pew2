@@ -25,6 +25,7 @@ import {
   qrCode,
 } from "./pairing.js";
 import { doctor } from "./cli/doctor.js";
+import { POSIX_MODES } from "./testing/platform.js";
 
 /**
  * A stand-in for the value a container would set.
@@ -71,9 +72,12 @@ test("the token survives a restart and is not world-readable", async () => {
   expect(second.token).toBe(first.token);
 
   const path = pairingPath(env);
-  const mode = (await stat(path)).mode & 0o777;
   // A token any other user on the box can read grants them every agent on it.
-  expect(mode).toBe(0o600);
+  // Only assertable where permission bits exist: on Windows the file inherits
+  // the ACL of %USERPROFILE%, which is per-user, and `chmod` is very nearly a
+  // no-op - so this is one of the few places the two platforms differ in fact
+  // rather than merely in spelling.
+  if (POSIX_MODES) expect((await stat(path)).mode & 0o777).toBe(0o600);
   expect(await readFile(path, "utf8")).toContain(first.token);
 });
 

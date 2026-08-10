@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { CATALOG, detectProviders } from "./detect.js";
 import { isAvailable, loadProviders, unavailableReason } from "./registry.js";
 import { ProviderManifest } from "@pew2/protocol";
+import { fakeExecutable } from "../testing/platform.js";
 
 /** An isolated machine: an empty PATH, and nowhere any manifest already lives. */
 async function sandbox() {
@@ -28,12 +29,16 @@ async function sandbox() {
   };
 }
 
-/** Put an executable on the sandbox PATH. */
-async function install(bin: string, command: string) {
-  const path = join(bin, command);
-  await writeFile(path, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
-  return path;
-}
+/**
+ * Put an executable on the sandbox PATH.
+ *
+ * Shared, because "executable" is not one shape: on Windows the name has to
+ * carry a PATHEXT suffix, and a bare `agent` file is the *bash* shim npm leaves
+ * beside `agent.cmd` — inert to any Win32 spawn, and correctly ignored by
+ * `findOnPath`. Writing the POSIX shape by hand meant these tests asserted
+ * against an agent the resolver was right not to find.
+ */
+const install = fakeExecutable;
 
 test("detects nothing on a machine with no agents installed", async () => {
   const { bin, providers, env } = await sandbox();

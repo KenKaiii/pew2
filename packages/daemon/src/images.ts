@@ -73,7 +73,17 @@ export function toLocalPath(
     }
   }
   // Any other scheme (http:, data:, mcp:) is not a file on this machine.
-  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(raw)) return undefined;
+  //
+  // A Windows drive letter is not a scheme, though it parses as one. `C:\Users`
+  // matched this, so every absolute Windows path was refused as "not a file on
+  // this machine" and no agent-produced image could load there at all. A scheme
+  // is at least two characters where a drive letter is exactly one — the one
+  // rule that separates them without the code having to know the platform.
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]+:/.test(raw)) return undefined;
+  // A lone letter and colon is a drive only when a separator follows. `x:foo`
+  // is a path relative to that drive's current directory, which is not
+  // something an agent means and would resolve outside the session's cwd.
+  if (/^[a-zA-Z]:/.test(raw) && !/^[a-zA-Z]:[\\/]/.test(raw)) return undefined;
 
   if (raw === "~") return home;
   if (raw.startsWith("~/")) return resolve(home, raw.slice(2));

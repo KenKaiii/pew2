@@ -165,3 +165,21 @@ test("a file swapped for a symlink after the check is not followed", async () =>
     "image/png",
   );
 });
+
+test("a windows drive letter is a path, not a URI scheme", () => {
+  // `C:\Users\me\shot.png` matched the scheme test, so on Windows every
+  // absolute path was refused as "not a file on this machine" and no
+  // agent-produced image could load at all. A scheme needs two or more
+  // characters; a drive letter is exactly one.
+  expect(toLocalPath("C:\\Users\\me\\shot.png", "C:\\work")).toBeDefined();
+  expect(toLocalPath("c:/Users/me/shot.png", "C:\\work")).toBeDefined();
+
+  // The schemes it must still refuse, which is what the check is for.
+  expect(toLocalPath("https://x.dev/a.png", "/work")).toBeUndefined();
+  expect(toLocalPath("data:image/png;base64,AA", "/work")).toBeUndefined();
+  expect(toLocalPath("mcp://server/a.png", "/work")).toBeUndefined();
+
+  // Drive-relative: a path on C:'s *current directory*, wherever that is. Not
+  // something an agent means, and it would resolve outside the session's cwd.
+  expect(toLocalPath("C:notes.png", "/work")).toBeUndefined();
+});

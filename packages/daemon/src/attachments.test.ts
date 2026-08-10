@@ -11,6 +11,7 @@ import {
   safeSegment,
   storeAttachments,
 } from "./attachments.js";
+import { POSIX_MODES } from "./testing/platform.js";
 
 const b64 = (text: string) => Buffer.from(text).toString("base64");
 const bytes = (count: number) => Buffer.alloc(count, 7).toString("base64");
@@ -138,9 +139,14 @@ describe("storeAttachments", () => {
       root,
     );
 
-    const file = await stat(stored[0]!.path);
-    const dir = await stat(attachmentDir("sess-1", root));
-    expect(file.mode & 0o077).toBe(0);
-    expect(dir.mode & 0o077).toBe(0);
+    // Guarded, not deleted: Windows has no permission bits. NTFS uses ACLs and
+    // `stat().mode` is a synthesised value there, so this assertion would be
+    // testing Node's emulation rather than the daemon.
+    if (POSIX_MODES) {
+      const file = await stat(stored[0]!.path);
+      const dir = await stat(attachmentDir("sess-1", root));
+      expect(file.mode & 0o077).toBe(0);
+      expect(dir.mode & 0o077).toBe(0);
+    }
   });
 });

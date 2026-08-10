@@ -3,6 +3,7 @@ import { mkdtemp, mkdir, readdir, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readConfigPrefs, writeConfigPref } from "./config-prefs.js";
+import { POSIX_MODES } from "./testing/platform.js";
 
 async function tempEnv() {
   const home = await mkdtemp(join(tmpdir(), "pew2-prefs-"));
@@ -87,7 +88,8 @@ test("the file is written whole, and readable only by its owner", async () => {
   await writeConfigPref("claude-code", "__acp_model", "opus", env);
 
   const path = join(env.PEW2_HOME!, "config-prefs.json");
-  expect((await stat(path)).mode & 0o077).toBe(0);
+  // Windows has no permission bits to check - see POSIX_MODES.
+  if (POSIX_MODES) expect((await stat(path)).mode & 0o077).toBe(0);
 
   // Nothing left behind: a temp file that survives is a file the next reader
   // may find instead of the real one.

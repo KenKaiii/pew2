@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { doctor } from "./doctor.js";
 import { setup } from "./setup.js";
+import { fakeExecutable } from "../testing/platform.js";
 
 /** An isolated machine: empty PATH, empty home, no daemon. */
 async function sandbox() {
@@ -27,9 +28,8 @@ async function sandbox() {
   };
 }
 
-async function install(bin: string, command: string) {
-  await writeFile(join(bin, command), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
-}
+/** Shared, so "installed" means the same thing here as it does on Windows. */
+const install = fakeExecutable;
 
 const noDaemon = async () => false;
 const daemonUp = async () => true;

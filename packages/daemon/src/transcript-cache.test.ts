@@ -3,6 +3,7 @@ import { mkdtemp, readdir, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readTranscript, writeTranscript } from "./transcript-cache.js";
+import { POSIX_MODES } from "./testing/platform.js";
 
 async function env() {
   const home = await mkdtemp(join(tmpdir(), "pew2-transcript-"));
@@ -123,6 +124,9 @@ test("a cached transcript is readable only by its owner", async () => {
   await writeTranscript("opencode", "ses_mode", [update("hello")], e);
 
   const dir = join(e.PEW2_HOME!, "cache", "transcripts", "opencode");
-  expect((await stat(join(dir, "ses_mode.json"))).mode & 0o077).toBe(0);
-  expect((await stat(dir)).mode & 0o077).toBe(0);
+  // Windows has no permission bits to check - see POSIX_MODES.
+  if (POSIX_MODES) {
+    expect((await stat(join(dir, "ses_mode.json"))).mode & 0o077).toBe(0);
+    expect((await stat(dir)).mode & 0o077).toBe(0);
+  }
 });

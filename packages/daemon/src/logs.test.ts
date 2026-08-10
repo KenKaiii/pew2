@@ -96,11 +96,13 @@ test("an unreadable log never stops the daemon starting", async () => {
 test("both streams are rotated, and PEW2_HOME is honoured", () => {
   // stderr is the one that runs away: a provider failing every probe writes a
   // stack trace each time, unwatched.
-  expect(daemonLogPaths({ PEW2_HOME: "/tmp/x" } as NodeJS.ProcessEnv)).toEqual([
-    "/tmp/x/logs/daemon.log",
-    "/tmp/x/logs/daemon.error.log",
+  // Both files, in order, under whatever home was given - asserted with `join`
+  // so it is the same claim on either platform.
+  expect(daemonLogPaths({ PEW2_HOME: join("/tmp", "x") } as NodeJS.ProcessEnv)).toEqual([
+    join("/tmp", "x", "logs", "daemon.log"),
+    join("/tmp", "x", "logs", "daemon.error.log"),
   ]);
-  expect(daemonLogPaths({} as NodeJS.ProcessEnv, "/Users/someone")[0]).toBe(
-    "/Users/someone/.pew2/logs/daemon.log",
+  expect(daemonLogPaths({} as NodeJS.ProcessEnv, join("/Users", "someone"))[0]).toBe(
+    join("/Users", "someone", ".pew2", "logs", "daemon.log"),
   );
 });

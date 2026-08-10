@@ -64,7 +64,7 @@ async function testFiles(): Promise<string[]> {
   const files: string[] = [];
   for await (const entry of glob.scan({ cwd: repoRoot, absolute: true })) {
     // Dependencies ship their own tests and are not ours to run.
-    if (entry.includes("/node_modules/")) continue;
+    if (entry.includes("node_modules")) continue;
     files.push(entry);
   }
   return files.sort();
@@ -80,8 +80,12 @@ test("every test file lives under a root the test script names", async () => {
   expect(roots.length).toBeGreaterThan(0);
   expect(files.length).toBeGreaterThan(0);
 
+  // `relative` rather than a string prefix: on Windows these are backslash
+  // paths, so `${root}/` matched nothing and every file read as an orphan.
+  // Comparing resolved paths asks the real question - is this file under that
+  // root - in the separator the platform actually uses.
   const orphans = files
-    .filter((file) => !roots.some((root) => file.startsWith(`${root}/`)))
+    .filter((file) => !roots.some((root) => !relative(root, file).startsWith("..")))
     .map((file) => relative(repoRoot, file));
 
   // Named rather than counted: the failure has to say which file is unreachable
@@ -95,5 +99,6 @@ test("this file sits under a root, so the check above is part of the suite", asy
   // a move is the likelier accident, and silent without this.
   const roots = rootsFrom(await testScript());
 
-  expect(roots.some((root) => import.meta.path.startsWith(`${root}/`))).toBe(true);
+  // Same separator-agnostic containment as above.
+  expect(roots.some((root) => !relative(root, import.meta.path).startsWith(".."))).toBe(true);
 });
