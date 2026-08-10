@@ -5,13 +5,26 @@
  * Drives exactly what the app does: connect, list providers, start a session,
  * prompt, stream, and answer a permission request.
  */
-// Port and token follow the environment, so this can run against a scratch
-// daemon (`PEW2_PORT`/`PEW2_TOKEN`) without disturbing one already on 8787.
+// The daemon's own pairing decides both halves of this: the query token that
+// gets the socket upgraded, and the key every frame after `hello` is sealed
+// with. Loaded the same way the daemon loads it, so a scratch daemon
+// (`PEW2_HOME`/`PEW2_TOKEN`/`PEW2_PORT`) can be driven without disturbing the
+// one a phone is paired to.
+import { loadPairing } from "../pairing.js";
+import { CLI_DEVICE_PREFIX } from "../device-claim.js";
+import { SecureChannel, e2e, wire } from "@pew2/protocol";
+
 const port = process.env.PEW2_PORT ?? "8787";
-const token = process.env.PEW2_TOKEN;
-const ws = new WebSocket(
-  `ws://127.0.0.1:${port}${token ? `?token=${encodeURIComponent(token)}` : ""}`,
-);
+const pairing = await loadPairing();
+const channel = new SecureChannel(e2e.fromHex(pairing.key), "app");
+// The local-watcher identity, not a device name. A pairing belongs to one
+// device, and proving the key is what claims it — so a plain id here would take
+// an unclaimed pairing (the phone that scanned next is refused until
+// `pew2 pair --rotate`) or be refused itself by the phone that already owns it,
+// which is every run on a machine actually in use. This prefix is admitted and
+// never recorded, exactly as `pew2 pair`'s own watching socket is.
+const deviceId = `${CLI_DEVICE_PREFIX}e2e-check`;
+const ws = new WebSocket(`ws://127.0.0.1:${port}?token=${pairing.token}`);
 const inbox = [];
 let failures = 0;
 
@@ -20,9 +33,16 @@ const check = (label, cond) => {
   if (!cond) failures++;
 };
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
-const send = (m) => ws.send(JSON.stringify(m));
+// Everything after `hello` is sealed in both directions, exactly as the app
+// sends it. An unsealed frame is dropped without a word — which is what this
+// check was silently doing to itself, failing every step after the handshake.
+const send = (m) => ws.send(JSON.stringify(channel.seal(m)));
 
-ws.addEventListener("message", (e) => inbox.push(JSON.parse(e.data)));
+ws.addEventListener("message", (e) => {
+  const frame = JSON.parse(e.data);
+  const message = e2e.isEnvelope(frame) ? channel.open(frame) : frame;
+  if (message !== undefined) inbox.push(message);
+});
 // A rejected upgrade (wrong or missing token) otherwise hangs here forever.
 ws.addEventListener("error", () => {
   console.log("FAIL  connects to the daemon");
@@ -30,15 +50,36 @@ ws.addEventListener("error", () => {
 });
 await new Promise((r) => ws.addEventListener("open", r));
 
-send({ t: "hello", wire: 1, role: "app", deviceId: "check", cursors: {} });
+// Cleartext, and the only frame that may be: it is what establishes the
+// connection. The proof beside it is what the daemon checks before doing any
+// work for this socket.
+ws.send(
+  JSON.stringify({
+    t: "hello",
+    wire: wire.WIRE_VERSION,
+    role: "app",
+    deviceId,
+    proof: channel.proof(deviceId),
+    cursors: {},
+  }),
+);
 await wait(500);
+check(
+  "the handshake is accepted",
+  !inbox.some((m) => m.t === "error" && ["unpaired", "device-refused", "wire-version"].includes(m.code)),
+);
 
 const announce = inbox.find((m) => m.t === "providers");
 check("daemon announces providers", !!announce);
 check("echo is available", announce?.providers.some((p) => p.id === "echo" && p.available));
+// Named `codex` once, which made this a check on what happens to be installed
+// on the machine running it — an agent whose command is missing entirely is not
+// announced at all, so it failed for a reason that had nothing to do with the
+// daemon. What matters is that an agent this machine cannot run is reported as
+// such, with a reason the phone can show, instead of taking the announce down.
 check(
-  "uninstalled provider marked unavailable, not crashing",
-  announce?.providers.some((p) => p.id === "codex" && !p.available),
+  "an unavailable agent says why, and the rest still announce",
+  announce?.providers.every((p) => p.available || typeof p.unavailableReason === "string"),
 );
 
 send({ t: "session.start", providerId: "echo" });

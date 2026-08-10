@@ -54,8 +54,8 @@ export interface HandlerContext {
  * refusal deliberately says nothing about whether the path exists — answering
  * that for an arbitrary string is a filesystem oracle in its own right.
  */
-function namedProject(daemon: Daemon, providerId: string, cwd: string): string {
-  const known = daemon.knownProject(providerId, cwd);
+async function namedProject(daemon: Daemon, providerId: string, cwd: string): Promise<string> {
+  const known = await daemon.knownProject(providerId, cwd);
   if (!known) throw new Error("unknown project");
   return known;
 }
@@ -156,7 +156,7 @@ export async function handleMessage(raw: string, ctx: HandlerContext): Promise<v
         // broadcast: it is a menu choice on one phone, not a change to the
         // session log every client shares.
         const providerId = message.providerId;
-        const projectCwd = namedProject(daemon, providerId, message.cwd);
+        const projectCwd = await namedProject(daemon, providerId, message.cwd);
         const sessions = await daemon.sessionsForProject(providerId, projectCwd);
         reply({
           t: "provider.sessions",
@@ -183,11 +183,27 @@ export async function handleMessage(raw: string, ctx: HandlerContext): Promise<v
         // break reopening a session every time the daemon was updated. The
         // containment is unchanged either way: the client's string is used only
         // when this daemon published it, and otherwise never reaches a spawn.
-        const named = message.cwd
-          ? daemon.knownProject(message.providerId, message.cwd)
-          : undefined;
-        const workspace =
-          named ?? (await daemon.lastWorkspace(message.providerId)) ?? cwd;
+        //
+        // What the fallback must not do is *guess a different project*, which is
+        // what it used to: dropping to the provider's last workspace reopened a
+        // conversation about one repo with the agent rooted in another, and told
+        // every client to file it there. So the agent's own record for this
+        // conversation comes first — it is the authority on where its own
+        // session lives, it needs no client to be up to date, and it is right
+        // even for an older app that sends no `cwd` at all.
+        const recorded = await daemon.agentSessionCwd(
+          message.providerId,
+          message.agentSessionId,
+        );
+        // Only asked when the agent had no record: checking a path also files it
+        // as a project this client has opened, and the one it sent here is not
+        // the one being opened.
+        const named =
+          recorded ??
+          (message.cwd
+            ? await daemon.knownProject(message.providerId, message.cwd)
+            : undefined);
+        const workspace = named ?? (await daemon.lastWorkspace(message.providerId)) ?? cwd;
         const pending = daemon.beginResumeSession(
           message.providerId,
           message.agentSessionId,
@@ -235,7 +251,7 @@ export async function handleMessage(raw: string, ctx: HandlerContext): Promise<v
         // has no file picker, and defaulting to the home directory gives the
         // agent no project to work in and no project commands to offer.
         const workspace = message.cwd
-          ? namedProject(daemon, message.providerId, message.cwd)
+          ? await namedProject(daemon, message.providerId, message.cwd)
           : ((await daemon.lastWorkspace(message.providerId)) ?? cwd);
         const sessionId = await daemon.startSession(message.providerId, workspace);
         broadcast({
@@ -243,7 +259,7 @@ export async function handleMessage(raw: string, ctx: HandlerContext): Promise<v
           sessionId,
           providerId: message.providerId,
           // The project the session was actually started in, which is not
-          // always the one asked for: an unrecognised `cwd` falls back to the
+          // always the one asked for: a request naming no project opens in the
           // agent's last workspace above. Sending the resolved value means a
           // client files the row where the work is really happening, and a
           // second device — which never saw the request — can file it at all.
@@ -402,7 +418,7 @@ export async function handleMessage(raw: string, ctx: HandlerContext): Promise<v
         // directory the answer already listed.
         const chosen =
           message.providerId && message.cwd
-            ? daemon.knownProject(message.providerId, message.cwd)
+            ? await daemon.knownProject(message.providerId, message.cwd)
             : undefined;
         const root =
           (message.sessionId ? daemon.sessionCwd(message.sessionId) : undefined) ??

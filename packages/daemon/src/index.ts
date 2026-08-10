@@ -25,6 +25,7 @@ import { discardAttachments, storeAttachments } from "./attachments.js";
 import { folderName, resolveWorkspace } from "./workspace.js";
 import { PushRegistry } from "./push.js";
 import { readProbeCache, writeProbeCache } from "./probe-cache.js";
+import { readKnownProjects, rememberKnownProject } from "./known-projects.js";
 import { hydrateMessageCounts } from "./acp/messageCounts.js";
 import { sessionsInProject, type AgentProject } from "./projects.js";
 import { SESSION_HISTORY_LIMIT } from "./session-history.js";
@@ -261,6 +262,15 @@ export class Daemon {
    * rather than a growing record of what is on the disk.
    */
   private readonly offeredWorkspaces = new Set<string>();
+
+  /**
+   * The same check's durable half: projects a client has actually opened, read
+   * from disk on first use. See `known-projects.ts` — the app re-sends its
+   * chosen project for days, so "offered seconds ago" is not the whole rule.
+   */
+  private chosen?: Promise<Set<string>>;
+  /** Serialises the read-modify-write behind `rememberProject`. */
+  private chosenWrites: Promise<void> = Promise.resolve();
 
   /**
    * One already-booted agent process per provider, left over from the last
@@ -1250,17 +1260,106 @@ export class Daemon {
    * The gate on accepting a path from a client at all: it returns only strings
    * this process already published, so a caller cannot use it to ask whether
    * some other directory on the machine exists.
+   *
+   * Accepting one also records it (`known-projects.json`), because a client
+   * holds on to a chosen project far longer than this process lives — see that
+   * module for what the in-memory-only version broke. That record is not keyed
+   * by agent, matching `offeredWorkspaces`: a browsed directory was never
+   * per-agent either, and the containment this enforces is about which strings
+   * this machine published to this pairing, not about which agent asks.
    */
-  knownProject(providerId: string, cwd: string): string | undefined {
-    const known = this.projectHistory.get(providerId);
-    if (known?.some((session) => session.cwd === cwd)) return cwd;
+  async knownProject(providerId: string, cwd: string): Promise<string | undefined> {
+    const known = await this.projectsWithHistory(providerId);
+    if (known.some((session) => session.cwd === cwd)) return this.rememberProject(cwd);
     // A directory this daemon just offered in a `workspaces` answer counts for
     // the same reason: it published the string, so echoing it back reveals
     // nothing new. Without this a project reached by browsing is unknown until
     // its first session exists, and the composer would name the agent's
     // *previous* project while pointing at this one — which is worse than no
     // label, because it is confidently wrong.
-    return this.offeredWorkspaces.has(cwd) ? cwd : undefined;
+    if (this.offeredWorkspaces.has(cwd)) return this.rememberProject(cwd);
+    // Chosen in an earlier run of this daemon. The path was published then, by
+    // one of the two checks above; a restart is not consent being withdrawn.
+    return (await this.chosenProjects()).has(cwd) ? cwd : undefined;
+  }
+
+  /**
+   * The agent's own sessions, filled from the probe cache when no probe has
+   * landed yet.
+   *
+   * The app asks about a project the moment it reconnects — before the probe it
+   * asked for in the same breath has resolved — so reading the map alone made
+   * recognising a perfectly genuine project a race against a spawn. This reads
+   * the same file the probe would serve from and never starts an agent.
+   */
+  private async projectsWithHistory(providerId: string): Promise<AgentSession[]> {
+    const known = this.projectHistory.get(providerId);
+    if (known) return known;
+    const cached = (await readProbeCache(providerId, this.env))?.allSessions;
+    if (!cached?.length) return [];
+    this.projectHistory.set(providerId, cached);
+    return cached;
+  }
+
+  /**
+   * Where the agent itself recorded one of its conversations.
+   *
+   * A conversation's project is a property of the conversation, and the agent is
+   * the one that knows it — so reopening does not have to take a client's word
+   * for it, or guess. Guessing is what it used to do: an unrecognised `cwd` on
+   * resume fell through to the provider's *last* workspace, which reopens a
+   * conversation about one repo with the agent rooted in another. Every file
+   * tool in that turn then reads and writes the wrong project, and the
+   * `session.started` that follows tells every client to file the conversation
+   * there too.
+   *
+   * Answering from the same history the projects list is built from, so this
+   * costs a map lookup and never starts an agent.
+   */
+  async agentSessionCwd(providerId: string, agentSessionId: string): Promise<string | undefined> {
+    const known = await this.projectsWithHistory(providerId);
+    const recorded = known.find((session) => session.sessionId === agentSessionId)?.cwd;
+    // Recorded like an accepted project, because announcing it is publishing it:
+    // the client files the conversation under this path and sends it back later.
+    return recorded ? this.rememberProject(recorded) : undefined;
+  }
+
+  /**
+   * Projects a client has opened before, loaded once per daemon.
+   *
+   * Held as a promise so the concurrent asks a reconnect produces share one
+   * read, and so an unreadable file is a miss rather than a retry per message.
+   */
+  private chosenProjects(): Promise<Set<string>> {
+    this.chosen ??= readKnownProjects(this.env).then((paths) => new Set(paths));
+    return this.chosen;
+  }
+
+  /**
+   * File an accepted project, in memory and on disk, before answering with it.
+   *
+   * Awaited rather than left running: the answer *is* the publication, so a
+   * daemon that died between saying yes and writing it down would refuse the
+   * same path a second later. It costs one small write, once per project — and
+   * the caller is on its way to spawning an agent or running `git status`.
+   *
+   * Writes are chained rather than concurrent so two paths accepted in the same
+   * moment cannot read-modify-write over each other.
+   */
+  private async rememberProject(cwd: string): Promise<string> {
+    const chosen = await this.chosenProjects();
+    if (chosen.has(cwd)) return cwd;
+    chosen.add(cwd);
+    this.chosenWrites = this.chosenWrites
+      .then(() => rememberKnownProject(cwd, this.env))
+      // A daemon that cannot write its own state directory still has to run;
+      // the cost is that this project is forgotten at the next restart.
+      .then(
+        () => {},
+        () => {},
+      );
+    await this.chosenWrites;
+    return cwd;
   }
 
   /**
