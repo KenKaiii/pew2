@@ -959,6 +959,34 @@ export class Daemon {
   }
 
   /**
+   * Why this daemon is not safe to end right now, or undefined if it is.
+   *
+   * "Quiet" is the precondition for exiting to pick up a new binary. It is not
+   * about elapsed time: a session can be silent for minutes while an agent
+   * thinks or runs a long tool, and ending the process then loses that turn's
+   * work with no way to resume it mid-flight.
+   *
+   * Three things make a daemon busy, and each is a different kind of loss:
+   * a turn in flight (`working`) would be abandoned mid-write; an open
+   * permission is a question already on someone's screen, and killing it makes
+   * the tap do nothing; a session still opening has an agent process spawned
+   * and not yet usable, which would be leaked rather than closed cleanly.
+   *
+   * Returns a reason rather than a boolean so a caller can log *why* it is
+   * waiting — a daemon that never seems to update is otherwise unexplainable.
+   */
+  busyReason(): string | undefined {
+    for (const [sessionId, session] of this.sessions) {
+      if (session.working) return `session ${sessionId} is mid-turn`;
+      if ((session.permissions?.size ?? 0) > 0) {
+        return `session ${sessionId} is waiting on an approval`;
+      }
+      if (!session.agentSessionId) return `session ${sessionId} is still opening`;
+    }
+    return undefined;
+  }
+
+  /**
    * End one conversation and release everything it holds.
    *
    * The single close path, because there are four callers — the idle reaper, the

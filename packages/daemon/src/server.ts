@@ -21,6 +21,7 @@ import { RelayClient } from "./relay-client.js";
 import { hostname } from "node:os";
 import { daemonLogPaths, rotateLog } from "./logs.js";
 import { sweepOrphans } from "./children.js";
+import { startUpdateScheduler } from "./update/scheduler.js";
 import type { ServerWebSocket } from "bun";
 
 const PORT = Number(process.env.PEW2_PORT ?? 8787);
@@ -417,18 +418,40 @@ process.on("unhandledRejection", (error) => console.error("[unhandled]", error))
  * ordinary restarts left 33 of them holding 2.3GB, and nothing on screen said
  * so. SIGHUP is included for a terminal that closes on a foreground run.
  */
-function shutdown() {
+function releaseEverything() {
   stopWatching();
   relay?.stop();
   daemon.closeAll();
-  // `closeAll` asks each agent to exit; this is the half-second it gets to do
-  // so before the process ends and `children.ts`'s exit hook kills whatever is
-  // still up. The delay is what makes that a backstop rather than the normal
-  // path: an agent mid-write deserves the chance to finish. Safe to wait —
-  // launchd allows 20s, and a terminal will not notice half a second.
-  setTimeout(() => process.exit(0), 500);
+}
+
+/**
+ * The half-second `closeAll` gets before the process ends.
+ *
+ * An agent mid-write deserves the chance to finish, and `children.ts`'s exit
+ * hook is the backstop for anything still up when it runs out. Safe to wait:
+ * launchd allows 20s, and a terminal will not notice.
+ */
+const GRACE_MS = 500;
+
+function shutdown() {
+  releaseEverything();
+  setTimeout(() => process.exit(0), GRACE_MS);
 }
 
 for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
   process.on(signal, shutdown);
 }
+
+// Keep this machine on the current release without anyone re-running the curl
+// line. Inert unless this is a compiled macOS build, because ending the process
+// is only an update where launchd starts it again — see `update/apply.ts`.
+//
+// The exit reuses the signal path's grace period rather than inventing a second
+// one: an update is a restart, and a restart that abandons an agent mid-write is
+// the bug `shutdown` already exists to avoid.
+startUpdateScheduler({
+  busyReason: () => daemon.busyReason(),
+  shutdown: releaseEverything,
+  exit: (code) => setTimeout(() => process.exit(code), GRACE_MS),
+  log: (message) => console.log(message),
+});

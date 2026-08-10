@@ -940,3 +940,46 @@ test("the idle window is fifteen minutes, not an afternoon", () => {
   // A minute past it: gone.
   expect(daemon.reapIdleSessions(16 * 60 * 1000)).toEqual(["just-inside"]);
 });
+
+test("a daemon with nothing in flight is quiet", () => {
+  // The precondition for exiting to pick up a new binary. An open conversation
+  // is not busy: the transcript is on disk and reopening resumes it.
+  const { daemon } = daemonWithCollector();
+  plantIdleSession(daemon, "open");
+
+  expect(daemon.busyReason()).toBeUndefined();
+});
+
+test("a session mid-turn makes the daemon busy", () => {
+  // Ending the process here abandons a turn that cannot be resumed from the
+  // middle, however silent the agent has gone.
+  const { daemon } = daemonWithCollector();
+  plantIdleSession(daemon, "turning", { working: true });
+
+  expect(daemon.busyReason()).toContain("turning");
+  expect(daemon.busyReason()).toContain("mid-turn");
+});
+
+test("an unanswered permission makes the daemon busy", () => {
+  // The question is already on someone's screen; exiting makes their next tap
+  // do nothing at all.
+  const { daemon } = daemonWithCollector();
+  plantIdleSession(daemon, "asking", { permissions: new Map([["perm_1", {}]]) });
+
+  expect(daemon.busyReason()).toContain("approval");
+});
+
+test("a session still opening makes the daemon busy", () => {
+  // Its agent has been spawned and is not yet usable, so ending now leaks the
+  // process rather than closing it.
+  const { daemon } = daemonWithCollector();
+  plantIdleSession(daemon, "starting", { agentSessionId: undefined });
+
+  expect(daemon.busyReason()).toContain("still opening");
+});
+
+test("an empty daemon is quiet", () => {
+  const { daemon } = daemonWithCollector();
+
+  expect(daemon.busyReason()).toBeUndefined();
+});
