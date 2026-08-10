@@ -144,6 +144,28 @@ if [ "$os_name" = "darwin" ] && command -v xattr >/dev/null 2>&1; then
   xattr -d com.apple.quarantine "$INSTALL_DIR/pew2" 2>/dev/null || true
 fi
 
+# --- restart the daemon -----------------------------------------------------
+
+# Replacing the file does not replace the process.
+#
+# `mv` swaps the directory entry; a daemon launchd started is still executing
+# the old inode and keeps doing so until it exits. So an update landed on disk
+# and changed nothing at all: the user ran the curl line, saw "Installed", and
+# went on talking to the same build they were trying to leave. Every fix
+# shipped this way was invisible until the machine happened to reboot.
+#
+# Only when a service is already installed. A first install has no daemon to
+# restart, and `pew2 setup` is what starts one.
+if [ -f "$HOME/Library/LaunchAgents/dev.pew2.daemon.plist" ]; then
+  # Failure here is not fatal: the binary is installed and correct either way,
+  # and `pew2 setup` reports an unreachable daemon with the command to fix it.
+  if "$INSTALL_DIR/pew2" service restart >/dev/null 2>&1; then
+    line "${GREEN}${TICK}${R} Daemon restarted on the new version"
+  else
+    line "${D}Run ${B}pew2 service restart${R}${D} to finish updating the daemon.${R}"
+  fi
+fi
+
 # --- PATH -------------------------------------------------------------------
 
 case ":$PATH:" in
