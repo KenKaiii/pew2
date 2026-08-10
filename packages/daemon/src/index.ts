@@ -232,6 +232,17 @@ export class Daemon {
   // flight rather than resolved so concurrent asks share one spawn.
   private readonly probes = new Map<string, Promise<ProviderCapabilities>>();
   /**
+   * When each provider's answer above was last obtained — from a live probe, or
+   * from the timestamp inside the cache file that answered instead.
+   *
+   * Monotonic: a disk file older than what is already known never rewinds this,
+   * so a failed refresh backs off for a full interval rather than spawning the
+   * agent again on every ask.
+   */
+  private readonly probedAt = new Map<string, number>();
+  /** Background refreshes in flight, so concurrent asks share one spawn. */
+  private readonly refreshing = new Map<string, Promise<void>>();
+  /**
    * Every session a provider reported, uncapped, keyed by provider id.
    *
    * The app is only ever sent the newest handful, because message counts cost
@@ -313,6 +324,25 @@ export class Daemon {
   private static readonly SPARE_TTL_MS = 15 * 60 * 1000;
 
   /**
+   * How old a provider's session list may be before the next ask refreshes it.
+   *
+   * The probe used to be memoised for the daemon's lifetime, refreshed exactly
+   * once — on the first cache hit after boot. A daemon runs for days, and the
+   * user spends those days working at the desk, so every conversation and every
+   * project started after that one refresh was invisible to the phone until the
+   * daemon was restarted. The cache on this machine was two days stale while
+   * the agent had written sessions minutes earlier.
+   *
+   * A minute, because the ask that matters arrives when the app reconnects —
+   * once per foreground — and "I just put the laptop down" is exactly the case
+   * that has to work. The cached answer is still served immediately; this only
+   * decides when a refresh runs behind it. The spawn it costs is not wasted
+   * either: the probe leaves its process parked as the spare that the next
+   * conversation adopts.
+   */
+  private static readonly PROBE_TTL_MS = 60 * 1000;
+
+  /**
    * How long a conversation may sit untouched before its agent is closed.
    *
    * The same fifteen minutes as a warm spare, and for the same reason: what is
@@ -361,6 +391,9 @@ export class Daemon {
    * A failed refresh is silent: the cached answer stays in place.
    */
   private async revalidate(providerId: string) {
+    // Recorded before the refresh rather than after it, so a provider that fails
+    // or hangs is retried on the next interval instead of on the very next ask.
+    this.markProbed(providerId, Date.now());
     // Corrected on the way out, like every other capability answer: the refresh
     // reports the agent's defaults, and pushing those would overwrite a correct
     // pill with "Default" seconds after the app opened.
@@ -393,6 +426,45 @@ export class Daemon {
     }
   }
 
+  /**
+   * Refresh a provider's capabilities in the background, once.
+   *
+   * Deduplicated here rather than in each caller: the staleness check below and
+   * the spare boot both want the same refresh, and running two means spawning
+   * the agent twice to ask it the same question.
+   */
+  private refreshCapabilities(providerId: string): Promise<void> {
+    const existing = this.refreshing.get(providerId);
+    if (existing) return existing;
+    const run = this.revalidate(providerId)
+      .catch(() => {
+        // A failed refresh is silent by design: the cached answer stands.
+      })
+      .finally(() => {
+        if (this.refreshing.get(providerId) === run) this.refreshing.delete(providerId);
+      });
+    this.refreshing.set(providerId, run);
+    return run;
+  }
+
+  /** Newest wins, so a stale cache file cannot rewind a live probe. */
+  private markProbed(providerId: string, at: number) {
+    if ((this.probedAt.get(providerId) ?? 0) < at) this.probedAt.set(providerId, at);
+  }
+
+  /**
+   * Kick a background refresh if what we are about to serve is old.
+   *
+   * Never awaited. The caller is answered from the cached probe at once and the
+   * fresh list arrives moments later as a `provider.capabilities` push, which
+   * clients already fold in exactly like an answer to their own request.
+   */
+  private revalidateIfStale(providerId: string) {
+    const at = this.probedAt.get(providerId);
+    if (at !== undefined && Date.now() - at < Daemon.PROBE_TTL_MS) return;
+    void this.refreshCapabilities(providerId);
+  }
+
   private warmProvider(providerId: string): Promise<void> {
     // Nothing is warmed for an agent that is off. Without this the daemon would
     // still boot a process for it in the background, which is most of what
@@ -414,7 +486,7 @@ export class Daemon {
     // disk cache first, so a tap arriving in that window would find no promise
     // to wait on and spawn a second process alongside this one.
     this.armSpare(providerId);
-    const warming = this.revalidate(providerId).finally(() => {
+    const warming = this.refreshCapabilities(providerId).finally(() => {
       if (this.warming.get(providerId) === warming) this.warming.delete(providerId);
       // Release anyone still waiting; a finished boot either left a spare or
       // failed, and both answers are "stop waiting".
@@ -1241,8 +1313,10 @@ export class Daemon {
    * the connected app updates — pew2 stores no model names of its own — and lets
    * the empty state show real options instead of nothing.
    *
-   * Cached per provider for the daemon's lifetime: spawning an agent is slow,
-   * and a live session's own selectors always take precedence over this.
+   * Cached per provider: spawning an agent is slow, and a live session's own
+   * selectors always take precedence over this. The cache is stale-while-
+   * revalidate rather than permanent — see `PROBE_TTL_MS` — because the work
+   * this list describes is mostly done at the desk, while the daemon runs.
    */
   async probeProvider(
     providerId: string,
@@ -1252,9 +1326,20 @@ export class Daemon {
     // find out. The app should never ask \u2014 it is not announced \u2014 but a stale
     // client or a direct CLI call must not be able to boot it either.
     if (!this.isEnabled(providerId)) return EMPTY_CAPABILITIES;
-    if (refresh) this.probes.delete(providerId);
-    const cached = this.probes.get(providerId);
-    if (cached) return cached;
+    // A refresh runs *beside* the cached answer rather than replacing it up
+    // front. Clearing the slot first published the in-flight reprobe to every
+    // other reader: an ask arriving during a refresh waited on the agent's boot
+    // instead of being answered instantly, and a refresh that failed handed that
+    // reader nothing at all — which is how announcing a preference could go
+    // silent while the agent it belongs to was mid-restart. The new answer is
+    // installed below, once it exists.
+    const cached = refresh ? undefined : this.probes.get(providerId);
+    if (cached) {
+      // The answer is instant; whether it is still true is settled behind it.
+      // Without this the first probe after boot was the only one that ever ran.
+      this.revalidateIfStale(providerId);
+      return cached;
+    }
 
     const provider = this.providers.find((p) => p.manifest.id === providerId);
     if (!provider || !isAvailable(provider)) return EMPTY_CAPABILITIES;
@@ -1276,17 +1361,24 @@ export class Daemon {
       // permanently false, so the cache would never be used and every drawer
       // open would pay a full spawn.
       if (disk) {
+        // How old this answer is, so the staleness check below has something to
+        // measure. A file written days ago is stale the moment it is read.
+        this.markProbed(providerId, disk.probedAt);
         // Return disk history immediately while booting the matching provider.
         // The first tap can then adopt this process instead of starting cold.
         void this.warmProvider(providerId);
+        // Independent of the warm-up above, which returns early when a spare is
+        // already parked — that short circuit was the second way a stale list
+        // could survive: a provider warmed by anything else never refreshed.
+        this.revalidateIfStale(providerId);
         // Survives a daemon restart, so the first project chosen after a reboot
         // is answered from disk rather than waiting on the background reprobe.
         if (disk.allSessions?.length) this.projectHistory.set(providerId, disk.allSessions);
         const served = Promise.resolve<ProviderCapabilities>({
           // The agent's own values, uncorrected. Preferences are applied when a
           // caller is answered (`capabilitiesFor`), never baked in here: this
-          // promise is cached for the daemon's lifetime, so a value folded in
-          // now would still be reported after the user picked something else —
+          // promise outlives the ask that created it, so a value folded in now
+          // would still be reported after the user picked something else —
           // the pill would name a model the next prompt was not going to use.
           configOptions: disk.configOptions,
           sessions: disk.sessions,
@@ -1378,12 +1470,25 @@ export class Daemon {
         // Persist so the next ask — and the next daemon boot — answers from
         // disk instead of spawning again.
         void writeProbeCache(providerId, capabilities, this.env, all).catch(() => {});
+        // Installed only now that it exists, which is what lets a refresh leave
+        // the previous answer serving readers until this moment.
+        this.probes.set(providerId, Promise.resolve(capabilities));
+        // This is the answer the staleness clock is about: everything served
+        // from here until it expires is this moment's view of the agent's disk.
+        this.markProbed(providerId, Date.now());
         return capabilities;
       } catch (error) {
         // A probe is best-effort: this is what the app shows before a session
         // exists, and failing here must not stop the user starting a real one.
         console.error(`[${providerId}] capability probe failed:`, error);
-        this.probes.delete(providerId);
+        // A failed refresh changes nothing: whatever was serving before still
+        // is. Only a failed *first* probe has an entry to withdraw.
+        if (!refresh) this.probes.delete(providerId);
+        // Backs the next staleness check off by a full interval. Dropping the
+        // probe above sends the next ask back to the cache file, whose older
+        // timestamp would otherwise ask for another spawn immediately — an
+        // agent that fails to boot would be respawned on every drawer open.
+        this.markProbed(providerId, Date.now());
         // Releases anyone waiting on the boot. Harmless once already announced.
         announceSpare();
         return EMPTY_CAPABILITIES;
@@ -1392,7 +1497,17 @@ export class Daemon {
       }
     })();
 
-    this.probes.set(providerId, probe);
+    // A refresh deliberately does not park its pending promise here — readers
+    // must keep getting the last good answer while it runs.
+    if (!refresh) {
+      this.probes.set(providerId, probe);
+      // Stamped while the probe is still in flight, not just when it lands. A
+      // pending probe with no stamp reads as "never probed", so the next asker
+      // to arrive during the boot — the drawer opening while a project is being
+      // chosen — judged it stale and spawned a *second* agent alongside the one
+      // it was already waiting on. Stamped again when the answer lands.
+      this.markProbed(providerId, Date.now());
+    }
     return probe;
   }
 
@@ -1403,8 +1518,8 @@ export class Daemon {
    * The probe reports the agent's defaults, and a new session has this user's
    * remembered choices applied to it on connect — so an uncorrected reply
    * describes a state that never reaches the screen. Applied here, on every
-   * answer, because the probe behind it is cached for the daemon's lifetime
-   * while a preference changes whenever someone taps a pill.
+   * answer, because the probe behind it is cached while a preference changes
+   * whenever someone taps a pill.
    */
   async capabilitiesFor(
     providerId: string,

@@ -504,9 +504,12 @@ test("a model chosen in a conversation moves what the next one will open with", 
 });
 
 test("capabilities are answered at the values in force now, not the ones probed", async () => {
-  // The probe is cached for the daemon's lifetime, so a preference folded into it
-  // once is reported for ever: pick a model, and the empty state goes on naming
-  // whichever one was current when the agent was first asked.
+  // A probe outlives the ask that created it, so a preference folded into it
+  // once is reported for as long as it is cached: pick a model, and the empty
+  // state goes on naming whichever one was current when the agent was asked.
+  // Planting the probe directly is what pins that — the staleness refresh this
+  // daemon would otherwise run finds no provider named "test" and changes
+  // nothing, which is exactly the state under test here.
   const { daemon, sent } = daemonWithCollector();
   (daemon as any).probes.set(
     "test",

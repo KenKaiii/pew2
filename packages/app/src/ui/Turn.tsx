@@ -10,8 +10,15 @@
  * no longer means "a new message arrived" — a per-mount fade would fire while
  * scrolling through old history.
  */
-import { memo } from "react";
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import { memo, type ReactNode } from "react";
+import {
+  Pressable,
+  StyleSheet,
+  Text,
+  View,
+  type StyleProp,
+  type ViewStyle,
+} from "react-native";
 import Ionicons from "@expo/vector-icons/Ionicons";
 import { theme } from "../theme";
 import { MarkdownText } from "./MarkdownText";
@@ -30,9 +37,76 @@ interface TurnProps {
   turn: TurnModel;
   /** Opens this turn's reasoning in the thought sheet. */
   onOpenThought?: (text: string) => void;
+  /** Opens this turn's text for copying and selection. */
+  onCopyMessage?: (text: string) => void;
 }
 
-function TurnView({ turn, onOpenThought }: TurnProps) {
+/**
+ * Press and hold any message to take its text.
+ *
+ * A hold rather than a visible button: every turn would need one, and a copy
+ * control on each of them is more chrome than transcript. Hold is where the
+ * platform already puts "do something with this text", so nothing has to be
+ * taught — and the sheet it opens is the discovery, since it shows both what
+ * will be copied and that it can be selected by hand.
+ *
+ * ## Why this wrapper is not an accessibility element
+ *
+ * A `Pressable` is `accessible` by default, and that flag is a *grouping*: it
+ * collapses everything inside into one VoiceOver node whose announcement is
+ * React Native's concatenation of the children. Applied here it would turn a
+ * long agent reply — headings, paragraphs, list items, code — into a single
+ * unstoppable utterance, when today it is navigable a block at a time. Skimming
+ * by swiping between paragraphs is *how* a screen reader reads a long answer,
+ * so grouping would take the most structure away from the readers who depend on
+ * it most, in exchange for one action. Not worth it: `accessible={false}` keeps
+ * the transcript exactly as navigable as it was.
+ *
+ * The cost of that choice is the rotor. Custom actions are offered per focused
+ * element, so a wrapper VoiceOver cannot focus has nowhere to hang "Copy". The
+ * remaining route is VoiceOver's own double-tap-and-hold, which passes a real
+ * touch to the view under the focused text and so reaches `onLongPress` here.
+ * That path is untested on a device — if it turns out not to fire, the answer is
+ * a focusable copy control per turn, not grouping the reply.
+ *
+ * The thought row keeps its rotor action, because it is already one focusable
+ * button with one label and nothing inside to flatten.
+ *
+ * A held code block opens this sheet rather than the platform's own selection
+ * loupe, which is the one thing this wrapper takes away. It is a fair trade in
+ * both directions: the block keeps its own Copy button for the code alone, and
+ * the sheet's text is selectable too — so selecting part of a snippet is one
+ * more step, while selecting part of a *reply* becomes possible at all.
+ */
+function Copyable({
+  text,
+  onCopy,
+  style,
+  children,
+}: {
+  text: string;
+  onCopy?: (text: string) => void;
+  style?: StyleProp<ViewStyle>;
+  children: ReactNode;
+}) {
+  // Without a handler this is a plain view: no press state, no accessibility
+  // node wrapped around the turn, nothing to explain.
+  if (!onCopy) return <View style={style}>{children}</View>;
+
+  return (
+    // See above: this must never become an accessibility element. It is a touch
+    // target laid over text, not a control, and the text underneath keeps its
+    // own nodes.
+    <Pressable accessible={false} onLongPress={() => onCopy(text)} style={style}>
+      {children}
+    </Pressable>
+  );
+}
+
+/** Only for the thought row, which is a single focusable button. */
+const COPY_ACTIONS = [{ name: "copy", label: "Copy message" }] as const;
+
+function TurnView({ turn, onOpenThought, onCopyMessage }: TurnProps) {
   const images = turn.images ?? [];
   // A turn with pictures and no words is normal: an image generation tool's
   // result arrives as content alone. Only a turn with neither renders nothing.
@@ -49,7 +123,12 @@ function TurnView({ turn, onOpenThought }: TurnProps) {
 
     return (
       <View style={styles.userRow}>
-        <View
+        <Copyable
+          text={text}
+          // A prompt that is only pictures has no text to take, so it gets no
+          // hold either — a gesture that opens an empty sheet is worse than one
+          // that is not there.
+          onCopy={hasText ? onCopyMessage : undefined}
           style={[
             styles.userBubble,
             // Pictures need the same definite rail block markdown does: the
@@ -70,7 +149,7 @@ function TurnView({ turn, onOpenThought }: TurnProps) {
             hasText && <MarkdownText text={text} />
           )}
           <ChatImages images={images} />
-        </View>
+        </Copyable>
         {/* A message typed with no signal. Shown as what it is — sent, waiting
             on the network — rather than as an error, because nothing has
             failed: the reconnect delivers it. Under the bubble and quiet, so a
@@ -88,10 +167,10 @@ function TurnView({ turn, onOpenThought }: TurnProps) {
 
   if (turn.role === "system") {
     return (
-      <View style={styles.systemRow}>
+      <Copyable text={text} onCopy={hasText ? onCopyMessage : undefined} style={styles.systemRow}>
         {hasText && <MarkdownText text={text} tone="system" />}
         <ChatImages images={images} />
-      </View>
+      </Copyable>
     );
   }
 
@@ -105,9 +184,16 @@ function TurnView({ turn, onOpenThought }: TurnProps) {
         {hasText && (
           <Pressable
             onPress={() => onOpenThought?.(text)}
+            // The reasoning is text like any other, and it is the turn people
+            // most often want out of the app verbatim.
+            onLongPress={onCopyMessage ? () => onCopyMessage(text) : undefined}
             disabled={!onOpenThought}
             accessibilityRole="button"
             accessibilityLabel="Show thought process"
+            accessibilityActions={onCopyMessage ? COPY_ACTIONS : undefined}
+            onAccessibilityAction={(event) => {
+              if (event.nativeEvent.actionName === "copy") onCopyMessage?.(text);
+            }}
             hitSlop={touchSlop(theme.space(1.5))}
             style={({ pressed }) => [styles.thoughtToggle, pressed && styles.thoughtPressed]}
           >
@@ -121,10 +207,10 @@ function TurnView({ turn, onOpenThought }: TurnProps) {
   }
 
   return (
-    <View style={styles.agentRow}>
+    <Copyable text={text} onCopy={hasText ? onCopyMessage : undefined} style={styles.agentRow}>
       {hasText && <MarkdownText text={text} />}
       <ChatImages images={images} />
-    </View>
+    </Copyable>
   );
 }
 
@@ -140,6 +226,7 @@ export const Turn = memo(
   TurnView,
   (before, after) =>
     before.onOpenThought === after.onOpenThought &&
+    before.onCopyMessage === after.onCopyMessage &&
     before.turn.text === after.turn.text &&
     before.turn.role === after.turn.role &&
     // The one flag that is drawn: without it the label would outlive the

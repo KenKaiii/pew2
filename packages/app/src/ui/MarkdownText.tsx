@@ -10,7 +10,7 @@ import Markdown, {
 import { theme } from "../theme";
 import { ChatImage } from "./ChatImage";
 import { isDisplayableImage } from "../images";
-import { writeCodeToClipboard } from "./codeBlockClipboard";
+import { writeToClipboard } from "./clipboard";
 import { fencedCodeContainerStyle, fencedCodeTextStyle } from "./markdownCodeStyles";
 import { boundedMarkdownParagraphStyle, boundedMarkdownRootStyle } from "./messageLayoutStyles";
 import { splitMarkdownBlocks } from "./markdownBlocks";
@@ -48,7 +48,7 @@ function CodeBlock({
   }, [copyState]);
 
   const copyCode = async () => {
-    const copied = await writeCodeToClipboard(content, Clipboard.setStringAsync);
+    const copied = await writeToClipboard(content, Clipboard.setStringAsync);
     setCopyState(copied ? "copied" : "failed");
   };
 

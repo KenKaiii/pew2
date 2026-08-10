@@ -134,6 +134,7 @@ function Screen() {
         indicatorBottom={dockHeight}
         onAtBottomChange={noop}
         onOpenThought={noop}
+        onCopyMessage={noop}
       />
       {/* What a wrapped line actually costs, where it can be read while typing.
           The root count is the one that matters: it should not move at all as
