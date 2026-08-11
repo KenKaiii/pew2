@@ -44,10 +44,10 @@
  */
 import { createHash } from "node:crypto";
 import { access, chmod, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
-import { constants, existsSync } from "node:fs";
+import { constants } from "node:fs";
 import { platform as osPlatform } from "node:os";
 import { dirname, join } from "node:path";
-import { isCompiled, plistPath } from "../cli/service.js";
+import { isCompiled, supervisorInstalled as serviceInstalled } from "../cli/service.js";
 import { CURRENT_VERSION } from "./check.js";
 
 /** Where releases are published. `install.sh` resolves the same repository. */
@@ -154,20 +154,24 @@ export function assetName(platform: string, arch: string): string | undefined {
 }
 
 /**
- * Whether this platform *can* have a supervisor that restarts the daemon.
+ * Whether this platform has a supervisor backend at all.
  *
  * A pre-filter, not the answer. Swapping the binary is portable; the *exit* is
- * not, because it is only an update where something starts the process again.
- * Checked against this repository rather than assumed:
+ * only an update where something starts the process again, and each platform
+ * gets that from a different place (`cli/service.ts` and its two siblings):
  *
- * - **darwin**: `cli/service.ts` writes a launchd plist with `KeepAlive: true`.
- * - **linux**: no systemd unit is written anywhere here, and `install.sh`'s
- *   restart step sits inside a `[ -f ~/Library/LaunchAgents/... ]` guard.
- * - **win32**: `install.ps1` puts the binary on PATH and registers no service,
- *   scheduled task, or Run key — it has no restart step at all.
+ * - **darwin**: a launchd agent with `KeepAlive`.
+ * - **linux**: a systemd user unit with `Restart=always` — which, unlike the
+ *   `on-failure` most guides suggest, also restarts after a clean exit, and a
+ *   clean exit is exactly how this updater ends the daemon.
+ * - **win32**: a Scheduled Task whose repeating trigger plus `IgnoreNew`
+ *   instance policy amounts to the same thing, at a one-minute granularity.
+ *
+ * Anything else has no way back from an exit, and must never be swapped: the
+ * user would be left with a new binary, a dead daemon and no way to notice.
  */
 export function hasSupervisor(platform: string): boolean {
-  return platform === "darwin";
+  return platform === "darwin" || platform === "linux" || platform === "win32";
 }
 
 /**
@@ -176,21 +180,14 @@ export function hasSupervisor(platform: string): boolean {
  * The platform is not enough, and assuming it was is a way to take a user's
  * daemon offline for good. `pew2 serve` is a first-class command: someone can
  * run the daemon in a terminal, or from a fresh install where `pew2 setup` has
- * never created the launchd job — which is exactly why `install.sh` guards its
- * own restart on the plist existing. On such a machine an exit-to-update is
- * simply an exit, and the phone stays offline until a human notices.
+ * never registered a service — which is exactly why `install.sh` guards its own
+ * restart on the plist existing. On such a machine an exit-to-update is simply
+ * an exit, and the phone stays offline until a human notices.
  *
- * So the gate is the plist on disk, not the value of `process.platform`.
+ * So the gate is the service file on disk, not the value of `process.platform`.
  */
 export function supervisorInstalled(platform: string = osPlatform()): boolean {
-  if (!hasSupervisor(platform)) return false;
-  try {
-    return existsSync(plistPath());
-  } catch {
-    // An unreadable home is not a supervisor. Refusing costs a stale daemon;
-    // guessing costs a dead one.
-    return false;
-  }
+  return hasSupervisor(platform) && serviceInstalled(platform);
 }
 
 /** Where an asset lives: a pinned tag when given, otherwise whatever is latest. */
@@ -266,10 +263,10 @@ export async function applyUpdate(options: ApplyOptions = {}): Promise<ApplyResu
       // Two different situations, and telling them apart is the difference
       // between "your OS cannot do this" and "run `pew2 setup` and it will".
       detail: hasSupervisor(platform)
-        ? `No launchd job is installed, so nothing would restart the daemon ` +
+        ? `No pew2 service is installed, so nothing would restart the daemon ` +
           `after it exits. Run \`pew2 setup\` to install one.`
-        : `Self-update is macOS-only: ${platform} has no supervisor to restart ` +
-          `the daemon after it exits, so a swapped binary would never take effect.`,
+        : `${platform} has no supervisor to restart the daemon after it exits, ` +
+          `so a swapped binary would never take effect.`,
     };
   }
 

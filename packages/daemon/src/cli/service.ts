@@ -6,38 +6,103 @@
  * the point of a remote control, so it is registered with the OS supervisor and
  * restarted automatically.
  *
- * macOS launchd only for now. Linux gets a clear message rather than a broken
- * unit file.
+ * All three platforms, each through its own supervisor: launchd here, systemd
+ * in `service-systemd.ts`, Task Scheduler in `service-schtasks.ts`. This module
+ * is the dispatcher and the macOS backend.
+ *
+ * Having one on every platform is what makes `update/apply.ts` work everywhere:
+ * a self-update is a binary swap followed by an exit, and an exit is only an
+ * update where something starts the process again.
  */
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { homedir, platform } from "node:os";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
-import { spawn } from "node:child_process";
+import { dirname, join } from "node:path";
 import { logDir } from "../logs.js";
+import {
+  LABEL,
+  isCompiled,
+  programArguments,
+  run,
+  serverEntry,
+  type CommandResult,
+  type InstallOptions,
+  type RunCommand,
+  type ServiceState,
+  type ServiceStatus,
+} from "./service-shared.js";
+import {
+  installSystemdUnit,
+  systemdStatus,
+  uninstallSystemdUnit,
+  unitPath,
+} from "./service-systemd.js";
+import {
+  installScheduledTask,
+  scheduledTaskStatus,
+  taskXmlPath,
+  uninstallScheduledTask,
+} from "./service-schtasks.js";
 
-export const LABEL = "dev.pew2.daemon";
+// Re-exported so the many existing importers of this module keep working, and
+// so there is still one obvious place to import service types from.
+export { LABEL, isCompiled, programArguments, serverEntry, unitPath, taskXmlPath };
+export type { CommandResult, InstallOptions, ServiceState, ServiceStatus };
 
-export type ServiceState = "running" | "installed" | "not-installed" | "unsupported";
-
-export interface ServiceStatus {
-  state: ServiceState;
-  /** Path of the launchd plist, when this platform has one. */
-  plistPath?: string;
-  /** PID when running. */
-  pid?: number;
-  /** Last exit code launchd saw. Non-zero after a crash. */
-  lastExitCode?: number;
-  logPath?: string;
-  detail?: string;
-}
-
+/**
+ * Every platform pew2 ships a binary for now has a supervisor.
+ *
+ * Kept as a function because it is asked on the machine being installed to, not
+ * at build time.
+ */
 export function isSupported(): boolean {
-  return platform() === "darwin";
+  return ["darwin", "linux", "win32"].includes(platform());
 }
 
 export function plistPath(home = homedir()): string {
   return join(home, "Library", "LaunchAgents", `${LABEL}.plist`);
+}
+
+/**
+ * The file whose existence means "a supervisor was installed here".
+ *
+ * One question, three answers, and the self-updater asks it before deciding it
+ * may end the process. Undefined for a platform with no backend, which is the
+ * honest answer rather than a path that will never exist.
+ */
+export function supervisorPath(
+  osPlatform: string = platform(),
+  home = homedir(),
+): string | undefined {
+  if (osPlatform === "darwin") return plistPath(home);
+  if (osPlatform === "linux") return unitPath(home);
+  if (osPlatform === "win32") return taskXmlPath(home);
+  return undefined;
+}
+
+/**
+ * Is a supervisor actually installed on this machine?
+ *
+ * The platform is not enough, and assuming it was is a way to take a user's
+ * daemon offline for good: `pew2 serve` is a first-class command, and a fresh
+ * install has no service until `pew2 setup` creates one. On such a machine an
+ * exit-to-update is simply an exit.
+ *
+ * Synchronous, because the update scheduler asks before arming anything.
+ */
+export function supervisorInstalled(
+  osPlatform: string = platform(),
+  home = homedir(),
+): boolean {
+  const path = supervisorPath(osPlatform, home);
+  if (!path) return false;
+  try {
+    return existsSync(path);
+  } catch {
+    // An unreadable home is not a supervisor. Refusing costs a stale daemon;
+    // guessing costs a dead one.
+    return false;
+  }
 }
 
 // Re-exported rather than redefined. The plist below and the daemon's own
@@ -45,75 +110,6 @@ export function plistPath(home = homedir()): string {
 // launchd goes on appending to another.
 export { logDir };
 
-/**
- * Is this a compiled binary rather than a source checkout?
- *
- * Bun serves a compiled binary's own modules out of a virtual filesystem rooted
- * at `/$bunfs/`, so `import.meta.url` says so directly. Everything downstream of
- * this question was wrong before it was asked.
- */
-export function isCompiled(): boolean {
-  return import.meta.url.includes("/$bunfs/");
-}
-
-/**
- * The daemon entry point, resolved from this file.
- *
- * launchd has no working directory and no shell, so every path in the plist has
- * to be absolute. Deriving it here means a moved or reinstalled checkout is
- * picked up by re-running `install` rather than silently pointing at a path that
- * no longer exists.
- *
- * Only meaningful for a source checkout. In a compiled binary this resolves to
- * `/$bunfs/server.ts` — a path inside the executable's virtual filesystem that
- * no other process can open, and which was being written into the plist as if
- * it were a real file. See `buildPlist`.
- */
-export function serverEntry(): string {
-  return resolve(fileURLToPath(new URL("../server.ts", import.meta.url)));
-}
-
-/**
- * What launchd should actually execute.
- *
- * Two different programs, because there are two ways pew2 is installed.
- *
- * From a checkout, `bun run <abs path to server.ts>` — the original arrangement,
- * and still correct there.
- *
- * From a compiled binary, the binary itself with `serve`. The old code took
- * `process.execPath` (the pew2 binary, not bun) and paired it with `run` and a
- * `/$bunfs/` path, producing `pew2 run /$bunfs/server.ts`: a subcommand that did
- * not exist, pointed at a file nothing outside the binary can read. pew2 printed
- * its help and exited 1, `KeepAlive` restarted it, and the result was a daemon
- * that crash-looped for ever while `pew2 setup` kept reporting it unreachable.
- * Every binary install has been in that state since binaries started shipping;
- * only people whose install predated them, running from source, had a daemon
- * that worked.
- */
-export function programArguments(bunPath?: string): string[] {
-  if (isCompiled()) return [process.execPath, "serve"];
-  return [bunPath ?? process.execPath, "run", serverEntry()];
-}
-
-export interface CommandResult {
-  code: number;
-  stdout: string;
-}
-
-type RunCommand = (command: string, args: string[]) => Promise<CommandResult>;
-
-function run(command: string, args: string[]): Promise<CommandResult> {
-  return new Promise((resolvePromise) => {
-    const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
-    let stdout = "";
-    child.stdout.on("data", (chunk) => (stdout += chunk));
-    child.stderr.on("data", (chunk) => (stdout += chunk));
-    // A missing binary must not throw; the caller reports it as a failed step.
-    child.on("error", () => resolvePromise({ code: 127, stdout }));
-    child.on("close", (code) => resolvePromise({ code: code ?? 1, stdout }));
-  });
-}
 
 interface ReloadLaunchdJobOptions {
   domain: string;
@@ -147,15 +143,6 @@ export async function reloadLaunchdJob({
   return boot;
 }
 
-export interface InstallOptions {
-  /** Absolute path to the `bun` binary. launchd has no PATH of its own. */
-  bunPath?: string;
-  port?: number;
-  /** Surface test fixtures such as the echo agent. */
-  experimental?: boolean;
-  env?: NodeJS.ProcessEnv;
-  home?: string;
-}
 
 export function buildPlist(options: InstallOptions = {}): string {
   const program = programArguments(options.bunPath);
@@ -230,9 +217,26 @@ function escapeXml(value: string): string {
     .replace(/"/g, "&quot;");
 }
 
+/**
+ * Keep `plistPath` populated alongside `servicePath`.
+ *
+ * `pew2 setup --json` and `doctor --json` are an agent-facing contract, and a
+ * field that silently changed name would break whatever is parsing it. The new
+ * platforms fill both; on macOS they are the same file.
+ */
+function withPlistAlias(status: ServiceStatus): ServiceStatus {
+  return status.servicePath ? { ...status, plistPath: status.servicePath } : status;
+}
+
 export async function installService(options: InstallOptions = {}): Promise<ServiceStatus> {
   if (!isSupported()) {
     return { state: "unsupported", detail: `No service support for ${platform()} yet.` };
+  }
+  if (platform() === "linux") {
+    return withPlistAlias(await installSystemdUnit(options, { runCommand: run }));
+  }
+  if (platform() === "win32") {
+    return withPlistAlias(await installScheduledTask(options, { runCommand: run }));
   }
 
   const home = options.home ?? homedir();
@@ -253,6 +257,7 @@ export async function installService(options: InstallOptions = {}): Promise<Serv
     return {
       state: "installed",
       plistPath: path,
+      servicePath: path,
       detail: `Written, but launchctl bootstrap failed: ${boot.stdout.trim() || `exit ${boot.code}`}`,
     };
   }
@@ -272,16 +277,28 @@ export async function uninstallService(home = homedir()): Promise<ServiceStatus>
   if (!isSupported()) {
     return { state: "unsupported", detail: `No service support for ${platform()} yet.` };
   }
+  if (platform() === "linux") {
+    return withPlistAlias(await uninstallSystemdUnit(home, { runCommand: run }));
+  }
+  if (platform() === "win32") {
+    return withPlistAlias(await uninstallScheduledTask(home, { runCommand: run }));
+  }
   const path = plistPath(home);
   const domain = `gui/${process.getuid?.() ?? 501}`;
   await run("launchctl", ["bootout", `${domain}/${LABEL}`]);
   await rm(path, { force: true });
-  return { state: "not-installed", plistPath: path };
+  return { state: "not-installed", plistPath: path, servicePath: path };
 }
 
 export async function serviceStatus(home = homedir()): Promise<ServiceStatus> {
   if (!isSupported()) {
     return { state: "unsupported", detail: `No service support for ${platform()} yet.` };
+  }
+  if (platform() === "linux") {
+    return withPlistAlias(await systemdStatus(home, { runCommand: run }));
+  }
+  if (platform() === "win32") {
+    return withPlistAlias(await scheduledTaskStatus(home, { runCommand: run }));
   }
 
   const path = plistPath(home);
@@ -293,12 +310,18 @@ export async function serviceStatus(home = homedir()): Promise<ServiceStatus> {
   } catch {
     installed = false;
   }
-  if (!installed) return { state: "not-installed", plistPath: path, logPath };
+  if (!installed) return { state: "not-installed", plistPath: path, servicePath: path, logPath };
 
   const domain = `gui/${process.getuid?.() ?? 501}`;
   const printed = await run("launchctl", ["print", `${domain}/${LABEL}`]);
   if (printed.code !== 0) {
-    return { state: "installed", plistPath: path, logPath, detail: "Registered but not loaded." };
+    return {
+      state: "installed",
+      plistPath: path,
+      servicePath: path,
+      logPath,
+      detail: "Registered but not loaded.",
+    };
   }
 
   const pid = printed.stdout.match(/\bpid = (\d+)/)?.[1];
@@ -307,6 +330,7 @@ export async function serviceStatus(home = homedir()): Promise<ServiceStatus> {
   return {
     state: pid ? "running" : "installed",
     plistPath: path,
+    servicePath: path,
     logPath,
     pid: pid ? Number(pid) : undefined,
     lastExitCode: lastExit ? Number(lastExit) : undefined,

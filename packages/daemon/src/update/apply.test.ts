@@ -25,7 +25,7 @@ import {
   supervisorInstalled,
 } from "./apply.js";
 import { existsSync } from "node:fs";
-import { plistPath } from "../cli/service.js";
+import { supervisorPath } from "../cli/service.js";
 
 const OLD_BINARY = "#!/bin/sh\necho old\n";
 const NEW_BINARY = "#!/bin/sh\necho new\n";
@@ -192,10 +192,9 @@ test("an empty body is not installed even with a matching checksum", async () =>
   expect(await readFile(target, "utf8")).toBe(OLD_BINARY);
 });
 
-test("a non-darwin platform refuses, and downloads nothing", async () => {
-  // Linux and Windows install no supervisor, so a swapped binary would sit
-  // there while the old process ran on for ever.
-  for (const platform of ["linux", "win32"]) {
+test("a platform with no supervisor refuses, and downloads nothing", async () => {
+  // A swapped binary would sit there while the old process ran on for ever.
+  for (const platform of ["freebsd", "aix"]) {
     const { target } = await installDir();
     const { fetchImpl, urls } = releaseServing(NEW_BINARY);
 
@@ -364,29 +363,37 @@ test("every published asset is named, for all three platforms", () => {
   expect(assetName("win32", "arm64")).toBeUndefined();
 });
 
-test("only macOS has a supervisor, and that is what gates the exit", () => {
-  // Verified against this repository, not assumed: cli/service.ts writes a
-  // launchd plist with KeepAlive; install.ps1 registers no Windows service and
-  // no systemd unit is written anywhere here.
+test("every platform pew2 ships for has a supervisor backend", () => {
+  // Each is a different mechanism with the same guarantee — restart after a
+  // *clean* exit, which is how the updater ends the daemon: launchd KeepAlive,
+  // systemd Restart=always, and a repeating Scheduled Task with IgnoreNew.
   expect(hasSupervisor("darwin")).toBe(true);
-  expect(hasSupervisor("linux")).toBe(false);
-  expect(hasSupervisor("win32")).toBe(false);
+  expect(hasSupervisor("linux")).toBe(true);
+  expect(hasSupervisor("win32")).toBe(true);
+  // Anything else has no way back from an exit.
+  expect(hasSupervisor("freebsd")).toBe(false);
 });
 
-test("a published platform with no supervisor still refuses to self-update", () => {
-  // The trap this guards: now that Linux and Windows assets are named,
-  // asset-name-alone would answer "yes, updatable" on a machine with no way to
-  // restart itself, leaving a new file and an old process for ever.
+test("a platform with no backend refuses, however published it looks", () => {
+  // The gate is the supervisor, not the asset list: a platform we could build
+  // for but cannot restart must never be swapped.
+  expect(canSelfUpdate({ platform: "freebsd", arch: "x64", compiled: true })).toBe(false);
+  expect(canSelfUpdate({ ...darwinCompiled })).toBe(true);
+});
+
+test("linux and windows can self-update once their service is installed", () => {
+  // What the systemd unit and the Scheduled Task buy: the same exit-to-update
+  // path macOS already had.
   for (const [platform, arch] of [
     ["linux", "x64"],
     ["linux", "arm64"],
     ["win32", "x64"],
   ] as const) {
     expect(assetName(platform, arch)).toBeDefined();
-    // No `supervised` override: the real check must answer false for these.
-    expect(canSelfUpdate({ platform, arch, compiled: true })).toBe(false);
+    expect(canSelfUpdate({ platform, arch, compiled: true, supervised: true })).toBe(true);
+    // ...and not before it is.
+    expect(canSelfUpdate({ platform, arch, compiled: true, supervised: false })).toBe(false);
   }
-  expect(canSelfUpdate({ ...darwinCompiled })).toBe(true);
 });
 
 test("windows parks the running binary aside, because it cannot be replaced in place", async () => {
@@ -447,9 +454,30 @@ test("a failed windows swap puts the original binary back", async () => {
   expect(await Array.fromAsync(new Bun.Glob("pew2.old-*").scan(dir))).toEqual([]);
 });
 
-test("linux refuses before downloading, however writable the directory is", async () => {
-  // A Linux user's install is perfectly writable; the missing piece is the
-  // restart, so nothing should be fetched at all.
+test("linux swaps the binary in place, like macOS", async () => {
+  // systemd's Restart=always makes the exit survivable, so Linux takes the
+  // ordinary path: no parking, just an atomic rename.
+  const { dir, target } = await installDir();
+  const { fetchImpl } = releaseServing(NEW_BINARY);
+
+  const result = await applyUpdate({
+    platform: "linux",
+    arch: "x64",
+    compiled: true,
+    supervised: true,
+    targetPath: target,
+    fetchImpl,
+  });
+
+  expect(result.ok).toBe(true);
+  expect(await readFile(target, "utf8")).toBe(NEW_BINARY);
+  // Nothing parked: only Windows cannot replace a running executable.
+  expect(await Array.fromAsync(new Bun.Glob("*").scan(dir))).toEqual(["pew2"]);
+});
+
+test("a machine with no service installed refuses before downloading", async () => {
+  // The install is perfectly writable; the missing piece is the restart, so
+  // nothing should be fetched at all.
   const { target } = await installDir();
   const { fetchImpl, urls } = releaseServing(NEW_BINARY);
 
@@ -457,6 +485,7 @@ test("linux refuses before downloading, however writable the directory is", asyn
     platform: "linux",
     arch: "x64",
     compiled: true,
+    supervised: false,
     targetPath: target,
     fetchImpl,
   });
@@ -493,11 +522,14 @@ test("an unsupervised machine is not offered self-update at all", () => {
   expect(canSelfUpdate({ ...darwinCompiled, supervised: false })).toBe(false);
 });
 
-test("supervisorInstalled requires the plist, not merely macOS", () => {
-  // A platform check alone is the bug; the file on disk is the answer.
-  expect(supervisorInstalled("linux")).toBe(false);
-  expect(supervisorInstalled("win32")).toBe(false);
-  // On darwin it must agree with whether the plist actually exists, whichever
-  // way that falls on the machine running these tests.
-  expect(supervisorInstalled("darwin")).toBe(existsSync(plistPath()));
+test("supervisorInstalled requires the service file, not merely the platform", () => {
+  // A platform check alone is the bug; the file on disk is the answer. It must
+  // agree with reality whichever way that falls on the machine running these
+  // tests, for every platform that has a backend.
+  for (const platform of ["darwin", "linux", "win32"] as const) {
+    expect(supervisorInstalled(platform)).toBe(existsSync(supervisorPath(platform)!));
+  }
+  // A platform with no backend has no file to look for.
+  expect(supervisorPath("freebsd")).toBeUndefined();
+  expect(supervisorInstalled("freebsd")).toBe(false);
 });
