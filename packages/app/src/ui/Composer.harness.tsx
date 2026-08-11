@@ -120,6 +120,15 @@ export default function ComposerHarness() {
           />
         </Slot>
 
+        {/* A collapsed pill with a stop button, and the state nobody could see
+            before it had a slot: `busy` used to force the open layout, so an
+            agent working with the keyboard down left a tall empty box standing
+            over the transcript for the length of the turn. The draft is empty
+            on purpose — that is what makes this the resting shape. */}
+        <Slot label="WORKING">
+          <Composer value="" onChangeText={() => {}} onSend={() => {}} busy onStop={() => {}} />
+        </Slot>
+
         <Slot label="LISTENING">
           <Composer
             value=""

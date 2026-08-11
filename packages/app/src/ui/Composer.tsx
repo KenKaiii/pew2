@@ -175,7 +175,16 @@ function ComposerView({
   // Focus alone: the keyboard's visibility is a separate event stream with no
   // fixed ordering against it, and mixing the two left the placeholder resting
   // in its expanded position after an unfocus.
-  const expanded = focused || hasText || busy || attachments.length > 0;
+  //
+  // Deliberately not `busy`. A working agent used to hold the pill open, so
+  // dismissing the keyboard mid-turn left a tall empty box standing over the
+  // transcript until the answer landed — minutes, on the screen the user is
+  // trying to read. It bought nothing: the action row is always the bottom
+  // 58pt, so the stop button is exactly as reachable in the collapsed pill as
+  // in the open one. It also poisoned the dock measurement, since the resting
+  // height is recorded from whatever the composer looked like with the keyboard
+  // down (`recordDockHeight`), so the transcript kept the taller inset too.
+  const expanded = focused || hasText || attachments.length > 0;
 
   // Grow with the text, then scroll internally rather than eat the thread.
   //

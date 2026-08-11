@@ -19,7 +19,7 @@ import { SecureChannel, e2e, envelopeHeader, wire } from "@pew2/protocol";
 import { handleMessage } from "./handler.js";
 import { RelayClient } from "./relay-client.js";
 import { hostname } from "node:os";
-import { daemonLogPaths, rotateLog } from "./logs.js";
+import { daemonLogPaths, rotateLog, startLogRotation } from "./logs.js";
 import { sweepOrphans } from "./children.js";
 import { startUpdateScheduler } from "./update/scheduler.js";
 import type { ServerWebSocket } from "bun";
@@ -27,10 +27,16 @@ import type { ServerWebSocket } from "bun";
 const PORT = Number(process.env.PEW2_PORT ?? 8787);
 
 // Under launchd this process's stdout is an append-only file that nothing else
-// ever trims. Startup is the one moment it can be resized safely, so it is done
-// here, before anything is written.
+// ever trims. Done here first, before anything is written.
 const rotations = await Promise.all(daemonLogPaths().map((path) => rotateLog(path)));
 const trimmed = rotations.reduce((total, r) => total + (r.rotated ? r.before - r.after : 0), 0);
+
+// And again periodically. This service is started once and left alone for
+// weeks, so a startup-only pass bounds the log by restarts rather than by size.
+startLogRotation({
+  onRotate: (path, result) =>
+    console.log(`[logs] trimmed ${path} by ${result.before - result.after} bytes`),
+});
 
 // Agents left behind by a daemon that died without running its shutdown
 // handler. Nothing inside a SIGKILL'd process can clean up after itself, so the

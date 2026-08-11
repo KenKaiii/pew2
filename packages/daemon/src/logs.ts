@@ -6,13 +6,22 @@
  * machine that runs pew2 for months accumulates a log nobody reads until it is
  * the reason a disk is full.
  *
- * Rotation therefore happens at startup, which is the only moment the file can
- * be resized safely:
+ * Rotation happens at startup and then on a timer, because a daemon that is
+ * never restarted is exactly the one whose log runs away — a machine left
+ * running for weeks under launchd never reaches a second startup, and the
+ * ceiling below went unenforced for the whole of it.
  *
  *   - The file is truncated *in place*, never renamed. launchd holds an open
  *     descriptor to the path it opened; renaming the file leaves that
  *     descriptor pointing at the renamed inode, so the running daemon would go
  *     on writing to `daemon.log.1` while `daemon.log` sat empty.
+ *   - Truncating a file the daemon is still writing to is safe only because
+ *     every supervisor opens it in append mode (launchd `StandardOutPath`,
+ *     systemd `append:`, `>>` under Task Scheduler): each write lands at the
+ *     current end of file, so the next line after a truncation goes to the new
+ *     one instead of leaving a hole of NUL bytes behind it. A line being
+ *     written at that instant can still be clipped, which is the right price
+ *     for the file staying bounded.
  *   - The tail is kept rather than the head. When something has just gone
  *     wrong, the interesting lines are the most recent ones.
  *   - Failure is never fatal. A daemon that refuses to start because it could
@@ -100,4 +109,53 @@ export function logDir(env: NodeJS.ProcessEnv = process.env, home: string = home
 export function daemonLogPaths(env: NodeJS.ProcessEnv = process.env, home?: string): string[] {
   const dir = logDir(env, home);
   return [join(dir, "daemon.log"), join(dir, "daemon.error.log")];
+}
+
+/** How often a running daemon re-checks its logs against `MAX_LOG_BYTES`. */
+export const ROTATE_INTERVAL_MS = 60 * 60 * 1000;
+
+/**
+ * Keep the daemon's logs under the ceiling for as long as it runs.
+ *
+ * The startup pass alone bounds a log by *restarts*, not by size, and the
+ * daemon this is written for is a launchd service that goes weeks without one.
+ * A provider failing its capability probe writes a stack trace every few
+ * minutes into a file nobody is watching.
+ *
+ * @returns A function that stops the timer.
+ */
+export function startLogRotation({
+  paths = daemonLogPaths(),
+  intervalMs = ROTATE_INTERVAL_MS,
+  max = MAX_LOG_BYTES,
+  keep = KEEP_LOG_BYTES,
+  onRotate,
+}: {
+  paths?: string[];
+  intervalMs?: number;
+  max?: number;
+  keep?: number;
+  onRotate?: (path: string, result: RotateResult) => void;
+} = {}): () => void {
+  const timer = setInterval(() => {
+    void (async () => {
+      try {
+        for (const path of paths) {
+          // Sequential, not `Promise.all`: the two files share a disk and this
+          // is housekeeping, so there is nothing to win by doing both at once.
+          const result = await rotateLog(path, max, keep);
+          if (result.rotated) onRotate?.(path, result);
+        }
+      } catch {
+        // `rotateLog` already swallows its own failures, so the only thing that
+        // can throw here is the caller's `onRotate`. Nothing would catch it: a
+        // rejection out of an interval callback is unhandled by definition, and
+        // this daemon holds every live session on the machine. Losing one
+        // housekeeping pass is the cheaper of the two outcomes by a distance.
+      }
+    })();
+  }, intervalMs);
+  // Housekeeping must never be the reason the process stays alive.
+  timer.unref?.();
+  return () => clearInterval(timer);
 }
