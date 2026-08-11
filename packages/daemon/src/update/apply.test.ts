@@ -12,7 +12,7 @@
  */
 import { test, expect } from "bun:test";
 import { createHash } from "node:crypto";
-import { chmod, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -26,6 +26,16 @@ import {
 } from "./apply.js";
 import { existsSync } from "node:fs";
 import { supervisorPath } from "../cli/service.js";
+
+/**
+ * Skips a test on Windows, which has no POSIX permission bits.
+ *
+ * The repo's convention (see `children.test.ts`). Used here only for the two
+ * properties that genuinely do not exist on Windows: the execute bit, and a
+ * directory made unwritable with `chmod`. Windows ignores both — a `chmod`ed
+ * directory stays writable — so asserting them there tests nothing and fails.
+ */
+const posixTest = process.platform === "win32" ? test.skip : test;
 
 const OLD_BINARY = "#!/bin/sh\necho old\n";
 const NEW_BINARY = "#!/bin/sh\necho new\n";
@@ -111,9 +121,10 @@ test("a good checksum swaps the binary", async () => {
   }
 });
 
-test("the swapped binary is executable", async () => {
+posixTest("the swapped binary is executable", async () => {
   // A moment where pew2 exists and is not executable is a moment where a shell
-  // finds it on PATH and cannot run it.
+  // finds it on PATH and cannot run it. Windows decides executability by file
+  // extension rather than a mode bit, so there is nothing to assert there.
   const { target } = await installDir();
   const { fetchImpl } = releaseServing(NEW_BINARY);
 
@@ -232,7 +243,7 @@ test("a source checkout refuses, because execPath is bun itself", async () => {
   expect(urls).toEqual([]);
 });
 
-test("an unwritable install directory refuses before downloading", async () => {
+posixTest("an unwritable install directory refuses before downloading", async () => {
   // Spending 60MB of a tethered connection to discover a root-owned prefix is
   // rude, so the check comes first.
   const { dir, target } = await installDir();
@@ -580,13 +591,16 @@ test("the sweep leaves other programs in the install directory alone", async () 
   expect(await readFile(join(dir, "pew2-helper"), "utf8")).toBe("not ours either");
 });
 
-test("a parked file that cannot be deleted does not fail the update", async () => {
-  // The common case on Windows: a still-running daemon, or a virus scanner
+test("a parked entry that cannot be deleted does not fail the update", async () => {
+  // The common case on Windows: a still-running daemon, or a virus scanner,
   // holding the file. It stays, and the next update tries again.
+  //
+  // Simulated with a *directory* rather than a `chmod`ed file, because that
+  // fails `rm` without `recursive` on every platform — including Windows, where
+  // this resilience is the whole point and where chmod would do nothing.
   const { dir, target } = await installDir();
-  const locked = join(dir, "pew2.old-1700000000000");
-  await writeFile(locked, "held open");
-  await chmod(dir, 0o555); // read-only dir: unlink fails
+  const stubborn = join(dir, "pew2.old-1700000000000");
+  await mkdir(stubborn);
   const { fetchImpl } = releaseServing(NEW_BINARY);
 
   const result = await applyUpdate({
@@ -598,11 +612,10 @@ test("a parked file that cannot be deleted does not fail the update", async () =
     fetchImpl,
   });
 
-  await chmod(dir, 0o755);
-  // Not writable, so the update is refused for that reason — never because the
-  // sweep threw.
-  expect(result.ok).toBe(false);
-  expect(await readFile(locked, "utf8")).toBe("held open");
+  // The update went through regardless: a sweep is housekeeping, never a gate.
+  expect(result.ok).toBe(true);
+  expect(await readFile(target, "utf8")).toBe(NEW_BINARY);
+  expect(existsSync(stubborn)).toBe(true);
 });
 
 test("macOS and linux park nothing, so there is nothing to sweep", async () => {

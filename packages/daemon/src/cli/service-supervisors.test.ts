@@ -63,7 +63,13 @@ test("the unit backs off at the same rate as the launchd plist", () => {
 test("the unit installs into the user's own systemd, never root's", () => {
   // pew2 spawns coding agents as the person using it — their HOME, their keys.
   // A system unit would run every agent as root.
-  expect(unitPath("/home/ada")).toBe("/home/ada/.config/systemd/user/dev.pew2.daemon.service");
+  // Built with `join` rather than written out, because these tests also run on
+  // the Windows CI runner, where `join` yields backslashes. The path itself is
+  // only ever *used* on Linux; what is under test is the layout — a user unit,
+  // not a system one.
+  expect(unitPath("/home/ada")).toBe(
+    join("/home/ada", ".config", "systemd", "user", "dev.pew2.daemon.service"),
+  );
   expect(buildUnit()).toContain("WantedBy=default.target");
 });
 
@@ -242,8 +248,11 @@ test("an unrecognised status is reported as installed, never as running", async 
 // --- the dispatcher --------------------------------------------------------
 
 test("each platform is asked about its own service file", () => {
-  expect(supervisorPath("darwin", "/home/ada")).toContain("Library/LaunchAgents");
-  expect(supervisorPath("linux", "/home/ada")).toContain(".config/systemd/user");
+  // `join` on both sides: this runs on the Windows runner too, where the
+  // separator is a backslash and a hardcoded "Library/LaunchAgents" never
+  // matches.
+  expect(supervisorPath("darwin", "/home/ada")).toContain(join("Library", "LaunchAgents"));
+  expect(supervisorPath("linux", "/home/ada")).toContain(join(".config", "systemd", "user"));
   expect(supervisorPath("win32", "/home/ada")).toContain(".pew2");
   expect(supervisorPath("freebsd", "/home/ada")).toBeUndefined();
 });
