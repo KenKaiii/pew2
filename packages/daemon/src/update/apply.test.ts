@@ -533,3 +533,93 @@ test("supervisorInstalled requires the service file, not merely the platform", (
   expect(supervisorPath("freebsd")).toBeUndefined();
   expect(supervisorInstalled("freebsd")).toBe(false);
 });
+
+test("an update sweeps binaries parked by earlier updates", async () => {
+  // Windows cannot unlink a running .exe, so each update renames the outgoing
+  // one aside. Nothing collected them: one abandoned ~90MB executable per
+  // update, accumulating next to a file that is on the user's PATH.
+  const { dir, target } = await installDir();
+  await writeFile(join(dir, "pew2.old-1700000000000"), "two updates ago");
+  await writeFile(join(dir, "pew2.old-1800000000000"), "last update");
+  const { fetchImpl } = releaseServing(NEW_BINARY);
+
+  const result = await applyUpdate({
+    platform: "win32",
+    arch: "x64",
+    compiled: true,
+    supervised: true,
+    targetPath: target,
+    fetchImpl,
+  });
+
+  expect(result.ok).toBe(true);
+  const left = (await Array.fromAsync(new Bun.Glob("pew2.old-*").scan(dir))).sort();
+  // Exactly one: the binary this update just parked, which belongs to the
+  // process still running and cannot go until the next pass.
+  expect(left).toHaveLength(1);
+  expect(await readFile(join(dir, left[0]!), "utf8")).toBe(OLD_BINARY);
+});
+
+test("the sweep leaves other programs in the install directory alone", async () => {
+  // /usr/local/bin and its Windows equivalents hold other people's tools.
+  const { dir, target } = await installDir();
+  await writeFile(join(dir, "ripgrep.old-1700000000000"), "not ours");
+  await writeFile(join(dir, "pew2-helper"), "not ours either");
+  const { fetchImpl } = releaseServing(NEW_BINARY);
+
+  await applyUpdate({
+    platform: "win32",
+    arch: "x64",
+    compiled: true,
+    supervised: true,
+    targetPath: target,
+    fetchImpl,
+  });
+
+  expect(await readFile(join(dir, "ripgrep.old-1700000000000"), "utf8")).toBe("not ours");
+  expect(await readFile(join(dir, "pew2-helper"), "utf8")).toBe("not ours either");
+});
+
+test("a parked file that cannot be deleted does not fail the update", async () => {
+  // The common case on Windows: a still-running daemon, or a virus scanner
+  // holding the file. It stays, and the next update tries again.
+  const { dir, target } = await installDir();
+  const locked = join(dir, "pew2.old-1700000000000");
+  await writeFile(locked, "held open");
+  await chmod(dir, 0o555); // read-only dir: unlink fails
+  const { fetchImpl } = releaseServing(NEW_BINARY);
+
+  const result = await applyUpdate({
+    platform: "win32",
+    arch: "x64",
+    compiled: true,
+    supervised: true,
+    targetPath: target,
+    fetchImpl,
+  });
+
+  await chmod(dir, 0o755);
+  // Not writable, so the update is refused for that reason — never because the
+  // sweep threw.
+  expect(result.ok).toBe(false);
+  expect(await readFile(locked, "utf8")).toBe("held open");
+});
+
+test("macOS and linux park nothing, so there is nothing to sweep", async () => {
+  // Only Windows needs the dance; the others replace the inode directly.
+  for (const platform of ["darwin", "linux"] as const) {
+    const { dir, target } = await installDir();
+    const { fetchImpl } = releaseServing(NEW_BINARY);
+
+    await applyUpdate({
+      platform,
+      arch: "arm64",
+      compiled: true,
+      supervised: true,
+      targetPath: target,
+      fetchImpl,
+    });
+
+    expect(await Array.fromAsync(new Bun.Glob("*").scan(dir))).toEqual(["pew2"]);
+  }
+});

@@ -264,3 +264,27 @@ test("a written unit makes linux report a supervisor", async () => {
   // ...and says nothing about the other platforms' files.
   expect(supervisorInstalled("darwin", home)).toBe(false);
 });
+
+test("idle is never a reason to stop or skip the daemon", () => {
+  // StopOnIdleEnd defaults to *true*, so leaving IdleSettings out means Windows
+  // may terminate the daemon the moment the machine stops being idle — i.e. the
+  // moment the user sits down at it. RunOnlyIfIdle would be worse still.
+  const xml = buildTaskXml();
+
+  expect(xml).toContain("<StopOnIdleEnd>false</StopOnIdleEnd>");
+  expect(xml).toContain("<RestartOnIdle>false</RestartOnIdle>");
+  expect(xml).toContain("<RunOnlyIfIdle>false</RunOnlyIfIdle>");
+});
+
+test("the task can be started on demand, which install relies on", () => {
+  // A logon trigger alone would not fire until the next sign-in, and install
+  // runs `schtasks /run` immediately so `pew2 setup` does not report success on
+  // a daemon that does not exist yet.
+  expect(buildTaskXml()).toContain("<AllowStartOnDemand>true</AllowStartOnDemand>");
+});
+
+test("a sleeping machine is not woken to run the daemon", () => {
+  // It would drain a closed laptop for a daemon nobody is talking to; the logon
+  // trigger picks it up when the machine is next in use.
+  expect(buildTaskXml()).toContain("<WakeToRun>false</WakeToRun>");
+});

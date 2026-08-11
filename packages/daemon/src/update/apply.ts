@@ -43,10 +43,10 @@
  * costs far more than a skipped update.
  */
 import { createHash } from "node:crypto";
-import { access, chmod, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
+import { access, chmod, mkdtemp, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import { platform as osPlatform } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { isCompiled, supervisorInstalled as serviceInstalled } from "../cli/service.js";
 import { CURRENT_VERSION } from "./check.js";
 
@@ -212,6 +212,35 @@ export function parseChecksum(body: string): string | undefined {
   return first.toLowerCase();
 }
 
+/**
+ * Delete binaries parked by *earlier* Windows updates.
+ *
+ * `pew2.exe` cannot be unlinked while it is running, so each update renames the
+ * outgoing binary aside rather than deleting it. Nothing ever collected those,
+ * which meant one abandoned ~90MB executable per update, accumulating beside a
+ * file that is on the user's PATH.
+ *
+ * The one from the current process's own update is still locked, and so is any
+ * from a daemon that has not yet restarted; both simply fail to unlink and are
+ * left for the next pass, which is why this is best-effort and never fails an
+ * update. Matching is anchored to the target's own name so a directory holding
+ * other tools is untouched.
+ */
+async function sweepParkedBinaries(targetPath: string): Promise<void> {
+  const dir = dirname(targetPath);
+  const prefix = `${basename(targetPath)}.old-`;
+  try {
+    for (const entry of await readdir(dir)) {
+      if (!entry.startsWith(prefix)) continue;
+      // Still running, or held by a virus scanner: it stays, and the next
+      // update tries again.
+      await rm(join(dir, entry), { force: true }).catch(() => {});
+    }
+  } catch {
+    // An unreadable install directory is the caller's problem, not the sweep's.
+  }
+}
+
 /** Fetch a URL as bytes, or undefined on any failure at all. */
 async function download(
   fetchImpl: typeof fetch,
@@ -358,9 +387,14 @@ export async function applyUpdate(options: ApplyOptions = {}): Promise<ApplyResu
     if (platform === "win32") {
       // Windows will not let a running executable be replaced or unlinked, but
       // it *will* let one be renamed. So the outgoing binary is moved aside to
-      // free its name, and the new one takes it. The parked copy cannot be
-      // deleted while it is still running, which is why it is left for the next
-      // update to sweep rather than removed here.
+      // free its name, and the new one takes it.
+      //
+      // Swept first, not after: the file parked by *this* update belongs to the
+      // process that is still running, and Windows refuses to unlink a running
+      // image. The ones left by earlier updates belong to processes that have
+      // since exited, so this is the moment they can actually go — without it
+      // every update leaves another ~90MB binary beside pew2.exe for ever.
+      await sweepParkedBinaries(targetPath);
       parked = `${targetPath}.old-${Date.now()}`;
       await renameImpl(targetPath, parked);
     }

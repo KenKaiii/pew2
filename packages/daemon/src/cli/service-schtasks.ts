@@ -133,6 +133,20 @@ export function buildTaskXml(options: InstallOptions = {}): string {
     <AllowHardTerminate>true</AllowHardTerminate>
     <StartWhenAvailable>true</StartWhenAvailable>
     <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <!-- Idle is not a reason to stop a daemon. StopOnIdleEnd defaults to true,
+         which terminates the task as soon as the machine stops being idle; and
+         RunOnlyIfIdle would stop it starting at all on a machine in use. -->
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <!-- schtasks /run right after install starts the daemon now rather than at
+         the next logon, which needs this. -->
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <!-- Waking a sleeping laptop to run a daemon would drain it for nothing;
+         the logon trigger picks it up when the machine is next in use. -->
+    <WakeToRun>false</WakeToRun>
     <!-- Without this the task is killed after three days by default. -->
     <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
     <Enabled>true</Enabled>
