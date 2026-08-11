@@ -1207,6 +1207,7 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
         machineLabel={pairing.label}
         machineRemote={pairing.remote}
         connectionStatus={daemon.status}
+        update={daemon.update}
         onUnpair={onUnpair}
       />
 

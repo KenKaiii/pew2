@@ -11,7 +11,7 @@
  * `apply`, `busyReason` and `exit` are all injected.
  */
 import { test, expect } from "bun:test";
-import { startUpdateScheduler } from "./scheduler.js";
+import { startUpdateScheduler, type UpdateStatus } from "./scheduler.js";
 import type { ApplyResult } from "./apply.js";
 
 const NEWER = { current: "0.9.17", latest: "0.9.18", newer: true };
@@ -37,11 +37,15 @@ function harness(
     apply?: () => Promise<ApplyResult>;
     busy?: () => string | undefined;
     eligible?: boolean;
+    installed?: boolean;
   } = {},
 ) {
   const exits: number[] = [];
   const logs: string[] = [];
   const shutdowns: number[] = [];
+  // Every status the scheduler published, in order — this is what reaches the
+  // phone, so the sequence matters as much as the final value.
+  const statuses: (UpdateStatus | undefined)[] = [];
   let applyCalls = 0;
 
   const scheduler = startUpdateScheduler({
@@ -51,6 +55,10 @@ function harness(
       return options.apply ? await options.apply() : APPLIED;
     }) as never,
     eligible: () => options.eligible ?? true,
+    // A released binary unless a test says otherwise; `isCompiled()` is false
+    // under `bun test`, which would otherwise disarm every case here.
+    installed: () => options.installed ?? true,
+    onStatus: (status) => statuses.push(status),
     busyReason: options.busy ?? (() => undefined),
     exit: (code) => exits.push(code),
     shutdown: () => shutdowns.push(Date.now()),
@@ -64,6 +72,7 @@ function harness(
     exits,
     logs,
     shutdowns,
+    statuses,
     applyCalls: () => applyCalls,
   };
 }
@@ -198,9 +207,10 @@ test("a checksum mismatch never exits, and is not fatal to later attempts", asyn
   h.scheduler!.stop();
 });
 
-test("a build that cannot self-update arms nothing at all", () => {
-  // Not merely harmless on Linux, Windows and source checkouts — inert.
-  const h = harness({ eligible: false });
+test("a source checkout arms nothing at all", () => {
+  // Where the answer is `git pull`, not an install script. Also keeps every
+  // `npm test` run and every dev daemon off GitHub.
+  const h = harness({ installed: false });
 
   expect(h.scheduler).toBeUndefined();
 });
@@ -244,6 +254,7 @@ test("the exit still happens when releasing agents throws", async () => {
     check: (async () => NEWER) as never,
     apply: (async () => APPLIED) as never,
     eligible: () => true,
+    installed: () => true,
     busyReason: () => undefined,
     exit: (code) => exits.push(code),
     shutdown: () => {
@@ -269,6 +280,7 @@ test("the first check is delayed, not run on boot", async () => {
       return SAME;
     }) as never,
     eligible: () => true,
+    installed: () => true,
     busyReason: () => undefined,
     exit: () => {},
     log: () => {},
@@ -297,6 +309,7 @@ test("the timer never holds the process open", async () => {
     const scheduler = startUpdateScheduler({
       check: (async () => SAME) as never,
       eligible: () => true,
+      installed: () => true,
       busyReason: () => undefined,
       exit: () => {},
       log: () => {},
@@ -308,4 +321,116 @@ test("the timer never holds the process open", async () => {
   } finally {
     globalThis.setTimeout = realSetTimeout;
   }
+});
+
+// --- what the phone is told ------------------------------------------------
+//
+// The daemon has no screen. These decide what a person ever learns about a
+// machine that is behind, so the wrong answer here is silence about the one
+// case that needs a human.
+
+test("a machine that cannot update itself says so, and does not try", () => {
+  // The case the notice exists for: no service registered, so an exit is not a
+  // restart. It used to arm nothing at all — the one situation needing a human
+  // was the one situation nothing was watching.
+  const h = harness({ eligible: false });
+
+  return h.scheduler!.tick().then(() => {
+    expect(h.statuses).toEqual([{ latest: "0.9.18", automatic: false }]);
+    expect(h.applyCalls()).toBe(0);
+    expect(h.exits).toEqual([]);
+    h.scheduler!.stop();
+  });
+});
+
+test("a machine that will update itself says so too, but as news not a task", async () => {
+  // Reported before the attempt so a slow download is not silence, and marked
+  // automatic so the app words it as reassurance rather than an instruction.
+  const h = harness({ busy: () => "session s1 is mid-turn" });
+
+  await h.scheduler!.tick();
+
+  expect(h.statuses[0]).toEqual({ latest: "0.9.18", automatic: true });
+  h.scheduler!.stop();
+});
+
+test("an installed update stops being announced", async () => {
+  // It is on disk and certain to be running after the next quiet moment, so the
+  // notice has done its job. Leaving it up would outlive the thing it describes.
+  const h = harness({ busy: () => "session s1 is mid-turn" });
+
+  await h.scheduler!.tick();
+
+  expect(h.statuses).toEqual([{ latest: "0.9.18", automatic: true }, undefined]);
+  h.scheduler!.stop();
+});
+
+test("an update that keeps failing stops promising it is automatic", async () => {
+  // The self-correcting half. Whatever the reason — an unwritable prefix, a
+  // proxy eating the download — the phone ends up telling the user to do it by
+  // hand rather than waiting forever on a daemon that cannot.
+  const h = harness({
+    apply: async () => ({ ok: false, reason: "not-writable", detail: "/usr/local/bin" }),
+  });
+
+  await h.scheduler!.tick();
+
+  expect(h.statuses).toEqual([
+    { latest: "0.9.18", automatic: true },
+    { latest: "0.9.18", automatic: false },
+  ]);
+  h.scheduler!.stop();
+});
+
+test("being up to date clears a notice left by a manual install", async () => {
+  // Someone read the notice and ran the install line. Continuing to tell them
+  // to do what they just did is the one way this feature becomes furniture.
+  let latest = NEWER;
+  const h = harness({ eligible: false, check: async () => latest });
+
+  await h.scheduler!.tick();
+  expect(h.statuses).toEqual([{ latest: "0.9.18", automatic: false }]);
+
+  latest = SAME;
+  await h.scheduler!.tick();
+
+  expect(h.statuses).toEqual([{ latest: "0.9.18", automatic: false }, undefined]);
+  h.scheduler!.stop();
+});
+
+test("an unchanged status is not republished", async () => {
+  // Every change re-announces to every connected client. Repeating the same
+  // string on each six-hourly tick would be a broadcast for nothing.
+  const h = harness({ eligible: false });
+
+  await h.scheduler!.tick();
+  await h.scheduler!.tick();
+  await h.scheduler!.tick();
+
+  expect(h.statuses).toHaveLength(1);
+  h.scheduler!.stop();
+});
+
+test("a failed check leaves an existing notice standing", async () => {
+  // Offline is not evidence of being up to date. Clearing here would make the
+  // notice flicker every time the machine lost its connection.
+  let answer: typeof NEWER | null = NEWER;
+  const h = harness({ eligible: false, check: async () => answer });
+
+  await h.scheduler!.tick();
+  answer = null;
+  await h.scheduler!.tick();
+
+  expect(h.statuses).toEqual([{ latest: "0.9.18", automatic: false }]);
+  h.scheduler!.stop();
+});
+
+test("status() answers what was last published", async () => {
+  const h = harness({ eligible: false });
+  expect(h.scheduler!.status()).toBeUndefined();
+
+  await h.scheduler!.tick();
+
+  expect(h.scheduler!.status()).toEqual({ latest: "0.9.18", automatic: false });
+  h.scheduler!.stop();
 });

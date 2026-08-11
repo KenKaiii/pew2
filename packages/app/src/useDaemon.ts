@@ -323,6 +323,13 @@ interface State {
    */
   unreachable?: boolean;
   providers: Provider[];
+  /**
+   * A newer pew2 the paired computer has not got, when there is one.
+   *
+   * Not about this app: the App Store handles that. This is the daemon on the
+   * desk, which has no screen to tell anyone with.
+   */
+  update?: { latest: string; automatic: boolean };
   sessionId?: string;
   /** The agent the composer will talk to. Chosen before a session exists. */
   activeProviderId?: string;
@@ -1631,6 +1638,11 @@ export function useDaemon(
               return {
                 ...prev,
                 providers: message.providers ?? [],
+                // Absent means "nothing to report" *or* "a daemon too old to
+                // have the field", and both have to clear the notice — a
+                // banner the daemon can no longer take back would outlive the
+                // update it describes.
+                update: message.update,
                 loadingSessions: pendingCapabilities.current.size > 0,
               };
 

@@ -59,10 +59,17 @@ function Mount({ label, children }: { label: string; children: React.ReactNode }
   );
 }
 
-function Drawer({ initialPath }: { initialPath?: string }) {
+function Drawer({
+  initialPath,
+  update,
+}: {
+  initialPath?: string;
+  update?: { latest: string; automatic: boolean };
+}) {
   const [path, setPath] = useState<string | undefined>(initialPath);
   return (
     <Sidebar
+      update={update}
       open
       providers={PROVIDERS}
       sessions={SESSIONS}
@@ -94,6 +101,15 @@ export default function SidebarHarness() {
         </Mount>
         <Mount label="ONE PROJECT SELECTED">
           <Drawer initialPath="/Users/k/gg-projects/pew2" />
+        </Mount>
+        {/* The bottom row in both of its states: the tappable instruction for a
+            machine that cannot update itself, and the passive note for one
+            that is already doing it. Both sit left of Forget. */}
+        <Mount label="UPDATE — NEEDS THE USER">
+          <Drawer update={{ latest: "0.9.19", automatic: false }} />
+        </Mount>
+        <Mount label="UPDATE — AUTOMATIC">
+          <Drawer update={{ latest: "0.9.19", automatic: true }} />
         </Mount>
       </View>
       <Text style={styles.hint}>Tap the project row in either drawer to open the menu.</Text>

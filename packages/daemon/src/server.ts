@@ -453,5 +453,9 @@ startUpdateScheduler({
   busyReason: () => daemon.busyReason(),
   shutdown: releaseEverything,
   exit: (code) => setTimeout(() => process.exit(code), GRACE_MS),
+  // The daemon has no screen of its own. When it cannot install an update — no
+  // service registered, an unwritable prefix — the phone is the only place the
+  // person who could fix that will ever be told.
+  onStatus: (status) => daemon.setUpdateStatus(status),
   log: (message) => console.log(message),
 });

@@ -31,6 +31,7 @@
  * process; see the header of `apply.ts` for why no other platform qualifies.
  */
 import { applyUpdate, canSelfUpdate, type ApplyResult } from "./apply.js";
+import { isCompiled } from "../cli/service.js";
 import { checkForUpdate } from "./check.js";
 
 /**
@@ -51,8 +52,21 @@ export interface SchedulerDeps {
   check?: typeof checkForUpdate;
   /** Injected in tests; defaults to the real download-and-swap. */
   apply?: typeof applyUpdate;
-  /** Whether this build could update itself at all. */
+  /** Whether this build could install an update itself. */
   eligible?: () => boolean;
+  /**
+   * Whether this is a released binary rather than a source checkout.
+   *
+   * Gates *looking*, where `eligible` gates *acting*.
+   */
+  installed?: () => boolean;
+  /**
+   * Called whenever the answer to "is this machine behind?" changes.
+   *
+   * `undefined` means up to date, or as far as anyone can tell. Only fired on a
+   * change, because it triggers a re-announce to every connected client.
+   */
+  onStatus?: (status: UpdateStatus | undefined) => void;
   /** Why the daemon must not be ended right now, if anything. */
   busyReason: () => string | undefined;
   /** How the process ends. Injected so a test never takes the runner down. */
@@ -64,7 +78,16 @@ export interface SchedulerDeps {
   intervalMs?: number;
 }
 
+export interface UpdateStatus {
+  /** The published version this machine has not got. */
+  latest: string;
+  /** Whether it will be installed without a human doing anything. */
+  automatic: boolean;
+}
+
 export interface UpdateScheduler {
+  /** What to tell the phone, or undefined when there is nothing to say. */
+  status(): UpdateStatus | undefined;
   /** Run one check-apply-maybe-exit cycle now. Exposed for tests and `pew2`. */
   tick(): Promise<void>;
   /** Stop checking. The swapped binary, if any, stays on disk. */
@@ -76,25 +99,42 @@ export interface UpdateScheduler {
 /**
  * Arm the update loop.
  *
- * Returns undefined when this build cannot self-update, so the caller can tell
- * "not scheduled" from "scheduled and idle" without inspecting a platform.
+ * Two gates, not one, and the difference is the point:
+ *
+ * - **`installed`** decides whether to *look*. False for a source checkout,
+ *   where the answer is `git pull` and a notice about an install script would
+ *   be wrong. Also keeps `npm test` and every dev run off GitHub.
+ * - **`eligible`** decides whether to *act*. False without a registered
+ *   service, where swapping the binary would strand the machine on an exit
+ *   nothing comes back from.
+ *
+ * Checking without acting is the whole reason the phone can say anything: a
+ * daemon that cannot install its own update is exactly the one whose user has
+ * to be told to re-run the install line. It used to return early here and go
+ * completely inert, which meant the only case a human needed to hear about was
+ * the one case nothing was watching.
+ *
+ * Returns undefined only when there is nothing to look for either.
  */
 export function startUpdateScheduler(deps: SchedulerDeps): UpdateScheduler | undefined {
   const {
     check = checkForUpdate,
     apply = applyUpdate,
     eligible = canSelfUpdate,
+    installed = isCompiled,
     busyReason,
     exit = (code: number) => process.exit(code),
     shutdown,
+    onStatus,
     log = console.log,
     firstDelayMs = FIRST_CHECK_DELAY_MS,
     intervalMs = CHECK_INTERVAL_MS,
   } = deps;
 
-  // Checked before a single timer exists: on a platform with no supervisor this
-  // module must be completely inert, not merely harmless.
-  if (!eligible()) return undefined;
+  if (!installed()) return undefined;
+
+  /** Whether this build may install what it finds, not merely report it. */
+  const mayApply = eligible();
 
   let timer: NodeJS.Timeout | undefined;
   let stopped = false;
@@ -102,6 +142,21 @@ export function startUpdateScheduler(deps: SchedulerDeps): UpdateScheduler | und
   let staged: { version: string } | undefined;
   /** Guards against a slow download overlapping the next tick. */
   let running = false;
+  /** The last thing said to the clients, so a change can be detected. */
+  let status: UpdateStatus | undefined;
+
+  /**
+   * Publish "this machine is behind", but only when that is news.
+   *
+   * Every change re-announces to every connected client, so repeating an
+   * unchanged status on each six-hourly tick would be a broadcast storm for a
+   * string nobody read differently.
+   */
+  const setStatus = (next: UpdateStatus | undefined) => {
+    if (next?.latest === status?.latest && next?.automatic === status?.automatic) return;
+    status = next;
+    onStatus?.(next);
+  };
 
   const arm = (delay: number) => {
     if (stopped) return;
@@ -147,21 +202,51 @@ export function startUpdateScheduler(deps: SchedulerDeps): UpdateScheduler | und
 
       const found = await check();
       // `null` is "could not tell" — offline, rate-limited, a broken tag. Never
-      // a reason to act, and never a reason to stop checking tomorrow.
-      if (!found || !found.newer) return;
+      // a reason to act, and never a reason to stop checking tomorrow. It is
+      // also not evidence of being up to date, so a previous notice stands.
+      if (!found) return;
+      if (!found.newer) {
+        // Genuinely current. Clears a notice left by an update that has since
+        // been installed by hand — re-running the install line is the documented
+        // fix, and it would be absurd to keep telling someone to do what they
+        // just did.
+        setStatus(undefined);
+        return;
+      }
+
+      // Said before the attempt, and left standing if the attempt fails: an
+      // update that cannot install itself is precisely the one a human has to
+      // hear about. `automatic` is what turns it from a status into a task.
+      setStatus({ latest: found.latest, automatic: mayApply });
 
       log(`[update] ${found.latest} available (running ${found.current})`);
+      if (!mayApply) {
+        // No registered service, so an exit is not a restart. Looking was still
+        // worth it: the phone can now say so, which is the only way this
+        // machine gets updated at all.
+        log(`[update] not installing it: no supervisor to restart this daemon`);
+        return;
+      }
+
       const result: ApplyResult = await apply({ version: found.latest });
       if (!result.ok) {
         // Including a checksum mismatch, which is deliberately not fatal here:
         // the current binary is untouched and still correct, and a transient
         // bad transfer must not stop the next attempt.
         log(`[update] not applied: ${result.reason} — ${result.detail}`);
+        // It keeps failing, so stop promising it will happen by itself. This is
+        // the self-correcting half: whatever the reason — an unwritable prefix,
+        // a proxy eating the download — the phone ends up telling the user to
+        // do it manually rather than waiting for ever on a daemon that cannot.
+        setStatus({ latest: found.latest, automatic: false });
         return;
       }
 
       log(`[update] ${found.latest} installed, replacing ${result.previous}`);
       staged = { version: found.latest };
+      // On disk and certain to be running after the next quiet moment, so the
+      // notice has done its job.
+      setStatus(undefined);
 
       // Swapped and quiet in the same breath is the common case on a machine
       // nobody is using, which is exactly when this should happen.
@@ -187,6 +272,7 @@ export function startUpdateScheduler(deps: SchedulerDeps): UpdateScheduler | und
 
   return {
     tick: run,
+    status: () => status,
     stop() {
       stopped = true;
       if (timer) clearTimeout(timer);

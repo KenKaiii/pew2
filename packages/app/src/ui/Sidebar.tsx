@@ -71,6 +71,13 @@ interface SidebarProps {
   connectionStatus: Status;
   onUnpair: () => void;
   /**
+   * A newer pew2 the paired computer has not got, when there is one.
+   *
+   * Absent for the ordinary case, including a machine that updates itself — by
+   * the time anyone could read a notice about it, it has already happened.
+   */
+  update?: { latest: string; automatic: boolean };
+  /**
    * Agents are still answering what conversations they hold. Without this the
    * drawer claims "No conversations yet" for the first seconds after connect —
    * a false empty state on machines with plenty of history.
@@ -79,6 +86,17 @@ interface SidebarProps {
   /** Honor the phone's Reduce Motion accessibility preference. */
   reduceMotion?: boolean;
 }
+
+/**
+ * The line that installs or updates pew2 on a desktop.
+ *
+ * Duplicated from the README rather than fetched: it is shown when the machine
+ * is behind, which is exactly when nothing about that machine can be relied on
+ * to answer. It has been stable across every release, and a wrong command here
+ * is worse than no notice at all.
+ */
+const INSTALL_COMMAND =
+  "curl -fsSL https://raw.githubusercontent.com/KenKaiii/pew2/main/install.sh | sh";
 
 const MAX_STAGGERED_ROWS = 14;
 const ROW_STAGGER_MS = 18;
@@ -294,6 +312,7 @@ function SidebarView({
   machineRemote,
   connectionStatus,
   onUnpair,
+  update,
   historyLoading = false,
   reduceMotion = false,
 }: SidebarProps) {
@@ -530,7 +549,39 @@ function SidebarView({
           {/* Connection state is the dot beside the title now, so this row is
               just the one action it always carried. The host name stays out of
               sight and in the spoken label. */}
-          <View style={styles.machine}>
+          <View style={[styles.machine, update && styles.machineSplit]}>
+            {/* Left of Forget, on the row that is already about this computer,
+                so it reads as being about the machine rather than about this
+                app. The App Store handles the app; this is the daemon on the
+                desk, which has no screen of its own to say it with. */}
+            {update ? (
+              update.automatic ? (
+                // Installing itself, and it will restart at the next quiet
+                // moment. Said out loud so a restart is never a surprise, but
+                // with nothing to tap, because there is nothing to do.
+                <Text style={styles.updateNote}>Updating pew2…</Text>
+              ) : (
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={`pew2 ${update.latest} is available for ${machineLabel}. How to update.`}
+                  hitSlop={touchSlop(theme.size.touch)}
+                  onPress={() => {
+                    haptics.tap();
+                    Alert.alert(
+                      `pew2 ${update.latest} is available`,
+                      // The command itself, not a description of it: whoever
+                      // reads this is holding the phone and will be typing it
+                      // out on the other machine.
+                      `This computer can't update itself, so run this on ${machineLabel}:\n\n${INSTALL_COMMAND}`,
+                      [{ text: "OK" }],
+                    );
+                  }}
+                  style={({ pressed }) => pressed && styles.pressed}
+                >
+                  <Text style={styles.updateAction}>New pew2 version available</Text>
+                </Pressable>
+              )
+            ) : null}
             <Pressable
               accessibilityRole="button"
               accessibilityLabel={`Forget pairing with ${machineLabel}`}
@@ -647,13 +698,24 @@ const styles = StyleSheet.create({
     // Right-aligned: Forget keeps the edge it has always sat on, now that the
     // status text that used to fill this row is gone.
     justifyContent: "flex-end",
+    // Room for a two-line notice without pushing Forget off its edge.
+    gap: theme.space(2),
     marginHorizontal: theme.gutter,
     marginTop: theme.space(2),
     paddingTop: theme.space(3),
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: theme.color.border,
   },
+  // Only when there is something on the left; otherwise Forget keeps the edge.
+  machineSplit: { justifyContent: "space-between" },
   machineAction: { color: theme.color.danger, fontSize: 12, fontWeight: "600" },
+  // Same size and weight as Forget, so the row reads as one pair of controls.
+  // Deliberately not `danger`: being a version behind is not a problem, and a
+  // red line next to a red Forget would read as one warning about two things.
+  updateAction: { color: theme.color.accent, fontSize: 12, fontWeight: "600", flexShrink: 1 },
+  // Not a control, so it is dimmed to the weight of everything else that is
+  // merely telling you something.
+  updateNote: { color: theme.color.textDim, fontSize: 12, flexShrink: 1 },
 
   // The drawer is the lower layer: it stays put while the conversation slides
   // right to reveal it, so it needs no transform of its own.

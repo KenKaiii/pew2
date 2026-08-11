@@ -959,6 +959,22 @@ export class Daemon {
   }
 
   /**
+   * "This machine is behind", for the phone to show.
+   *
+   * Set by the update scheduler, which is the only thing that knows. Held here
+   * because `announceProviders` is the frame every client already gets on
+   * connect — a separate message would need its own replay rule to survive a
+   * reconnect, and this one is re-sent on every `hello` for free.
+   */
+  private updateStatus?: { latest: string; automatic: boolean };
+
+  /** Record a pending update and tell every client at once. */
+  setUpdateStatus(status: { latest: string; automatic: boolean } | undefined) {
+    this.updateStatus = status;
+    this.announceProviders();
+  }
+
+  /**
    * Why this daemon is not safe to end right now, or undefined if it is.
    *
    * "Quiet" is the precondition for exiting to pick up a new binary. It is not
@@ -1174,6 +1190,9 @@ export class Daemon {
       // the daemon, so this is how it learns that an id it still shows died
       // with the previous process and must be resumed, not prompted.
       activeSessions: [...this.sessions.keys()],
+      // Omitted entirely when there is nothing to say, so an app that has been
+      // told once does not keep a stale banner when the update lands.
+      update: this.updateStatus,
     };
     this.send(announce);
   }
