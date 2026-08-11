@@ -821,6 +821,17 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
     return () => animation.stop();
   }, [atBottom, reduceMotion, jumpOpacity]);
 
+  /**
+   * Hide the keyboard, from a worklet.
+   *
+   * A plain JS function so the gesture captures *this* and not the `Keyboard`
+   * module: `runOnJS` still has to read its argument on the UI runtime, and a
+   * native module is not serializable to it.
+   */
+  const dismissKeyboard = useCallback(() => {
+    Keyboard.dismiss();
+  }, []);
+
   // The drawer tracks the finger in both directions: dragged out from the left
   // edge when closed, and pushed back by the uncovered pane when open. It is
   // being moved by the gesture rather than triggered by it.
@@ -846,7 +857,15 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
           // place, so the keyboard goes the moment the drag is claimed rather
           // than once it commits. Switching a model does not do this — that is
           // still the same conversation.
-          runOnJS(Keyboard.dismiss)();
+          //
+          // `dismissKeyboard`, never `runOnJS(Keyboard.dismiss)`. This body is a
+          // worklet, so naming `Keyboard.dismiss` reads a property off the
+          // `Keyboard` module *on the UI runtime* — and a native module cannot
+          // be sent there. Worklets throws, and a throw on the UI thread is not
+          // catchable JS: it aborts the process. That is the whole crash — the
+          // drawer never opened because the app died on the first frame of the
+          // drag, in both directions, since both go through here.
+          runOnJS(dismissKeyboard)();
           // The effect above animates this same value on `menuOpen`. Cancelling
           // here means the finger takes over from where the drawer currently
           // rests rather than from where it was heading.
@@ -885,7 +904,7 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
           runOnJS(settleDrawer)(menuOpen);
         })
     );
-  }, [menuOpen, drawer$, releaseDrawer, settleDrawer]);
+  }, [menuOpen, drawer$, releaseDrawer, settleDrawer, dismissKeyboard]);
 
   // Two instances of the same gesture rather than one shared between the edge
   // strip and the overlay. A GestureDetector stamps its own handler tag onto the

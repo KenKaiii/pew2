@@ -201,6 +201,11 @@ function SheetView({ visible, title, onClose, onBack, dismissLabel, children }: 
   }, [visible, reduceMotion, progress, finishExit]);
 
   const dismiss = onClose;
+  // Bound out of `haptics` here, on the JS thread, so the worklet below captures
+  // a bare function instead of the object. See the note in `onEnd`.
+  const tapHaptic = useCallback(() => {
+    haptics.tap();
+  }, []);
   // The card follows the finger one-to-one downward and refuses to go up: a
   // sheet already flush against the bottom edge has nothing above it to reveal,
   // and letting it lift would show daylight underneath.
@@ -224,13 +229,18 @@ function SheetView({ visible, title, onClose, onBack, dismissLabel, children }: 
             // Left exactly where the finger let go: the closing animation picks
             // `progress` up from here, so the card never snaps back up a single
             // point before leaving.
-            runOnJS(haptics.tap)();
+            // `tapHaptic`, never `runOnJS(haptics.tap)`: this body is a worklet,
+            // so naming `haptics.tap` reads a property off the `haptics` object
+            // on the UI runtime, and that object cannot be sent there. Worklets
+            // throws, and a throw on the UI thread is not catchable JS — it
+            // aborts the process. Same bug as the drawer's `Keyboard.dismiss`.
+            runOnJS(tapHaptic)();
             if (dismiss) runOnJS(dismiss)();
             return;
           }
           progress.value = withSpring(1, RETURN);
         }),
-    [dismiss, reduceMotion, progress, travel],
+    [dismiss, reduceMotion, progress, travel, tapHaptic],
   );
 
   const cardStyle = useAnimatedStyle(() => ({
