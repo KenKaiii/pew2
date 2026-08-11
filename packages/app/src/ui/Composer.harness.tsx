@@ -12,10 +12,11 @@
  * and it runs on web (`npx expo start --web`) — which is why anything iOS-only
  * inside the tree has to be optional-called rather than assumed.
  */
-import type { ReactNode } from "react";
-import { StyleSheet, Text, View } from "react-native";
+import { useEffect, type ReactNode } from "react";
+import { ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { StatusBar } from "expo-status-bar";
+import * as SplashScreen from "expo-splash-screen";
 import { theme } from "../theme";
 import { Composer } from "./Composer";
 import type { PendingAttachment } from "../attachments";
@@ -71,78 +72,94 @@ function Slot({
 }
 
 export default function ComposerHarness() {
+  // `index.ts` holds the native splash open and documents that `App` performs
+  // the matching hide. A harness stands in for `App`, so it inherits that
+  // obligation — without this the simulator sits on the splash for ever,
+  // looking exactly like a harness that failed to render.
+  useEffect(() => {
+    SplashScreen.hideAsync().catch(() => {
+      // Already hidden, or no splash on this platform.
+    });
+  }, []);
+
   return (
     <SafeAreaProvider>
       <SafeAreaView style={styles.root}>
         <StatusBar style="light" />
 
-        <Slot label="COLLAPSED">
-          <Composer value="" onChangeText={() => {}} onSend={() => {}} />
-        </Slot>
+        {/* The slots total more than one screen, and without this the ones
+            past the fold cannot be looked at on a device at all — which is how
+            the busy state went unexamined. The slots keep their fixed heights,
+            so every top edge is still where it was; only the viewport moves. */}
+        <ScrollView contentContainerStyle={styles.content}>
+          <Slot label="COLLAPSED">
+            <Composer value="" onChangeText={() => {}} onSend={() => {}} />
+          </Slot>
 
-        <Slot label="EXPANDED">
-          <Composer
-            value="Refactor the auth module and add a test covering the concurrent refresh path"
-            onChangeText={() => {}}
-            onSend={() => {}}
-          />
-        </Slot>
+          <Slot label="EXPANDED">
+            <Composer
+              value="Refactor the auth module and add a test covering the concurrent refresh path"
+              onChangeText={() => {}}
+              onSend={() => {}}
+            />
+          </Slot>
 
-        {/* The only place the height ceiling is visible. The box grows a line
-            at a time up to eight and then stops, handing the overflow to the
-            input's own scrolling — so what this slot checks is that the pill
-            has a fixed top edge here and the action row is still on it. */}
-        <Slot label="CEILING" tall>
-          <Composer
-            value={
-              "Walk the session reducer and list every path that sets busy without a " +
-              "guaranteed clearing path, then write the invariant test that catches " +
-              "the stuck-working state: no session busy without an in-flight turn, " +
-              "asserted after every scripted scenario including a reconnect landing " +
-              "mid-stream and a duplicate id after a daemon restart."
-            }
-            onChangeText={() => {}}
-            onSend={() => {}}
-          />
-        </Slot>
+          {/* The only place the height ceiling is visible. The box grows a line
+              at a time up to eight and then stops, handing the overflow to the
+              input's own scrolling — so what this slot checks is that the pill
+              has a fixed top edge here and the action row is still on it. */}
+          <Slot label="CEILING" tall>
+            <Composer
+              value={
+                "Walk the session reducer and list every path that sets busy without a " +
+                "guaranteed clearing path, then write the invariant test that catches " +
+                "the stuck-working state: no session busy without an in-flight turn, " +
+                "asserted after every scripted scenario including a reconnect landing " +
+                "mid-stream and a duplicate id after a daemon restart."
+              }
+              onChangeText={() => {}}
+              onSend={() => {}}
+            />
+          </Slot>
 
-        {/* Chips push the pill down rather than reshaping it: the file row is
-            its own band above the glass. A no-thumbnail file and a long name
-            are both here because those are the two that break the layout. */}
-        <Slot label="ATTACHMENTS">
-          <Composer
-            value="what broke here"
-            onChangeText={() => {}}
-            onSend={() => {}}
-            attachments={SAMPLE_ATTACHMENTS}
-            onAttach={() => {}}
-            onRemoveAttachment={() => {}}
-          />
-        </Slot>
+          {/* Chips push the pill down rather than reshaping it: the file row is
+              its own band above the glass. A no-thumbnail file and a long name
+              are both here because those are the two that break the layout. */}
+          <Slot label="ATTACHMENTS">
+            <Composer
+              value="what broke here"
+              onChangeText={() => {}}
+              onSend={() => {}}
+              attachments={SAMPLE_ATTACHMENTS}
+              onAttach={() => {}}
+              onRemoveAttachment={() => {}}
+            />
+          </Slot>
 
-        {/* A collapsed pill with a stop button, and the state nobody could see
-            before it had a slot: `busy` used to force the open layout, so an
-            agent working with the keyboard down left a tall empty box standing
-            over the transcript for the length of the turn. The draft is empty
-            on purpose — that is what makes this the resting shape. */}
-        <Slot label="WORKING">
-          <Composer value="" onChangeText={() => {}} onSend={() => {}} busy onStop={() => {}} />
-        </Slot>
+          {/* A collapsed pill with a stop button, and the state nobody could
+              see before it had a slot: `busy` used to force the open layout, so
+              an agent working with the keyboard down left a tall empty box
+              standing over the transcript for the length of the turn. The draft
+              is empty on purpose — that is what makes this the resting shape. */}
+          <Slot label="WORKING">
+            <Composer value="" onChangeText={() => {}} onSend={() => {}} busy onStop={() => {}} />
+          </Slot>
 
-        <Slot label="LISTENING">
-          <Composer
-            value=""
-            onChangeText={() => {}}
-            onSend={() => {}}
-            dictation={LISTENING}
-          />
-        </Slot>
+          <Slot label="LISTENING">
+            <Composer
+              value=""
+              onChangeText={() => {}}
+              onSend={() => {}}
+              dictation={LISTENING}
+            />
+          </Slot>
 
-        {/* The real hook, not a stub: this is the only way to see whether the
-            native speech module actually loaded. A visible mic here means
-            `speechAvailable()` found a recogniser; a dimmed one means it did
-            not, which is exactly what Expo Go looks like. */}
-        <LiveDictationSlot />
+          {/* The real hook, not a stub: this is the only way to see whether the
+              native speech module actually loaded. A visible mic here means
+              `speechAvailable()` found a recogniser; a dimmed one means it did
+              not, which is exactly what Expo Go looks like. */}
+          <LiveDictationSlot />
+        </ScrollView>
       </SafeAreaView>
     </SafeAreaProvider>
   );
@@ -150,6 +167,7 @@ export default function ComposerHarness() {
 
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: theme.color.bg },
+  content: { paddingBottom: theme.space(6) },
   slot: { paddingHorizontal: theme.gutter, paddingTop: theme.space(3) },
   label: {
     color: theme.color.textDim,
