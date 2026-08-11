@@ -44,6 +44,29 @@ jobs:
 
       - run: bun install --frozen-lockfile
 
+      # The tag and the version compiled into the binary must be the same
+      # string, because self-update compares them: `update/check.ts` reads the
+      # latest release tag, and `CURRENT_VERSION` comes from this package.json.
+      #
+      # Ship v0.9.18 from a package.json still saying 0.9.17 and every updated
+      # daemon concludes it is out of date *again* on its next check — download,
+      # swap, exit, relaunch, repeat, for ever, on every user's machine, with no
+      # way out but uninstalling. Before self-update existed this mismatch was
+      # cosmetic; now it is the worst thing this repo can ship, so it is checked
+      # before a single binary is built.
+      - name: Tag must match the version in package.json
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg=$(bun -e 'console.log(require("./packages/daemon/package.json").version)')
+          echo "tag=$tag package.json=$pkg"
+          if [ "$tag" != "$pkg" ]; then
+            echo "::error::Tag v$tag does not match packages/daemon/package.json ($pkg)."
+            echo "Releasing this would leave every daemon in a permanent update loop."
+            echo "Fix: set the package.json version to $tag, commit, then retag."
+            exit 1
+          fi
+
       # Cross-compiled from one runner: bun downloads the target runtime itself,
       # so there is no need for a mac and a windows machine in the matrix.
       - name: Compile
