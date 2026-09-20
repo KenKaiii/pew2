@@ -124,17 +124,20 @@ export function directionKey(rootKey: Uint8Array, direction: Direction): Uint8Ar
 /**
  * A sealed frame, as it travels over the wire.
  *
- * `sid`, `seq` and `ctr` are deliberately readable. The relay keeps an ordered
- * event log so a reconnecting phone can be caught up — the daemon does not
- * provide replay itself — and ordering a log requires reading the order. They
- * are bound into the AEAD as associated data, so the relay can *read* them but
- * cannot alter them without every recipient rejecting the frame.
+ * `sid`, `seq` and `ctr` are deliberately readable. `ctr` must be: replay
+ * protection is checked against the per-sender window before decryption. The
+ * relay stores nothing and replays nothing — a reconnecting phone is caught up
+ * by the daemon, from its own ordered session log — so no hop needs to read
+ * the order. All three are bound into the AEAD as associated data: a frame
+ * cannot be re-addressed to another session or position without every
+ * recipient rejecting it, and the cleartext copy stays useful for diagnosing
+ * traffic without the key.
  */
 export interface Envelope {
   t: "e";
   /** Session this belongs to, or absent for connection-level frames. */
   sid?: string;
-  /** Position within the session, for the relay's replay log. */
+  /** Position within the session; readable for diagnosis, AEAD-bound against tampering. */
   seq?: number;
   /** Monotonic per connection per sender. Replay protection. */
   ctr: number;

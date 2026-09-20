@@ -269,14 +269,15 @@ export class SecureChannel {
 /**
  * The routing header for a message, lifted out of its body.
  *
- * The relay keeps the ordered log that lets a reconnecting client catch up — the
- * daemon does not replay — and ordering a log means reading the order. These two
- * fields are therefore mirrored in cleartext on the envelope, and bound into the
- * AEAD so the relay can read them without being able to change them.
+ * These two fields are mirrored in cleartext on the envelope and bound into
+ * the AEAD, so a captured frame cannot be re-addressed to another session or
+ * position without the recipient rejecting it. Nothing between the endpoints
+ * reads them: the relay stores nothing, and the daemon itself replays a
+ * reconnecting client from its own ordered session log.
  *
- * Shared by both transports so a message cannot be ordered on one path and not
- * the other, which would show up as a phone that resumes correctly over Wi-Fi
- * and loses history over the relay.
+ * Shared by both transports so a message carries the same header whichever
+ * path it takes, and a frame sealed for one cannot be made to pass for the
+ * other.
  */
 export function envelopeHeader(message: unknown): { sid?: string; seq?: number } {
   if (typeof message !== "object" || message === null) return {};
