@@ -89,6 +89,13 @@ export function useDictation({ draft, onDraftChange, onMessage }: UseDictationOp
 
     void startDictation({
       onTranscript: (transcript) => {
+        // iOS fires a final `result` with an empty transcript when `stop()` is
+        // called. Applying it resets the draft to `base` (the pre-dictation
+        // text, usually empty), erasing everything the interim results landed —
+        // the "tapping the mic to send wipes my message" bug. An empty result
+        // can only erase, and the real words are already in the draft, so drop
+        // it.
+        if (!transcript.trim()) return;
         const next = applyTranscript(state.current, transcript);
         state.current = next.state;
         changeRef.current(next.draft);
