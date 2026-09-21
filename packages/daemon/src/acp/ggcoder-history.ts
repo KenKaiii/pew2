@@ -6,7 +6,8 @@ import readline from "node:readline";
 import { promisify } from "node:util";
 import { createGunzip, gunzip } from "node:zlib";
 import type { AgentSession } from "./connect.js";
-import { historyImages } from "../images.js";
+import { historyImages, historyToolImages } from "../images.js";
+import { historyThoughts } from "./history-content.js";
 
 const gunzipAsync = promisify(gunzip);
 
@@ -278,6 +279,7 @@ function messageText(content: unknown): string {
   if (!Array.isArray(content)) return "";
   return content
     .flatMap((part) =>
+      (part as { type?: string })?.type === "text" &&
       typeof (part as { text?: unknown })?.text === "string"
         ? [(part as { text: string }).text]
         : [],
@@ -385,6 +387,13 @@ export async function loadGgCoderDisplayHistory(
     if (message.provenance?.kind === "automation" || message.provenance?.kind === "notification") {
       continue;
     }
+    if (message.role === "tool") {
+      const images = [...historyImages(message.content), ...historyToolImages(message.content)];
+      if (images.length > 0) {
+        updates.push({ sessionUpdate: "agent_message_chunk", content: images });
+      }
+      continue;
+    }
     if (message.role === "user") {
       const text = messageText(message.content).trim();
       const images = historyImages(message.content);
@@ -398,6 +407,10 @@ export async function loadGgCoderDisplayHistory(
       continue;
     }
     if (message.role === "assistant") {
+      const thought = historyThoughts(message.content);
+      if (thought) {
+        updates.push({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: thought } });
+      }
       const text = messageText(message.content);
       const images = historyImages(message.content);
       if (text || images.length > 0) {

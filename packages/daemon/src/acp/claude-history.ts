@@ -3,16 +3,17 @@ import { homedir } from "node:os";
 import path from "node:path";
 import readline from "node:readline";
 import type { AgentSession } from "./connect.js";
-import { historyImages, type ImageBlock } from "../images.js";
+import { historyImages, historyToolImages, type HistoryImage } from "../images.js";
+import { historyThoughts } from "./history-content.js";
 
 export interface ClaudeDisplayMessage {
-  role: "user" | "assistant";
+  role: "user" | "assistant" | "thought";
   text: string;
   /**
    * Pictures stored with this message. A screenshot pasted into a prompt is a
    * real part of the conversation, and text-only replay dropped it entirely.
    */
-  images: ImageBlock[];
+  images: HistoryImage[];
 }
 
 const LOCAL_COMMAND_TAGS = [
@@ -69,10 +70,18 @@ async function readDisplayMessages(filePath: string): Promise<ClaudeDisplayMessa
       // not part of the top-level ACP conversation replay.
       if (entry.isMeta === true || entry.isSidechain === true) continue;
       const text = visibleText(entry.message?.content, role).trim();
+      if (role === "assistant" && text.includes("Please run /login")) continue;
+      // Claude stores tool results under the user role, but a generated image
+      // is the agent's output, not a new prompt. Never replay the tool's text.
+      const toolImages = historyToolImages(entry.message?.content);
+      if (toolImages.length > 0) messages.push({ role: "assistant", text: "", images: toolImages });
+      if (role === "assistant") {
+        const thought = historyThoughts(entry.message?.content);
+        if (thought) messages.push({ role: "thought", text: thought, images: [] });
+      }
       const images = historyImages(entry.message?.content);
       // A message may be nothing but an image, so emptiness is judged on both.
       if (!text && images.length === 0) continue;
-      if (role === "assistant" && text.includes("Please run /login")) continue;
       messages.push({ role, text, images });
     }
   } finally {
@@ -116,6 +125,8 @@ export async function hydrateClaudeMessageCounts(
         let count = 0;
         let previousRole: ClaudeDisplayMessage["role"] | undefined;
         for (const message of messages) {
+          // Thoughts are collapsed metadata, not an extra message in the drawer.
+          if (message.role === "thought") continue;
           // The app keeps user prompts distinct but coalesces adjacent agent text.
           if (message.role === "user" || message.role !== previousRole) count += 1;
           previousRole = message.role;

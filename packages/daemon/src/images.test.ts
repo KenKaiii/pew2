@@ -138,6 +138,7 @@ test("stored history keeps its pictures, whatever API shape they were saved in",
     { type: "image", mimeType: "image/jpeg", data: "QQ" },
     { type: "image", mimeType: "image/png", data: "BB" },
     { type: "image", mimeType: "image/gif", data: "CC" },
+    { type: "resource_link", uri: "https://x.dev/a.png", name: "Image" },
   ]);
 
   expect(historyImages("plain string content")).toEqual([]);

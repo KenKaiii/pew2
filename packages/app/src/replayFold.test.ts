@@ -41,6 +41,26 @@ const sessionStub: Session = {
   configOptions: [],
 };
 
+test("the session row retains images, thoughts and text while another chat is open", () => {
+  const screenshot = { update: {
+    sessionUpdate: "tool_call_update",
+    content: [{ type: "content", content: { type: "resource_link", uri: "out/screenshot.png", mimeType: "image/png" } }],
+  } };
+  let next = foldBackgroundEvent(state([], [sessionStub]), "s1", "s1:0", {
+    update: { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "Inspecting the screen" } },
+  });
+  next = foldBackgroundEvent(next, "s1", "s1:1", screenshot);
+  next = foldBackgroundEvent(next, "s1", "s1:2", {
+    update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Here is the screenshot" } },
+  });
+  // Opening a live session restores this row, not the cleared foreground turns.
+  expect(next.turns).toEqual([]);
+  expect(next.sessions[0]!.turns).toMatchObject([
+    { role: "thought", text: "Inspecting the screen" },
+    { role: "agent", text: "Here is the screenshot", images: [{ src: "out/screenshot.png" }] },
+  ]);
+});
+
 test("a batch of chunks lands as coalesced turns in one state", () => {
   const next = foldSessionEvents(
     state([], [sessionStub]),
