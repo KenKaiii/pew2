@@ -6,13 +6,16 @@
  * long folder name, and a context window about to compact. Not reachable from
  * the app; point index.ts here and run `npx expo start --web`.
  */
-import { StyleSheet, Text, View } from "react-native";
-import { SafeAreaProvider } from "react-native-safe-area-context";
+import { useState } from "react";
+import { Platform, ScrollView, StyleSheet, Text, View, useWindowDimensions } from "react-native";
+import { GestureHandlerRootView } from "react-native-gesture-handler";
+import { ContextDetailsSheet } from "./ContextDetailsSheet";
+import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { StatusBar } from "expo-status-bar";
 import { theme } from "../theme";
 import { ContextBar } from "./ContextBar";
 
-const CASES: Array<{ note: string; props: React.ComponentProps<typeof ContextBar> }> = [
+const CASES: Array<{ note: string; props: Omit<React.ComponentProps<typeof ContextBar>, "onDetails"> }> = [
   {
     note: "Everything — real Claude Code reading (21,325 / 1,000,000)",
     props: {
@@ -83,27 +86,34 @@ const CASES: Array<{ note: string; props: React.ComponentProps<typeof ContextBar
 ];
 
 export default function ContextBarHarness() {
+  const [selected, setSelected] = useState<number>();
+  const { width } = useWindowDimensions();
   return (
     <SafeAreaProvider>
+      <GestureHandlerRootView style={styles.screen}>
       <StatusBar style="light" />
-      <View style={styles.screen}>
-        {CASES.map((testCase) => (
+      <SafeAreaView style={{ flex: 1 }}>
+      <ScrollView contentContainerStyle={styles.content}>
+        {CASES.map((testCase, index) => (
           <View key={testCase.note} style={styles.case}>
             <Text style={styles.note}>{testCase.note}</Text>
             {/* Phone width, so truncation is exercised honestly. */}
-            <View style={styles.phone}>
-              <ContextBar {...testCase.props} />
+            <View style={{ width: Math.min(index === CASES.length - 1 ? 280 : 350, width - theme.gutter * 2) }}>
+              <ContextBar {...testCase.props} onDetails={() => setSelected(index)} />
             </View>
           </View>
         ))}
-      </View>
+      </ScrollView>
+      </SafeAreaView>
+      {Platform.OS !== "web" && <ContextDetailsSheet visible={selected !== undefined} workspace={selected === undefined ? undefined : CASES[selected]!.props.workspace} usage={selected === undefined ? undefined : CASES[selected]!.props.usage} onClose={() => setSelected(undefined)} />}
+      </GestureHandlerRootView>
     </SafeAreaProvider>
   );
 }
 
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: theme.color.bg, padding: theme.space(6), gap: theme.space(5) },
+  screen: { flex: 1, backgroundColor: theme.color.bg },
+  content: { paddingHorizontal: theme.gutter, paddingVertical: theme.sectionGap, gap: theme.sectionGap },
   case: { gap: theme.space(2) },
   note: { color: theme.color.textFaint, fontSize: theme.font.tiny },
-  phone: { width: 390 - theme.gutter * 2 },
 });

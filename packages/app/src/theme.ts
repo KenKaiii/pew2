@@ -51,6 +51,18 @@ export const theme = {
     orb: "#3d9bf5",
   },
 
+  /** Libraries.dev Beam composer: opaque card, quiet inset pills. */
+  composer: {
+    radius: 20,
+    fill: "#1d1d1d",
+    border: "#68686f",
+    chip: "#292929",
+    ink: "#caccd2",
+    placeholder: "#99999f",
+    beam: ["#ff975b", "#ef6fab", "#ac8fff", "#6ebdff", "#82dac7"] as const,
+    beamDuration: 3100,
+  },
+
   /** 4pt base grid. */
   space: (n: number) => n * 4,
 
@@ -119,6 +131,8 @@ export const theme = {
      * centred when collapsed and in the corners once it grows.
      */
     composerCollapsed: 64,
+    /** Minimum text area + top inset + action row + padding and border. */
+    composerResting: 126,
     composerButton: 40,
     /** Inset from the pill's edge to each action button. */
     composerInset: 12,

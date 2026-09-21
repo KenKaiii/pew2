@@ -11,7 +11,6 @@
  */
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  Alert,
   Animated,
   Dimensions,
   Easing,
@@ -21,6 +20,7 @@ import {
   StyleSheet,
   Text,
   View,
+  useWindowDimensions,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import Ionicons from "@expo/vector-icons/Ionicons";
@@ -29,24 +29,23 @@ import { AgentChip } from "./AgentChip";
 import { touchSlop } from "./controls";
 import { Glass } from "./Glass";
 import { haptics } from "./haptics";
-import { PrivacyLink } from "./PrivacyLink";
 import { HistorySkeleton } from "./Skeleton";
 import { orderProvidersByRecency } from "../providerRecency";
-import { formatHistoryMetadata } from "../historyMetadata";
+import { formatHistoryMetadata, type DrawerRow } from "../historyMetadata";
 import { recentSessionsForProvider } from "../sessionHistory";
 import { useReducedMotion } from "./useReducedMotion";
 import { useAppActive } from "./useAppActive";
 import { ProjectSelect } from "./ProjectSelect";
 import { ProjectMenu } from "./ProjectMenu";
 import { sessionsInProject, type Project } from "../projects";
-import type { Provider, Session, Status } from "../useDaemon";
+import type { Provider, Status } from "../useDaemon";
 
 export const DRAWER_WIDTH = Math.min(Dimensions.get("window").width * 0.88, 380);
 
 interface SidebarProps {
   open: boolean;
   providers: Provider[];
-  sessions: Session[];
+  sessions: DrawerRow[];
   activeProviderId?: string;
   activeSessionId?: string;
   onSelectProvider: (id: string) => void;
@@ -70,7 +69,7 @@ interface SidebarProps {
   /** True when reached via a relay, so it works away from home. */
   machineRemote: boolean;
   connectionStatus: Status;
-  onUnpair: () => void;
+  onOpenConnection: () => void;
   /**
    * A newer pew2 the paired computer has not got, when there is one.
    *
@@ -88,16 +87,6 @@ interface SidebarProps {
   reduceMotion?: boolean;
 }
 
-/**
- * The line that installs or updates pew2 on a desktop.
- *
- * Duplicated from the README rather than fetched: it is shown when the machine
- * is behind, which is exactly when nothing about that machine can be relied on
- * to answer. It has been stable across every release, and a wrong command here
- * is worse than no notice at all.
- */
-const INSTALL_COMMAND =
-  "curl -fsSL https://raw.githubusercontent.com/KenKaiii/pew2/main/install.sh | sh";
 
 const MAX_STAGGERED_ROWS = 14;
 const ROW_STAGGER_MS = 18;
@@ -177,7 +166,7 @@ function SessionStatus({
 }
 
 interface SessionRowProps {
-  session: Session;
+  session: DrawerRow;
   index: number;
   active: boolean;
   reduceMotion: boolean;
@@ -312,12 +301,14 @@ function SidebarView({
   machineLabel,
   machineRemote,
   connectionStatus,
-  onUnpair,
+  onOpenConnection,
   update,
   historyLoading = false,
   reduceMotion = false,
 }: SidebarProps) {
   const insets = useSafeAreaInsets();
+  const { fontScale } = useWindowDimensions();
+  const chipHeight = Math.max(theme.size.touch, (theme.font.small + 4) * fontScale + theme.space(2));
   const appActive = useAppActive();
   // Nothing in a row should be animating when the drawer is shut behind the
   // conversation, or when the app is not on screen at all. Resolved once here
@@ -358,13 +349,6 @@ function SidebarView({
   const orderedProviders = useMemo(
     () => orderProvidersByRecency(providers, sessions),
     [providers, sessions],
-  );
-  // Ready to use right now. `providers` also carries the ones that are known but
-  // unusable — not installed, or missing an API key — and they are shown greyed
-  // out rather than hidden, so the total would overstate what works.
-  const availableCount = useMemo(
-    () => providers.filter((provider) => provider.available).length,
-    [providers],
   );
 
   const selectedProject = useMemo(
@@ -420,17 +404,7 @@ function SidebarView({
                 connection state is the first thing to check when the drawer is
                 opened, and it belongs to the list of apps it describes. */}
             <View style={styles.headerTitleRow}>
-              <Text style={styles.headerTitle}>Connected Apps</Text>
-              {/* The count is of apps that can actually be tapped, not of
-                  manifests: the list also holds agents that are installed but
-                  missing a key, or not installed at all, and counting those
-                  would promise more than the drawer delivers. Hidden entirely at
-                  zero — a lone "0" beside the title reads as an error state
-                  rather than as "still looking".
-
-                  Placed after the dot, not between it and the title: the dot is
-                  the title's own status and the two belong together, so pushing
-                  them a full gap apart would break that pairing. */}
+              <Text style={styles.headerTitle}>Agents</Text>
               <View
                 style={[styles.connectionDot, { backgroundColor: connectionColor }]}
                 accessibilityRole="text"
@@ -438,17 +412,6 @@ function SidebarView({
                   machineRemote ? "Reachable from anywhere." : "Same network only."
                 }`}
               />
-              {availableCount > 0 && (
-                <View
-                  style={styles.headerCount}
-                  accessibilityRole="text"
-                  // Without this it is announced as a bare number after the
-                  // title, which says nothing about what was counted.
-                  accessibilityLabel={`${availableCount} ${availableCount === 1 ? "app" : "apps"} ready to use`}
-                >
-                  <Text style={styles.headerCountText}>{availableCount}</Text>
-                </View>
-              )}
             </View>
             {/* No button here. A "new chat" in the drawer header sits above the
                 app chips and the project selector both, so it could only mean
@@ -462,7 +425,7 @@ function SidebarView({
             showsHorizontalScrollIndicator={false}
             // Without an explicit height a horizontal ScrollView stretches to
             // fill the remaining column space and pushes the history far down.
-            style={styles.agentScroller}
+            style={[styles.agentScroller, { height: chipHeight }]}
             contentContainerStyle={styles.agentRow}
           >
             {orderedProviders.map((provider) => (
@@ -547,79 +510,15 @@ function SidebarView({
             )}
           />
 
-          {/* Connection state is the dot beside the title now, so this row is
-              just the one action it always carried. The host name stays out of
-              sight and in the spoken label. */}
-          <View style={[styles.machine, update && styles.machineSplit]}>
-            {/* Left of Forget, on the row that is already about this computer,
-                so it reads as being about the machine rather than about this
-                app. The App Store handles the app; this is the daemon on the
-                desk, which has no screen of its own to say it with. */}
-            {update ? (
-              update.automatic ? (
-                // Installing itself, and it will restart at the next quiet
-                // moment. Said out loud so a restart is never a surprise, but
-                // with nothing to tap, because there is nothing to do.
-                <Text style={styles.updateNote}>Updating pew2…</Text>
-              ) : (
-                <Pressable
-                  accessibilityRole="button"
-                  accessibilityLabel={`pew2 ${update.latest} is available for ${machineLabel}. How to update.`}
-                  hitSlop={touchSlop(theme.size.touch)}
-                  onPress={() => {
-                    haptics.tap();
-                    Alert.alert(
-                      `pew2 ${update.latest} is available`,
-                      // The command itself, not a description of it: whoever
-                      // reads this is holding the phone and will be typing it
-                      // out on the other machine.
-                      `This computer can't update itself, so run this on ${machineLabel}:\n\n${INSTALL_COMMAND}`,
-                      [{ text: "OK" }],
-                    );
-                  }}
-                  style={({ pressed }) => pressed && styles.pressed}
-                >
-                  <Text style={styles.updateAction}>New pew2 version available</Text>
-                </Pressable>
-              )
-            ) : null}
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel={`Forget pairing with ${machineLabel}`}
-              hitSlop={touchSlop(theme.size.touch)}
-              onPress={() => {
-                haptics.tap();
-                Alert.alert(
-                  "Forget this computer?",
-                  "You'll need to scan or paste its pairing link to connect again.",
-                  [
-                    { text: "Cancel", style: "cancel" },
-                    {
-                      text: "Forget",
-                      style: "destructive",
-                      onPress: () => {
-                        haptics.warned();
-                        onUnpair();
-                      },
-                    },
-                  ],
-                );
-              }}
-              style={({ pressed }) => pressed && styles.pressed}
-            >
-              <Text style={styles.machineAction}>Forget</Text>
-            </Pressable>
-          </View>
-
-          {/* Its own line rather than a third item on the row above, which is
-              already about this computer and switches alignment when an update
-              notice appears. This one is about the app, and is here because the
-              pairing screen's copy is unreachable once a pairing exists.
-
-              The bottom inset is carried here rather than on the panel: this is
-              now the lowest thing in the drawer, and the panel's own padding
-              alone would leave it under the home indicator. */}
-          <PrivacyLink style={[styles.privacy, { marginBottom: insets.bottom }]} />
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={`Connection details for ${machineLabel}${update ? update.automatic ? ", updating pew2" : ", update available" : ""}`}
+            onPress={() => { haptics.tap(); onOpenConnection(); }}
+            style={({ pressed }) => [styles.machine, { marginBottom: insets.bottom }, pressed && styles.pressed]}
+          >
+            <Ionicons name="options-outline" size={18} color={theme.color.textDim} />
+            <Text style={styles.machineAction}>{update ? update.automatic ? "Connection · Updating…" : "Connection · Update available" : "Connection"}</Text>
+          </Pressable>
 
           {/* Last child, so it paints over the history it drops across. Inside
               the panel rather than over the whole screen: it is the drawer's
@@ -704,34 +603,12 @@ function NewChatChip({ project, onPress }: { project: Project; onPress: () => vo
 
 const styles = StyleSheet.create({
   machine: {
-    flexDirection: "row",
-    alignItems: "center",
-    // Right-aligned: Forget keeps the edge it has always sat on, now that the
-    // status text that used to fill this row is gone.
-    justifyContent: "flex-end",
-    // Room for a two-line notice without pushing Forget off its edge.
-    gap: theme.space(2),
-    marginHorizontal: theme.gutter,
-    marginTop: theme.space(2),
-    paddingTop: theme.space(3),
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: theme.color.border,
+    flexDirection: "row", alignItems: "center", gap: theme.space(2),
+    minHeight: theme.size.touch, marginHorizontal: theme.gutter,
+    marginTop: theme.sectionGap, paddingVertical: theme.space(3),
+    borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: theme.color.border,
   },
-  // Only when there is something on the left; otherwise Forget keeps the edge.
-  machineSplit: { justifyContent: "space-between" },
-  privacy: {
-    alignSelf: "flex-end",
-    marginHorizontal: theme.gutter,
-    marginTop: theme.space(2),
-  },
-  machineAction: { color: theme.color.danger, fontSize: 12, fontWeight: "600" },
-  // Same size and weight as Forget, so the row reads as one pair of controls.
-  // Deliberately not `danger`: being a version behind is not a problem, and a
-  // red line next to a red Forget would read as one warning about two things.
-  updateAction: { color: theme.color.accent, fontSize: 12, fontWeight: "600", flexShrink: 1 },
-  // Not a control, so it is dimmed to the weight of everything else that is
-  // merely telling you something.
-  updateNote: { color: theme.color.textDim, fontSize: 12, flexShrink: 1 },
+  machineAction: { color: theme.color.textDim, fontSize: theme.font.small, lineHeight: 17, flexShrink: 1 },
 
   // The drawer is the lower layer: it stays put while the conversation slides
   // right to reveal it, so it needs no transform of its own.
@@ -771,23 +648,6 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: theme.space(2),
   },
-  // Sized from its own text rather than given a fixed width, so a two-digit
-  // count cannot clip. `minWidth` keeps a single digit from looking pinched.
-  headerCount: {
-    minWidth: 22,
-    paddingHorizontal: theme.space(1.5),
-    paddingVertical: 2,
-    borderRadius: theme.radius.pill,
-    backgroundColor: theme.color.surfaceRaised,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  headerCountText: {
-    color: theme.color.textDim,
-    fontFamily: theme.display.semibold,
-    fontSize: theme.font.tiny,
-    textAlign: "center",
-  },
   // Colour is the whole message, so it needs no glyph and no label beside it.
   connectionDot: { width: 8, height: 8, borderRadius: 4 },
   headerTitle: {
@@ -797,7 +657,7 @@ const styles = StyleSheet.create({
     letterSpacing: 0.4,
   },
 
-  agentScroller: { flexGrow: 0, height: theme.size.chip },
+  agentScroller: { flexGrow: 0 },
   agentRow: {
     paddingHorizontal: theme.gutter,
     gap: theme.space(2),

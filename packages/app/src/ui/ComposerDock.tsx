@@ -35,7 +35,7 @@ import type { PendingAttachment } from "../attachments";
 import type { ContextUsage } from "../contextUsage";
 import type { Workspace } from "../useDaemon";
 import type { Dictation } from "./useDictation";
-import { Composer, type ComposerHandle } from "./Composer";
+import { Composer, type ComposerHandle, type ComposerSelector } from "./Composer";
 import { ContextBar } from "./ContextBar";
 
 export interface ComposerDockHandle {
@@ -59,6 +59,7 @@ interface Props {
   usage?: ContextUsage;
   showCommands: boolean;
   onCommands: () => void;
+  onProjectDetails: () => void;
   /**
    * Send the draft, answering whether it actually went.
    *
@@ -75,6 +76,7 @@ interface Props {
   onStop?: () => void;
   editable?: boolean;
   placeholder?: string;
+  selectors?: readonly ComposerSelector[];
   attachments: PendingAttachment[];
   onAttach: () => void;
   onRemoveAttachment: (id: string) => void;
@@ -98,11 +100,13 @@ function ComposerDockView(
     usage,
     showCommands,
     onCommands,
+    onProjectDetails,
     onSend,
     busy,
     onStop,
     editable,
     placeholder,
+    selectors,
     attachments,
     onAttach,
     onRemoveAttachment,
@@ -180,6 +184,7 @@ function ComposerDockView(
           usage={usage}
           showCommands={showCommands}
           onCommands={onCommands}
+          onDetails={onProjectDetails}
         />
       )}
       <Composer
@@ -191,6 +196,7 @@ function ComposerDockView(
         onStop={onStop}
         editable={editable}
         placeholder={placeholder}
+        selectors={selectors}
         attachments={attachments}
         onAttach={onAttach}
         onRemoveAttachment={onRemoveAttachment}

@@ -36,6 +36,8 @@ import { StatusBar } from "expo-status-bar";
 import Ionicons from "@expo/vector-icons/Ionicons";
 import { theme } from "./src/theme";
 import { useDaemon, type Provider, type TurnFinished } from "./src/useDaemon";
+import { projectDrawerRows } from "./src/historyMetadata";
+import { restorePresentation } from "./src/restoreState";
 import { currentTool } from "./src/activity";
 import { dockHeightFor, recordDockHeight, type DockHeights } from "./src/dockHeight";
 import { finishedNotice } from "./src/notificationPolicy";
@@ -61,16 +63,18 @@ import { useDictation } from "./src/ui/useDictation";
 import { ApprovalSheet } from "./src/ui/ApprovalSheet";
 import { ThoughtSheet } from "./src/ui/ThoughtSheet";
 import { applyCommand, type SlashCommand } from "./src/slashCommands";
-import { CircleButton, Pill } from "./src/ui/controls";
+import { CircleButton } from "./src/ui/controls";
 import { haptics } from "./src/ui/haptics";
 import { Sidebar, DRAWER_WIDTH } from "./src/ui/Sidebar";
+import { ConnectionSheet } from "./src/ui/ConnectionSheet";
+import { ContextDetailsSheet } from "./src/ui/ContextDetailsSheet";
 import { projectsForProvider, projectSourceKey } from "./src/projects";
 import { greetingFor, hashSeed } from "./src/greeting";
 import { showsStop } from "./src/composerState";
 import { ConfigPicker, summarise, valueName } from "./src/ui/ConfigPicker";
 import { useReducedMotion } from "./src/ui/useReducedMotion";
 import { CanvasCover } from "./src/ui/CanvasCover";
-import { withLayoutX, type PillX } from "./src/ui/pillAnchor";
+import type { ComposerAnchor, ComposerSelector } from "./src/ui/Composer";
 import { PairingScreen } from "./src/ui/PairingScreen";
 import { LaunchScreen } from "./src/ui/LaunchScreen";
 import { clearPairing, loadPairing, savePairing, type Pairing } from "./src/pairing";
@@ -476,6 +480,13 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
     },
   });
 
+  const [drawerProjection, setDrawerProjection] = useState(() => ({
+    source: daemon.sessions, rows: projectDrawerRows([], daemon.sessions),
+  }));
+  if (drawerProjection.source !== daemon.sessions) {
+    setDrawerProjection({ source: daemon.sessions, rows: projectDrawerRows(drawerProjection.rows, daemon.sessions) });
+  }
+
   // Retry the socket the moment the app is back, rather than waiting out a
   // backoff that was scheduled while nobody was holding the phone.
   //
@@ -491,12 +502,15 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
   // the socket's setup above the ref that decides whether a finished turn needs
   // a banner, which is the more delicate of the two orderings.
   const resumeDaemon = daemon.resumeNow;
+  const setDaemonForeground = daemon.setForeground;
   useEffect(() => {
+    setDaemonForeground(AppState.currentState === "active");
     const subscription = AppState.addEventListener("change", (next) => {
+      setDaemonForeground(next === "active");
       if (next === "active") resumeDaemon();
     });
     return () => subscription.remove();
-  }, [resumeDaemon]);
+  }, [resumeDaemon, setDaemonForeground]);
 
   // The rest of the hook's actions, pulled out for the same reason as
   // `resumeDaemon` above: `daemon` is a fresh object every render (it spreads
@@ -526,6 +540,16 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
   attachmentsRef.current = attachments;
   const [attachOpen, setAttachOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [connectionOpen, setConnectionOpen] = useState(false);
+  const [contextOpen, setContextOpen] = useState(false);
+  const openContext = useCallback(() => { Keyboard.dismiss(); setContextOpen(true); }, []);
+  const closeContext = useCallback(() => setContextOpen(false), []);
+  const openConnection = useCallback(() => {
+    Keyboard.dismiss();
+    setMenuOpen(false);
+    setConnectionOpen(true);
+  }, []);
+  const closeConnection = useCallback(() => setConnectionOpen(false), []);
   // Which pill's menu is open, and where that pill sits, so the menu opens
   // under it instead of always at the gutter.
   const [picker, setPicker] = useState<"model" | "mode" | null>(null);
@@ -571,10 +595,11 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
   const [atBottom, setAtBottom] = useState(true);
   const jumpOpacity = useRef(new Animated.Value(0)).current;
 
-  const [pillX, setPillX] = useState<PillX>({
-    model: theme.gutter,
-    mode: theme.gutter,
-  });
+  const [pickerAnchor, setPickerAnchor] = useState<ComposerAnchor>();
+  const openComposerPicker = useCallback((kind: "model" | "mode", anchor: ComposerAnchor) => {
+    setPickerAnchor(anchor);
+    setPicker(kind);
+  }, []);
   const reduceMotion = useReducedMotion();
   // How far the drawer is uncovered, 0 to 1.
   //
@@ -648,6 +673,9 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
   );
 
   const inThread = daemon.turns.length > 0;
+  const sessionTitle = daemon.restoreTarget?.title
+    ?? daemonSessions.find((session) => session.id === (daemon.sessionId ?? threadKey))?.title
+    ?? "New conversation";
 
   // Where the reading area begins and ends: under the nav, and above the
   // composer. Both fall back to the resting height of the thing they clear,
@@ -656,7 +684,7 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
   const threadTop = insets.top + (navHeight || theme.space(12)) + theme.space(2);
   // Mirrors `styles.dock`: the composer at rest, plus that view's own padding.
   const restingDockHeight =
-    theme.size.composerCollapsed + theme.space(2) + (insets.bottom + theme.space(2));
+    theme.size.composerResting + theme.space(2) + (insets.bottom + theme.space(2));
   // The height for the state on screen now. Falls back to the other state's
   // measurement before this one has ever been measured — which is only the very
   // first keyboard open of a launch — and to the analytic resting height before
@@ -715,6 +743,10 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
   const { model, mode: modeOption, level } = summarise(daemon.configOptions);
   // Never let one selector drive two pills.
   const mode = modeOption && modeOption.id !== model?.id ? modeOption : undefined;
+  const composerSelectors = useMemo<ComposerSelector[]>(() => [
+    ...(model ? [{ id: "model", value: "Model", label: `Model: ${valueName(model) ?? "Not reported"}${level ? `, ${valueName(level)}` : ""}`, onPress: (anchor: ComposerAnchor) => openComposerPicker("model", anchor) }] : []),
+    ...(mode ? [{ id: "mode", value: valueName(mode) ?? mode.name, label: `${mode.name}: ${valueName(mode) ?? "Not reported"}`, onPress: (anchor: ComposerAnchor) => openComposerPicker("mode", anchor) }] : []),
+  ], [model, mode, level, openComposerPicker]);
 
   // Feedback for things that happen on their own, rather than because a finger
   // touched the screen. This is the point of a remote control: the agent runs
@@ -1207,7 +1239,7 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
       <Sidebar
         open={menuOpen}
         providers={daemon.providers}
-        sessions={daemon.sessions}
+        sessions={drawerProjection.rows}
         activeProviderId={active?.id}
         activeSessionId={daemon.sessionId}
         // Selecting an app refilters the history in place. The drawer stays
@@ -1227,7 +1259,7 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
         machineRemote={pairing.remote}
         connectionStatus={daemon.status}
         update={daemon.update}
-        onUnpair={onUnpair}
+        onOpenConnection={openConnection}
       />
 
       {/* The conversation pane. Slides right to reveal the drawer beneath. */}
@@ -1277,58 +1309,17 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
           )}
         </View>
 
-        {/* No agent-name pill. Which app is connected is already the drawer's
-            job, and repeating it here only stole width from the selectors,
-            which are the sole reason the top bar is interactive. */}
-        {model && (
-          <View
-            style={styles.selectorPill}
-            onLayout={(e) => setPillX(withLayoutX(e, "model"))}
-          >
-            <Pill
-              label={`Model: ${valueName(model)}${level ? `, ${valueName(level)}` : ""}`}
-              onPress={() => setPicker("model")}
-            >
-              {/* The thinking level is not shown here. It lives in this pill's
-                  own menu, and squeezing both names into one pill truncated
-                  each to a couple of letters. */}
-              <Text style={styles.selectorValue} numberOfLines={1}>
-                {valueName(model)}
-              </Text>
-              <Ionicons
-                name="chevron-down"
-                size={13}
-                color={theme.color.textDim}
-                style={styles.pillChevron}
-              />
-            </Pill>
-          </View>
-        )}
+        <Text
+          style={styles.sessionTitle}
+          numberOfLines={1}
+          ellipsizeMode="tail"
+          accessibilityRole="header"
+          accessibilityLabel={sessionTitle}
+        >
+          {sessionTitle}
+        </Text>
 
-        {mode && (
-          <View
-            style={styles.selectorPill}
-            onLayout={(e) => setPillX(withLayoutX(e, "mode"))}
-          >
-            <Pill
-              label={`${mode.name}: ${valueName(mode)}`}
-              onPress={() => setPicker("mode")}
-            >
-              <Text style={styles.selectorValue} numberOfLines={1}>
-                {valueName(mode)}
-              </Text>
-              <Ionicons
-                name="chevron-down"
-                size={13}
-                color={theme.color.textDim}
-                style={styles.pillChevron}
-              />
-            </Pill>
-          </View>
-        )}
-
-        <View style={styles.topBarSpacer} />
-
+        <View style={styles.navAction}>
         {inThread && (
           // Asks where, rather than starting one immediately: the old behaviour
           // always landed wherever the agent happened to be, which is the wrong
@@ -1337,6 +1328,7 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
             <Ionicons name="create-outline" size={18} color={theme.color.text} />
           </CircleButton>
         )}
+        </View>
       </View>
 
       {/* Frosted cover for the nav zone only — it ends exactly at the nav's
@@ -1354,7 +1346,7 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
           single transform, so the gap between them never changes and nothing
           re-lays out on the keyboard's clock. */}
       <Reanimated.View style={[styles.body, keyboard.pane]}>
-        {inThread ? (
+        {inThread || daemon.restoreTarget ? (
           // Remounted per conversation so `startRenderingFromBottom` re-arms:
           // each transcript must open on its own newest message, not on the
           // scroll offset the previous one happened to be left at.
@@ -1362,9 +1354,16 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
             key={threadKey}
             ref={scroller}
             turns={daemon.turns}
+            activeStream={daemon.activeStream}
+            restore={daemon.restoreTarget ? {
+              title: daemon.restoreTarget.title,
+              state: restorePresentation(daemon.restoreTarget, daemon.loadingSession, daemon.restoreError, daemon.turns.length, daemon.status),
+              error: daemon.restoreError,
+              onRetry: () => daemon.openSession(daemon.restoreTarget!.id),
+            } : undefined}
             threadTop={threadTop}
             threadBottom={threadBottom}
-            working={working}
+            working={working && !daemon.loadingSession && !daemon.restoreError}
             activity={daemon.activity}
             receipt={daemon.receipt}
             indicatorTop={insets.top + navHeight}
@@ -1482,6 +1481,8 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
             usage={daemon.usage}
             showCommands={daemon.commands.length > 0}
             onCommands={openCommands}
+            onProjectDetails={openContext}
+            selectors={composerSelectors}
             onSend={send}
             busy={showsStop(daemon)}
             onStop={daemon.cancel}
@@ -1496,13 +1497,10 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
             placeholder={
               dictation.listening
                 ? "Listening..."
-                : // Kept to one line: the collapsed pill is a single line tall,
-                  // and a placeholder that wraps pushes its own second line out
-                  // of the box — the state reads as broken rather than as calm.
-                  daemon.status !== "online"
-                  ? "Offline — sends when you reconnect"
+                : daemon.status !== "online"
+                  ? "Offline. Sends when you reconnect"
                   : active
-                    ? "Ask me anything..."
+                    ? "Build anything..."
                     : "Waiting for an agent..."
             }
             attachments={attachments}
@@ -1515,6 +1513,8 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
 
       {/* Outside the lifted pane: a sheet belongs to the screen's bottom edge,
           not to the composer, so it must not ride up with the keyboard. */}
+      <ContextDetailsSheet visible={contextOpen} workspace={daemon.workspace} usage={daemon.usage} onClose={closeContext} />
+      <ConnectionSheet visible={connectionOpen} machineLabel={pairing.label} machineRemote={pairing.remote} status={daemon.status} update={daemon.update} onClose={closeConnection} onUnpair={onUnpair} />
       <CommandSheet
         visible={commandsOpen}
         commands={daemon.commands}
@@ -1542,7 +1542,8 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
       <ConfigPicker
         visible={picker !== null}
         onClose={closePicker}
-        anchorX={picker === "mode" ? pillX.mode : pillX.model}
+        anchorX={pickerAnchor?.x}
+        anchorY={pickerAnchor?.y}
         options={
           picker === "mode"
             ? mode
@@ -1631,19 +1632,16 @@ const styles = StyleSheet.create({
     zIndex: 3,
   },
   navFade: { zIndex: 2 },
-  topBarSpacer: { flex: 1 },
-  // Pills hug their text, but no single pill may take the row. flexShrink
-  // alone shrinks proportionally, which left the model pill wide and starved
-  // the mode pill to "A…"; the cap bounds the greedy one instead.
-  selectorPill: { flexShrink: 1, minWidth: 0, maxWidth: "42%" },
-  selectorValue: {
-    flexShrink: 1,
+  navAction: { width: theme.size.control, flexShrink: 0 },
+  sessionTitle: {
+    textAlign: "center",
+    flex: 1,
+    minWidth: 0,
     color: theme.color.text,
-    fontSize: theme.font.small,
-    lineHeight: theme.font.body + 4,
+    fontSize: theme.font.body,
+    fontWeight: "600",
   },
-  // Inset so the chevron never hugs the pill edge.
-  pillChevron: { marginLeft: theme.space(0.5) },
+
   statusDot: {
     position: "absolute",
     top: 0,

@@ -162,7 +162,7 @@ function Conversation({ drawerOpen }: { drawerOpen: boolean }) {
         machineLabel="studio.local"
         machineRemote
         connectionStatus="online"
-        onUnpair={() => {}}
+        onOpenConnection={() => {}}
       />
 
       <View

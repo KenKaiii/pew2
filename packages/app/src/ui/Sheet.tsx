@@ -264,7 +264,14 @@ function SheetView({ visible, title, onClose, onBack, dismissLabel, children }: 
     // Inert while leaving: the card is still on screen for the length of its
     // exit, and a scrim that kept taking touches for that quarter second would
     // eat the first tap of whatever the user turned to next.
-    <View style={styles.host} pointerEvents={visible ? "box-none" : "none"}>
+    <View
+      style={styles.host}
+      pointerEvents={visible ? "box-none" : "none"}
+      accessibilityViewIsModal={visible}
+      accessibilityElementsHidden={!visible}
+      importantForAccessibility={visible ? "yes" : "no-hide-descendants"}
+      onAccessibilityEscape={visible ? onClose : undefined}
+    >
       {/* Tapping away is the primary dismissal, so the scrim is a control —
           except on a blocking sheet, where it is only a dimming layer that
           still absorbs touches meant for the conversation. */}
@@ -378,7 +385,7 @@ function CrossfadeTitle({ title }: { title: string }) {
   const style = useAnimatedStyle(() => ({ opacity: fade.value }));
 
   return (
-    <Animated.Text style={[styles.title, style]} numberOfLines={1}>
+    <Animated.Text style={[styles.title, style]} numberOfLines={2} accessibilityRole="header">
       {rendered}
     </Animated.Text>
   );
@@ -429,6 +436,9 @@ const styles = StyleSheet.create({
   },
   headerSpacer: { width: theme.size.chip },
   title: {
+    flex: 1,
+    minWidth: 0,
+    textAlign: "center",
     color: theme.color.text,
     fontSize: theme.font.title,
     fontWeight: "600",

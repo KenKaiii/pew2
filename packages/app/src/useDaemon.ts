@@ -7,6 +7,9 @@
  * per word and scrolling would fight the user.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createStreamBatch, foldStreamBatch } from "./streamBatch";
+import type { LiveStreamIdentity } from "./smoothText";
+import { matchesRestore, restoreTarget, type RestoreTarget } from "./restoreState";
 import { SecureChannel, e2e, envelopeHeader, wire } from "@pew2/protocol";
 
 const { WIRE_VERSION } = wire;
@@ -223,8 +226,8 @@ export interface Session {
 export interface Workspace {
   cwd: string;
   folder: string;
-  repo: boolean;
-  uncommitted: number;
+  repo?: boolean;
+  uncommitted?: number;
 }
 
 /** A directory offered by the picker: a suggested repo, or a browsed folder. */
@@ -365,6 +368,12 @@ interface State {
   loadingSessions: boolean;
   /** A stored transcript is loading and is not ready to reveal yet. */
   loadingSession: boolean;
+  /** Ephemeral presentation identity, never persisted or sent over the wire. */
+  activeStream?: LiveStreamIdentity;
+  restoreTarget?: RestoreTarget;
+  restoreError?: string;
+  /** Terminal callbacks drain after this state (and its final text) commits. */
+  completedTurns?: readonly TurnFinished[];
   /** Project and git state for the session on screen. Absent until asked. */
   workspace?: Workspace;
   /**
@@ -617,6 +626,14 @@ export function useDaemon(
   // are served from their project's files instead.
   const [knownCommands, setKnownCommands] = useState<Record<string, SlashCommand[]>>({});
 
+  const restoring = useRef<RestoreTarget | undefined>(undefined);
+  const streamGeneration = useRef(0);
+  const streamBoundary = useRef<(() => void) | undefined>(undefined);
+  const streamForeground = useRef(true);
+  const setForeground = useCallback((active: boolean) => {
+    streamForeground.current = active;
+    if (!active) streamBoundary.current?.();
+  }, []);
   const socket = useRef<WebSocket | null>(null);
   /** Encryption state for the live socket. Rebuilt on every reconnect. */
   const channel = useRef<SecureChannel | null>(null);
@@ -760,10 +777,21 @@ export function useDaemon(
   }, [state.providers]);
 
   // Held in a ref so a changing handler never re-opens the socket.
+  const notifiedTurns = useRef(new WeakSet<TurnFinished>());
   const onTurnFinished = useRef(options.onTurnFinished);
   useEffect(() => {
     onTurnFinished.current = options.onTurnFinished;
   }, [options.onTurnFinished]);
+  useEffect(() => {
+    const completed = state.completedTurns;
+    if (!completed?.length) return;
+    for (const turn of completed) {
+      if (notifiedTurns.current.has(turn)) continue;
+      notifiedTurns.current.add(turn);
+      onTurnFinished.current?.(turn);
+    }
+    setState((prev) => ({ ...prev, completedTurns: prev.completedTurns?.filter((turn) => !completed.includes(turn)) }));
+  }, [state.completedTurns]);
 
   // Same reason, for the rest of the options: the socket effect reads them when
   // it needs them rather than depending on them.
@@ -863,6 +891,20 @@ export function useDaemon(
 
   useEffect(() => {
     alive.current = true;
+    const batch = createStreamBatch(
+      (events) => {
+        const generation = streamGeneration.current;
+        setState((prev) => foldStreamBatch(prev, events, generation));
+      },
+      (callback, ms) => setTimeout(callback, ms),
+      clearTimeout,
+    );
+    const resetStream = () => {
+      batch.boundary();
+      streamGeneration.current += 1;
+      setState((prev) => prev.activeStream ? { ...prev, activeStream: undefined } : prev);
+    };
+    streamBoundary.current = resetStream;
 
     // A different pairing deserves a fresh attempt: this effect re-runs when the
     // url changes, which is exactly when someone has scanned a new code.
@@ -876,6 +918,7 @@ export function useDaemon(
 
     const connect = () => {
       if (!alive.current) return;
+      resetStream();
       setState((s) => ({ ...s, status: "connecting" }));
 
       const ws = new WebSocket(url);
@@ -1084,6 +1127,7 @@ export function useDaemon(
           }
           if (code === "wire-version" || code === "unpaired" || code === "device-refused") {
             const detail = (frame as { message?: unknown }).message;
+            resetStream();
             fatal.current = true;
             // Nothing will ever be fetched from that machine again, and these
             // are pictures of its filesystem. Forget them with the pairing.
@@ -1103,6 +1147,15 @@ export function useDaemon(
         // phone no longer holds the key for. Silently ignored — there is nothing
         // useful to show and nothing safe to act on.
         if (message === undefined) return;
+
+        // Only authenticated, visible prose may wait. Control/replay/background
+        // frames flush before any notification or state transition below.
+        const update = message.payload?.update;
+        const batchable = streamForeground.current && message.t === "session.event" &&
+          message.sessionId === sessionRef.current &&
+          (update?.sessionUpdate === "agent_message_chunk" || update?.sessionUpdate === "agent_thought_chunk") &&
+          update.content?.type === "text" && typeof update.content.text === "string";
+        if (!batchable) resetStream();
 
         // Replayed history, after a reconnect or a resume. Progressive batches
         // make long transcripts visible from the top while the agent continues
@@ -1192,7 +1245,7 @@ export function useDaemon(
             const running = isTimingTurn(prev.activity);
             return {
               ...folded,
-              loadingSession: false,
+              loadingSession: folded.turns.length === 0 && message.more === true,
               busy: running,
               // Replayed tool calls finished long ago — the same reason a replay
               // batch never raises a permission. Timing them from this device's
@@ -1266,9 +1319,12 @@ export function useDaemon(
           const mine =
             adoptedRequestId !== undefined &&
             viewingRef.current === pendingSessionKey(adoptedRequestId);
-          const reopened = message.resumed === true && awaitingResume.current;
-          if (reopened) awaitingResume.current = false;
-          claimsScreen = mine || reopened || viewingRef.current === undefined;
+          const reopened = message.resumed === true && awaitingResume.current && matchesRestore(restoring.current, message);
+          if (reopened) {
+            awaitingResume.current = false;
+            restoring.current = undefined;
+          }
+          claimsScreen = mine || reopened || (viewingRef.current === undefined && message.resumed !== true);
           if (claimsScreen) {
             sessionRef.current = message.sessionId;
             viewingRef.current = message.sessionId;
@@ -1346,6 +1402,7 @@ export function useDaemon(
           return;
         }
 
+        let completedTurn: TurnFinished | undefined;
         if (message.t === "session.idle") {
           const finished: string = message.sessionId;
           const lastText = turnText.current.get(finished);
@@ -1354,13 +1411,13 @@ export function useDaemon(
           const providerId =
             (message.providerId as string | undefined) ??
             sessionsRef.current.find((entry) => entry.id === finished)?.providerId;
-          onTurnFinished.current?.({
+          completedTurn = {
             sessionId: finished,
             folder: message.folder,
             agentName: providersRef.current.find((p) => p.id === providerId)?.name,
             lastText,
             activeSessionId: sessionRef.current,
-          });
+          };
 
           // A turn just ended, so the agent may have written files: the
           // uncommitted count beside the composer is stale the instant it
@@ -1493,8 +1550,10 @@ export function useDaemon(
             const stale =
               current && !liveSessions.current.has(current)
                 ? sessionsRef.current.find((entry) => entry.id === current)
-                : undefined;
+                : !current && restoring.current?.id === viewingRef.current ? restoring.current : undefined;
             if (stale?.agentSessionId && stale.providerId) {
+              const target: RestoreTarget = { id: stale.id, providerId: stale.providerId, agentSessionId: stale.agentSessionId, title: stale.title, cwd: stale.cwd };
+              restoring.current = target;
               sessionRef.current = undefined;
               // The screen is still this conversation, and the reopen about to
               // be sent is the one allowed to land on it.
@@ -1510,7 +1569,7 @@ export function useDaemon(
                   }),
                 ),
               );
-              setState((s) => ({ ...s, busy: true, loadingSession: true }));
+              setState((s) => ({ ...s, busy: true, loadingSession: true, restoreTarget: target, restoreError: undefined }));
             }
           }
           for (const provider of message.providers ?? []) {
@@ -1572,8 +1631,8 @@ export function useDaemon(
           const workspace: Workspace = {
             cwd: message.cwd,
             folder: message.folder ?? message.cwd,
-            repo: message.repo === true,
-            uncommitted: message.uncommitted ?? 0,
+            repo: typeof message.repo === "boolean" ? message.repo : undefined,
+            uncommitted: typeof message.uncommitted === "number" && Number.isFinite(message.uncommitted) && message.uncommitted >= 0 ? message.uncommitted : undefined,
           };
           setState((s) => ({ ...s, workspace }));
           return;
@@ -1628,9 +1687,18 @@ export function useDaemon(
           return;
         }
 
+        if (message.t === "error" && message.code === "resume_failed" && message.sessionId && message.sessionId !== sessionRef.current) return;
+
         // Read once, out here: an updater may run twice, and two different
         // clock readings would time the same turn differently on each pass.
         const now = Date.now();
+        if (batchable) {
+          const chunk = readChunk(message.payload);
+          if (chunk && !isEmptyChunk(chunk)) {
+            batch.push({ sessionId: message.sessionId, id: `${message.sessionId}:${message.seq}`, chunk, payload: message.payload, now });
+          }
+          return;
+        }
 
         setState((prev) => {
           switch (message.t) {
@@ -1786,6 +1854,8 @@ export function useDaemon(
               const receipt = mine ? summariseActivity(prev.activity, now) : undefined;
               return {
                 ...prev,
+                // A bounded transient notification queue, not transcript state.
+                completedTurns: completedTurn ? [...(prev.completedTurns ?? []), completedTurn].slice(-128) : prev.completedTurns,
                 busy: mine ? false : prev.busy,
                 // A turn cannot end while its agent is waiting to be let past a
                 // tool, so an approval still standing here died with the turn:
@@ -1921,6 +1991,10 @@ export function useDaemon(
                   : { ...prev, loadingProject: undefined };
               }
 
+              if (prev.restoreTarget && (prev.loadingSession || message.code === "resume_failed")) {
+                return { ...prev, busy: false, loadingSession: false, restoreError: message.message };
+              }
+
               // Agents usually stream a failure as message text and then reject
               // the turn, so the same sentence arrives twice. Promote the copy
               // already on screen instead of appending a second one: the user
@@ -1962,6 +2036,7 @@ export function useDaemon(
         // already open; without this guard it would mark us offline and open a
         // duplicate connection that keeps dispatching state updates.
         if (!alive.current || socket.current !== ws) return;
+        resetStream();
         // A refusal the daemon explained is not a blip. Retrying a rotated key
         // or a version mismatch every few seconds forever would never succeed,
         // would keep the radio awake, and would bury the explanation under a
@@ -2009,7 +2084,10 @@ export function useDaemon(
         clearTimeout(deadline);
         scheduleReconnect();
       };
-      ws.onerror = () => ws.close();
+      ws.onerror = () => {
+        resetStream();
+        ws.close();
+      };
     };
 
     connect();
@@ -2047,6 +2125,9 @@ export function useDaemon(
     };
 
     return () => {
+      resetStream();
+      batch.dispose();
+      streamBoundary.current = undefined;
       alive.current = false;
       resume.current = undefined;
       if (retry.current) clearTimeout(retry.current);
@@ -2080,6 +2161,7 @@ export function useDaemon(
    * fallback — it is the failure.
    */
   const post = useCallback((message: unknown) => {
+    streamBoundary.current?.();
     const ws = socket.current;
     const secure = channel.current;
     if (!ws || !secure || ws.readyState !== WebSocket.OPEN) return false;
@@ -2278,8 +2360,12 @@ export function useDaemon(
           if (!queue) return false;
           outbox.current = queue;
         }
+        restoring.current = undefined;
+        awaitingResume.current = false;
         setState((s) => ({
           ...s,
+          restoreTarget: undefined,
+          restoreError: undefined,
           busy: turn !== undefined && sent,
           loadingSession: false,
           turns: turn ? capTurns([...s.turns, turn]) : s.turns,
@@ -2338,6 +2424,7 @@ export function useDaemon(
       },
 
       cancel: () => {
+        streamBoundary.current?.();
         const sessionId = sessionRef.current;
         if (sessionId) {
           post({ t: "session.cancel", sessionId });
@@ -2389,6 +2476,7 @@ export function useDaemon(
 
       /** Change a model, thinking level or mode on the open session. */
       setConfig: (configId: string, value: string | boolean) => {
+        streamBoundary.current?.();
         const sessionId = sessionRef.current;
         const providerId = providerRef.current ?? targetProviderRef.current;
         // Chosen in a live conversation or in the empty state, this is now what
@@ -2417,7 +2505,10 @@ export function useDaemon(
 
       /** Reopen a past conversation from the sidebar. */
       openSession: (sessionId: string) => {
-        const session = sessionsRef.current.find((entry) => entry.id === sessionId);
+        streamBoundary.current?.();
+        const remembered = restoring.current?.id === sessionId ? restoring.current : undefined;
+        const session: Session | undefined = sessionsRef.current.find((entry) => entry.id === sessionId) ??
+          (remembered ? { ...remembered, startedAt: 0, turns: [], configOptions: [] } : undefined);
         if (!session) return;
 
         // A conversation from the agent's own history has no turns here yet:
@@ -2426,7 +2517,9 @@ export function useDaemon(
         //
         // A session this app started is shown from memory instead — unless the
         // daemon no longer holds it. See `needsResume`.
-        if (needsResume(session, liveSessions.current)) {
+        if (remembered || needsResume(session, liveSessions.current)) {
+          const target = restoreTarget(session);
+          restoring.current = target;
           sessionRef.current = undefined;
           // The row being reopened, even though it has no session id until the
           // daemon answers: this is the screen, and a `session.started` for
@@ -2461,6 +2554,8 @@ export function useDaemon(
             permission: undefined,
             busy: true,
             loadingSession: true,
+            restoreTarget: target,
+            restoreError: undefined,
             // Both describe the conversation being left.
             activity: IDLE_ACTIVITY,
             receipt: undefined,
@@ -2476,6 +2571,7 @@ export function useDaemon(
           return;
         }
 
+        restoring.current = undefined;
         // Fixture transcripts exist only on this device, so they must never
         // become the target of a prompt, cancel or config change: the daemon
         // has never heard of them and those messages would vanish silently.
@@ -2513,7 +2609,9 @@ export function useDaemon(
           // percentage beside this one's project.
           usage: undefined,
           workspaceNonce: s.workspaceNonce + 1,
-          turns: session.turns,
+          turns: s.sessions.find((row) => row.id === sessionId)?.turns ?? session.turns,
+          restoreTarget: undefined,
+          restoreError: undefined,
           configOptions: session.configOptions,
           // This conversation's own state, not a reset: it may still be
           // mid-turn on the desktop, and clearing the spinner here would show
@@ -2605,6 +2703,8 @@ export function useDaemon(
 
       /** Choose which agent the composer targets. Ends any open session. */
       select: (providerId: string) => {
+        streamBoundary.current?.();
+        restoring.current = undefined;
         sessionRef.current = undefined;
         viewingRef.current = undefined;
         // Choosing an agent ends the open session, so a reopen still in flight
@@ -2632,6 +2732,8 @@ export function useDaemon(
           commands: [],
           busy: false,
           loadingSession: false,
+          restoreTarget: undefined,
+          restoreError: undefined,
           activity: IDLE_ACTIVITY,
           receipt: undefined,
         }));
@@ -2657,6 +2759,8 @@ export function useDaemon(
       },
 
       leave: () => {
+        streamBoundary.current?.();
+        restoring.current = undefined;
         sessionRef.current = undefined;
         viewingRef.current = undefined;
         // Leaving is a decision about the screen, so a reopen still in flight
@@ -2684,6 +2788,8 @@ export function useDaemon(
           commands: [],
           busy: false,
           loadingSession: false,
+          restoreTarget: undefined,
+          restoreError: undefined,
           activity: IDLE_ACTIVITY,
           receipt: undefined,
         }));
@@ -2708,6 +2814,7 @@ export function useDaemon(
   useEffect(() => {
     if (!state.loadingSession) return;
     const timer = setTimeout(() => {
+      const failure = stalledLoading(localSeq.current++);
       setState((s) =>
         s.loadingSession
           ? {
@@ -2715,7 +2822,8 @@ export function useDaemon(
               loadingSession: false,
               busy: false,
               activity: IDLE_ACTIVITY,
-              turns: capTurns([...s.turns, stalledLoading(localSeq.current++)]),
+              restoreError: s.restoreTarget ? failure.text : undefined,
+              turns: s.restoreTarget ? s.turns : capTurns([...s.turns, failure]),
             }
           : s,
       );
@@ -2724,7 +2832,7 @@ export function useDaemon(
     // `sessionId` restarts the clock when one conversation is opened while
     // another is still loading: without it the second would inherit whatever
     // was left of the first one's budget and could fail in a second or two.
-  }, [state.loadingSession, state.sessionId]);
+  }, [state.loadingSession, state.sessionId, state.restoreTarget?.id]);
 
   // Which project the bar above the composer names.
   //
@@ -2816,6 +2924,7 @@ export function useDaemon(
     ...state,
     ...actions,
     resumeNow,
+    setForeground,
     // Exported so the UI names the same agent the composer targets: the drawer
     // and top bar must not show Claude Code while a prompt would go elsewhere.
     effectiveProviderId,

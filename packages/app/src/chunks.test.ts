@@ -1,5 +1,13 @@
 import { expect, test } from "bun:test";
-import { readChunk } from "./chunks";
+import { isEmptyTurn, readChunk } from "./chunks";
+import { applyChunk } from "./replayFold";
+import type { Turn } from "./useDaemon";
+
+test("thread visibility preserves image-only rows and drops true placeholders", () => {
+  expect(isEmptyTurn({ role: "agent", text: "", images: [{ src: "plot.png" }] })).toBe(false);
+  expect(isEmptyTurn({ role: "user", text: " ", images: [{ src: "photo.png" }] })).toBe(false);
+  expect(isEmptyTurn({ role: "agent", text: " \n", images: [] })).toBe(true);
+});
 
 test("replayed user messages map to user turns", () => {
   // Exactly what GG Coder sends during session/load. Unmapped, these were
@@ -96,6 +104,27 @@ test("an image generation tool's result reaches the transcript", () => {
     text: "",
     images: [{ src: "data:image/png;base64,AA", mimeType: "image/png" }],
   });
+});
+
+test.each([
+  ["screenshot", { type: "image", mimeType: "image/png", data: "AA" }, "data:image/png;base64,AA"],
+  ["generated image", { type: "resource_link", uri: ".gg/generated/result.png" }, ".gg/generated/result.png"],
+  ["image read", { type: "resource", resource: { uri: "file:///tmp/shot.jpg" } }, "file:///tmp/shot.jpg"],
+] as const)("%s tool results survive folding and row visibility without Markdown", (_name, content, src) => {
+  const turns: Turn[] = [];
+  for (const [index, sessionUpdate] of ["tool_call", "tool_call_update"].entries()) {
+    const chunk = readChunk({ update: {
+      sessionUpdate,
+      content: [{ type: "content", content }],
+    } });
+    expect(chunk).toBeDefined();
+    applyChunk(turns, `session:${index + 1}`, chunk!);
+  }
+  expect(turns).toHaveLength(1);
+  expect(turns[0]!.text).toBe("");
+  expect(turns[0]!.images).toHaveLength(1);
+  expect(turns[0]!.images![0]!.src).toBe(src);
+  expect(isEmptyTurn(turns[0]!)).toBe(false);
 });
 
 test("a tool call with no picture stays out of the conversation", () => {

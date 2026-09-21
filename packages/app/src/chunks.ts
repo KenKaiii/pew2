@@ -37,6 +37,11 @@ export function isEmptyChunk(chunk: Chunk | undefined): boolean {
   return !chunk || (!chunk.text && !chunk.images?.length);
 }
 
+/** Display-only guard. Unlike chunk acceptance, whitespace has no visible row. */
+export function isEmptyTurn(turn: Chunk): boolean {
+  return !turn.text.trim() && !turn.images?.length;
+}
+
 /** Concatenated text of a content field, which may be a block or an array. */
 function readText(content: any): string {
   if (Array.isArray(content)) {

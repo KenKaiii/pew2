@@ -66,6 +66,8 @@ interface ConfigPickerProps {
   onSelect: (configId: string, value: string | boolean) => void;
   /** Left edge of the pill this menu belongs to, so it opens under that pill. */
   anchorX?: number;
+  /** Screen-space top of a composer trigger; opens above it, clear of the keyboard. */
+  anchorY?: number;
 }
 
 function ConfigPickerView({
@@ -74,6 +76,7 @@ function ConfigPickerView({
   options,
   onSelect,
   anchorX,
+  anchorY,
 }: ConfigPickerProps) {
   const progress = useRef(new Animated.Value(0)).current;
   const reduceMotion = useReducedMotion();
@@ -85,6 +88,7 @@ function ConfigPickerView({
     viewportHeight: viewport.height,
     anchorX,
     menuTop,
+    menuBottom: anchorY === undefined ? undefined : anchorY - theme.space(1.5),
     insets,
     margin: theme.gutter,
     preferredWidth: PREFERRED_MENU_WIDTH,
@@ -152,6 +156,7 @@ function ConfigPickerView({
       <Animated.View
         style={[
           styles.card,
+          menuLayout.bottom !== undefined && { position: "absolute", bottom: menuLayout.bottom, left: menuLayout.left },
           {
             width: menuLayout.width,
             maxHeight: menuLayout.maxHeight,
@@ -181,6 +186,7 @@ function ConfigPickerView({
           style={styles.scroll}
           contentContainerStyle={styles.cardInner}
           showsVerticalScrollIndicator={false}
+          keyboardShouldPersistTaps="always"
         >
           {sorted.length === 0 && (
             <Text style={styles.empty}>

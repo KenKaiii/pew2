@@ -1,4 +1,6 @@
-import { createElement, memo, useMemo } from "react";
+import { createElement, memo, useMemo, useState } from "react";
+import { StreamingMarkdown } from "./StreamingMarkdown";
+import { useSmoothText } from "./useSmoothText";
 import * as Clipboard from "expo-clipboard";
 import * as WebBrowser from "expo-web-browser";
 import { Alert, Linking, Platform, StyleSheet, Text, View } from "react-native";
@@ -106,7 +108,7 @@ const renderImage: RenderFunction = (node) => {
   return <ChatImage key={node.key} image={{ src, alt: alt || undefined }} />;
 };
 
-const markdownRules: Partial<RenderRules> = {
+export const markdownRules: Partial<RenderRules> = {
   // Every inline run that is *not* a paragraph — a heading, a list item, a table
   // cell — bottoms out here, and this is the outermost Text of those blocks.
   //
@@ -309,7 +311,7 @@ function stylesFor(
 
 // Kept outside render: the markdown renderer memoises its AST renderer by the
 // identity of these objects while streamed chunks update only the source text.
-const markdownStyles: Record<MarkdownTone, Partial<MarkdownStyles>> = {
+export const markdownStyles: Record<MarkdownTone, Partial<MarkdownStyles>> = {
   body: stylesFor(theme.color.text, theme.font.body, theme.line.body),
   thought: stylesFor(theme.color.textDim, theme.font.small, 20),
   system: stylesFor(theme.color.danger, theme.font.small, 20),
@@ -334,7 +336,7 @@ const markdownStyles: Record<MarkdownTone, Partial<MarkdownStyles>> = {
  * unopenable. The alert carries the URL and offers the clipboard, so a link to
  * an app this phone does not have is still a link the user can use.
  */
-function openLink(url: string): void {
+export function openLink(url: string): void {
   void (async () => {
     const target = linkTarget(url);
     try {
@@ -377,10 +379,15 @@ function openLink(url: string): void {
 const MarkdownBlock = memo(function MarkdownBlock({
   source,
   tone,
+  live = false,
+  animate = false,
 }: {
   source: string;
   tone: MarkdownTone;
+  live?: boolean;
+  animate?: boolean;
 }) {
+  if (live) return <StreamingMarkdown source={source} animate={animate} rules={markdownRules as RenderRules} style={markdownStyles[tone]} onLinkPress={openLink} />;
   return (
     <Markdown
       rules={markdownRules as RenderRules}
@@ -395,14 +402,21 @@ const MarkdownBlock = memo(function MarkdownBlock({
   );
 });
 
-function MarkdownTextView({ text, tone = "body" }: { text: string; tone?: MarkdownTone }) {
+function GrowingMarkdownTextView({ text, tone = "body", liveIdentity }: { text: string; tone?: MarkdownTone; liveIdentity?: string }) {
+  const [touchedIdentity, setTouchedIdentity] = useState<string>();
+  const completeBlocks = useMemo(() => splitMarkdownBlocks(text), [text]);
+  // A code-bearing block stays authoritative: never turn half of an inline
+  // code token into fading prose, or pace characters inside a fenced block.
+  const hasCode = /`|^\s*~{3,}/m.test(completeBlocks.at(-1) ?? "");
+  const live = tone === "body" && liveIdentity !== undefined && touchedIdentity !== liveIdentity && !hasCode;
+  const smooth = useSmoothText(text, liveIdentity ?? "history", live);
   // Splitting is a parse, so it is memoised too — but it is only the block
   // tokeniser, not the inline pass or the element tree, and it is the one piece
   // of work that unavoidably sees the whole message.
-  const blocks = useMemo(() => splitMarkdownBlocks(text), [text]);
+  const blocks = useMemo(() => splitMarkdownBlocks(smooth.text), [smooth.text]);
 
   return (
-    <View style={blockLayout.root}>
+    <View style={blockLayout.root} accessibilityLiveRegion="none" onTouchStart={() => { if (liveIdentity) setTouchedIdentity(liveIdentity); }}>
       {blocks.map((source, index) => (
         <MarkdownBlock
           // Index, deliberately. Blocks are an ordered decomposition of one
@@ -415,6 +429,8 @@ function MarkdownTextView({ text, tone = "body" }: { text: string; tone?: Markdo
           key={index}
           source={source}
           tone={tone}
+          live={live && index === blocks.length - 1}
+          animate={live && index === blocks.length - 1 && smooth.animating}
         />
       ))}
     </View>
@@ -438,4 +454,13 @@ const blockLayout = StyleSheet.create({
  * Memoised at the message level as well, so a turn that is merely re-rendered
  * — a sibling streaming, the keyboard opening — does no markdown work at all.
  */
+function SettledMarkdownText({ text, tone }: { text: string; tone: MarkdownTone }) {
+  const blocks = useMemo(() => splitMarkdownBlocks(text), [text]);
+  return <View style={blockLayout.root}>{blocks.map((source, index) => <MarkdownBlock key={index} source={source} tone={tone} />)}</View>;
+}
+function MarkdownTextView(props: { text: string; tone?: MarkdownTone; liveIdentity?: string }) {
+  return props.liveIdentity && (props.tone ?? "body") === "body"
+    ? <GrowingMarkdownTextView key={props.liveIdentity} {...props} />
+    : <SettledMarkdownText text={props.text} tone={props.tone ?? "body"} />;
+}
 export const MarkdownText = memo(MarkdownTextView);

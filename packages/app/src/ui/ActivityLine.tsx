@@ -14,29 +14,14 @@
  */
 import { memo, useEffect, useRef } from "react";
 import { Animated, StyleSheet, Text, View } from "react-native";
-import Ionicons from "@expo/vector-icons/Ionicons";
 import { theme } from "../theme";
-import { currentTool, queuedTools, type Activity, type ToolKind } from "../activity";
+import { currentTool, queuedTools, type Activity } from "../activity";
 import { ShimmerText } from "./ShimmerText";
+import { ThinkingOrb } from "./ThinkingOrb";
+import { activityOrbState } from "../activityOrb";
 import { useReducedMotion } from "./useReducedMotion";
 import { STATUS_ROW_MAX_FONT_SCALE } from "./statusRow";
 import { useStatusRowHeight } from "./useStatusRowHeight";
-
-/**
- * One glyph per ACP tool kind, so a glance at the icon says what class of work
- * is happening even before the title is read.
- */
-const ICONS: Record<ToolKind, keyof typeof Ionicons.glyphMap> = {
-  read: "document-text-outline",
-  edit: "create-outline",
-  delete: "trash-outline",
-  move: "arrow-forward-outline",
-  search: "search-outline",
-  execute: "terminal-outline",
-  think: "bulb-outline",
-  fetch: "cloud-download-outline",
-  other: "ellipsis-horizontal",
-};
 
 /** Continuous, and slower than the composer's badge: this runs for minutes. */
 const SWEEP_DURATION = 2200;
@@ -59,19 +44,25 @@ function ActivityLineView({ activity }: { activity: Activity }) {
   // the sheen mid-sweep and read as a stutter.
   const shown = useRef<string | undefined>(tool?.id);
   useEffect(() => {
+    if (reduceMotion) {
+      fade.stopAnimation();
+      fade.setValue(1);
+      shown.current = tool?.id;
+      return;
+    }
     if (tool?.id === shown.current) return;
     shown.current = tool?.id;
-    if (reduceMotion) return;
     fade.setValue(SWAP_FROM);
     Animated.timing(fade, {
       toValue: 1,
       duration: SWAP_DURATION,
       useNativeDriver: true,
     }).start();
+    return () => fade.stopAnimation();
   }, [fade, reduceMotion, tool?.id]);
 
   const title = tool?.title?.trim() || "Working";
-  const kind = tool?.kind ?? "other";
+  const orbState = activityOrbState(activity);
 
   return (
     <Animated.View
@@ -82,7 +73,7 @@ function ActivityLineView({ activity }: { activity: Activity }) {
       accessibilityLiveRegion="polite"
       accessibilityLabel={queued > 0 ? `${title}, and ${queued} more` : title}
     >
-      <Ionicons name={ICONS[kind]} size={13} color={theme.color.textFaint} style={styles.icon} />
+      <ThinkingOrb state={orbState} />
       <View style={styles.label}>
         <ShimmerText
           text={title}
@@ -118,8 +109,6 @@ const styles = StyleSheet.create({
     marginTop: theme.space(5),
     paddingHorizontal: theme.gutter,
   },
-  // Optical centring: the outline glyphs sit a hair high against lowercase text.
-  icon: { marginTop: 1 },
   // Shrinks so a long tool title truncates instead of pushing the count off the
   // edge of the screen.
   label: { flexShrink: 1 },

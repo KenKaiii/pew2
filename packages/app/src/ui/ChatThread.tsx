@@ -20,7 +20,6 @@ import {
   useRef,
 } from "react";
 import {
-  Animated,
   Keyboard,
   StyleSheet,
   View,
@@ -32,17 +31,20 @@ import { theme } from "../theme";
 import { Turn } from "./Turn";
 import { ActivityLine } from "./ActivityLine";
 import { TurnReceipt } from "./TurnReceipt";
-import { useReducedMotion } from "./useReducedMotion";
-import { useAppActive } from "./useAppActive";
+import { ConversationRestore, type ConversationRestoreProps } from "./ConversationRestore";
 import { useStatusRowHeight } from "./useStatusRowHeight";
-import { currentTool, type Activity, type TurnReceipt as Receipt } from "../activity";
+import { type Activity, type TurnReceipt as Receipt } from "../activity";
 import { retryTarget } from "../retryPrompt";
 import type { Turn as TurnData } from "../useDaemon";
+import { isEmptyTurn } from "../chunks";
+import { streamIdentityKey, type LiveStreamIdentity } from "../smoothText";
 
 export type ChatThreadRef = FlashListRef<TurnData>;
 
 type Props = {
   turns: TurnData[];
+  activeStream?: LiveStreamIdentity;
+  restore?: ConversationRestoreProps;
   /** Clearance under the floating nav, before the first message. */
   threadTop: number;
   /** Clearance above the composer dock, after the last message. */
@@ -69,6 +71,8 @@ type Props = {
 function ChatThreadView(
   {
     turns,
+    activeStream,
+    restore,
     threadTop,
     threadBottom,
     working,
@@ -98,7 +102,7 @@ function ChatThreadView(
       // An agent turn is committed empty and filled by later chunks. Rendering
       // its cell would reserve the gap below the reply before there is anything
       // in it, which the reader sees as the thread twitching.
-      if (!item.text.trim()) return null;
+      if (isEmptyTurn(item)) return null;
       // Spacing and the side rails live on the cell: cells are positioned
       // individually, so a container `gap` would never apply, and horizontal
       // padding on the scroll content is not part of the list's layout math.
@@ -106,6 +110,7 @@ function ChatThreadView(
         <View style={index === 0 ? styles.firstRow : styles.row}>
           <Turn
             turn={item}
+            liveIdentity={activeStream?.turnKey === keyExtractor(item) && item.role === "agent" ? streamIdentityKey(activeStream) : undefined}
             onOpenThought={onOpenThought}
             retryPrompt={keyExtractor(item) === retryKey ? retryPrompt : undefined}
             onRetry={onRetry}
@@ -113,7 +118,7 @@ function ChatThreadView(
         </View>
       );
     },
-    [onOpenThought, onRetry, retryKey, retryPrompt],
+    [onOpenThought, onRetry, retryKey, retryPrompt, activeStream],
   );
 
   // Mirrored into a ref so the inset effect below can read "is the reader at the
@@ -188,7 +193,7 @@ function ChatThreadView(
   // changing tool re-renders the same footer instead of remounting it — which
   // would restart the sheen mid-sweep and lose the crossfade between tools.
   const footer = useMemo(() => {
-    if (working) return currentTool(activity) ? <ActivityLine activity={activity} /> : <Working />;
+    if (working) return <ActivityLine activity={activity} />;
     // Never absent: the footer's own style carries the bottom reading inset, and
     // FlashList only lays that out around a footer that exists.
     return receipt ? <TurnReceipt receipt={receipt} /> : <SpacerOnly />;
@@ -244,7 +249,8 @@ function ChatThreadView(
       // Follow an append only while the reader is near the end. Someone reading
       // history keeps their place while the reply streams on below.
       maintainVisibleContentPosition={MAINTAIN_POSITION}
-      ListHeaderComponent={SpacerOnly}
+      ListHeaderComponent={restore?.state === "failed" && turns.length > 0 ? <ConversationRestore {...restore} /> : SpacerOnly}
+      ListEmptyComponent={restore ? <ConversationRestore {...restore} /> : null}
       ListHeaderComponentStyle={headerStyle}
       // A footer is always mounted, so the bottom inset survives the agent going
       // idle and the indicator never changes the transcript's resting position —
@@ -341,12 +347,12 @@ const getItemType = (turn: TurnData) => turn.role;
 /**
  * The idle footer: nothing to see, but exactly as tall as the busy one.
  *
- * `Working`, `ActivityLine` and `TurnReceipt` all occupy one body line plus the
+ * `ActivityLine` and `TurnReceipt` occupy one body line plus the
  * gap above it. This rendered nothing, so the moment an agent started thinking
  * the transcript jumped by that height — visible on every first prompt as the
  * message sliding upward just before the reply began.
  *
- * All four read that line from `useStatusRowHeight`, because at a large Dynamic
+ * All three read that line from `useStatusRowHeight`, because at a large Dynamic
  * Type setting a body line is not `theme.line.body` — see `statusRow.ts`.
  *
  * Only the first turn showed it: after that the list is long enough to be
@@ -357,69 +363,12 @@ const SpacerOnly = () => (
   <View style={[styles.footerSpacer, { height: useStatusRowHeight() }]} />
 );
 
-/** Three dots that fade in sequence. Calm, and it costs no layout. */
-function Working() {
-  const one = useRef(new Animated.Value(0.25)).current;
-  const two = useRef(new Animated.Value(0.25)).current;
-  const three = useRef(new Animated.Value(0.25)).current;
-  const reduceMotion = useReducedMotion();
-  const appActive = useAppActive();
-  const height = useStatusRowHeight();
-
-  // Stopped while backgrounded. Three native-driven loops that run for exactly
-  // as long as an agent is thinking — which is when someone is most likely to
-  // have switched away and left them turning.
-  useEffect(() => {
-    if (reduceMotion || !appActive) return;
-    const dots = [one, two, three];
-    const loops = dots.map((dot, index) =>
-      Animated.loop(
-        Animated.sequence([
-          Animated.delay(index * 160),
-          Animated.timing(dot, { toValue: 1, duration: 320, useNativeDriver: true }),
-          Animated.timing(dot, { toValue: 0.25, duration: 320, useNativeDriver: true }),
-          Animated.delay((2 - index) * 160),
-        ]),
-      ),
-    );
-    loops.forEach((loop) => loop.start());
-    return () => loops.forEach((loop) => loop.stop());
-  }, [reduceMotion, appActive, one, two, three]);
-
-  return (
-    // `accessible` groups the dots into one node; without it the label is
-    // attached to a container VoiceOver never focuses.
-    <View style={[styles.workingRow, { height }]} accessible accessibilityLabel="Agent is working">
-      <Animated.View style={[styles.dot, { opacity: one }]} />
-      <Animated.View style={[styles.dot, { opacity: two }]} />
-      <Animated.View style={[styles.dot, { opacity: three }]} />
-    </View>
-  );
-}
-
 const styles = StyleSheet.create({
   row: { paddingTop: theme.space(5), paddingHorizontal: theme.gutter },
   firstRow: { paddingTop: 0, paddingHorizontal: theme.gutter },
-  // Sits on the same left rail as the agent text that replaces it, so the reply
-  // does not jump horizontally when streaming begins.
-  workingRow: {
-    flexDirection: "row",
-    gap: theme.space(1.5),
-    alignItems: "center",
-    marginTop: theme.space(5),
-    paddingHorizontal: theme.gutter,
-  },
-  // Mirrors `workingRow` exactly, height included — that one comes from
-  // `useStatusRowHeight` at both call sites. If one changes, so must the other,
-  // or the transcript will shift the moment an agent starts working.
+  // Same reserved height and top gap as ActivityLine and TurnReceipt.
   footerSpacer: {
     marginTop: theme.space(5),
-  },
-  dot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: theme.color.textDim,
   },
 });
 

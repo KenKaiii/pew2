@@ -20,6 +20,7 @@ import { CommandToken } from "./CommandToken";
 import { ACTION_INSET, ACTION_SIZE, CopyButton } from "./CopyButton";
 import { messageCopyIsDuplicate } from "./messageActions";
 import { splitCommand } from "../slashCommands";
+import { isEmptyTurn } from "../chunks";
 import { touchSlop } from "./controls";
 import { haptics } from "./haptics";
 import {
@@ -41,6 +42,7 @@ const RETRY_SIZE = ACTION_SIZE + theme.space(1.5);
 
 interface TurnProps {
   turn: TurnModel;
+  liveIdentity?: string;
   /** Opens this turn's reasoning in the thought sheet. */
   onOpenThought?: (text: string) => void;
   /**
@@ -85,11 +87,11 @@ interface TurnProps {
  * paragraph of it. That is what the Copy button under an agent turn is for —
  * a button, not a hold, so it takes nothing away from the gesture above it.
  */
-function TurnView({ turn, onOpenThought, retryPrompt, onRetry }: TurnProps) {
+function TurnView({ turn, onOpenThought, retryPrompt, onRetry, liveIdentity }: TurnProps) {
   const images = turn.images ?? [];
   // A turn with pictures and no words is normal: an image generation tool's
   // result arrives as content alone. Only a turn with neither renders nothing.
-  if (!turn.text.trim() && images.length === 0) return null;
+  if (isEmptyTurn(turn)) return null;
   // Preserve leading indentation: CommonMark uses it for indented code blocks.
   const text = turn.text.trimEnd();
   const hasText = text.trim().length > 0;
@@ -205,7 +207,7 @@ function TurnView({ turn, onOpenThought, retryPrompt, onRetry }: TurnProps) {
 
   return (
     <View style={styles.agentRow}>
-      {hasText && <MarkdownText text={text} />}
+      {hasText && <MarkdownText text={text} liveIdentity={liveIdentity} />}
       <ChatImages images={images} />
       {/* A row rather than a lone button, because that is the shape this ends
           up as: one small faint glyph per thing you can do with a reply, on the

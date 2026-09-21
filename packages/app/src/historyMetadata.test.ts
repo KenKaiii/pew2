@@ -1,6 +1,33 @@
 import { expect, test } from "bun:test";
 import { replaceAgentSessionStub } from "./agentHistory";
-import { formatHistoryMetadata } from "./historyMetadata";
+import { formatHistoryMetadata, projectDrawerRows } from "./historyMetadata";
+
+const row: Session = { id: "a", providerId: "gg", title: "Title", startedAt: 1, turns: [{ id: "a:1", role: "agent", text: "hello" }], configOptions: [] };
+test("drawer projection retains array and row identity during text-only growth", () => {
+  const before = projectDrawerRows([], [row]);
+  const after = projectDrawerRows(before, [{ ...row, turns: [{ ...row.turns[0]!, text: "hello world" }] }]);
+  expect(after).toBe(before);
+  expect(after[0]).toBe(before[0]);
+  expect("turns" in after[0]!).toBe(false);
+});
+test("drawer preserves legitimate count changes and eviction", () => {
+  const before = projectDrawerRows([], [row]);
+  const after = projectDrawerRows(before, [{ ...row, turns: [...row.turns, { id: "a:2", role: "user", text: "next" }] }]);
+  expect(after[0]).not.toBe(before[0]);
+  expect(after[0]!.messageCount).toBe(2);
+  expect(projectDrawerRows(after, [])).toEqual([]);
+});
+test("every displayed field invalidates the projection; unrelated config does not", () => {
+  const before = projectDrawerRows([], [row]);
+  const changes: Partial<Session>[] = [
+    { id: "b" }, { providerId: "other" }, { title: "new" }, { startedAt: 2 },
+    { cwd: "/repo" }, { folder: "repo" }, { busy: true }, { unread: true },
+    { permission: { requestId: "p", options: [], title: "Approve" } },
+  ];
+  for (const change of changes) expect(projectDrawerRows(before, [{ ...row, ...change }])[0]).not.toBe(before[0]);
+  expect(projectDrawerRows(before, [{ ...row, configOptions: [] }])).toBe(before);
+  expect(projectDrawerRows([], [{ ...row, turns: [], messageCount: 7 }])[0]!.messageCount).toBe(7);
+});
 import type { Session } from "./useDaemon";
 
 test("resumed history renders message count and retained working directory", () => {

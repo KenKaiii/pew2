@@ -158,6 +158,7 @@ function Screen() {
         typing={typing}
         showCommands={false}
         onCommands={noop}
+        onProjectDetails={noop}
         onSend={send}
         editable
         placeholder="Type here and watch the counter"
