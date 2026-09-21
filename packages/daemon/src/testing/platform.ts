@@ -12,7 +12,8 @@
  * says "something runnable lives here", not "a file with mode 0755", so it
  * stays true on a platform where the second sentence is meaningless.
  */
-import { execFileSync, execSync } from "node:child_process";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -79,37 +80,29 @@ export const POSIX_PATHS = !WINDOWS;
  * on the one platform CI had just started covering. PowerShell's process table
  * is the equivalent that exists there.
  *
- * Returns 0 rather than throwing when the process table cannot be read: a
- * failure to count is not evidence of a leak, and turning it into a red test
- * would make this a source of noise instead of signal.
+ * The query must yield: a synchronous PowerShell scan blocks the termination
+ * timers this test is waiting for. An unreadable table is an error, not proof
+ * that no children remain. Filter in JS so the marker never appears in the
+ * query process's own argv, and is never interpreted as shell syntax.
  */
-export function countProcessesMatching(marker: string): number {
-  try {
-    if (WINDOWS) {
-      // Split so the whole marker never appears in PowerShell's own command
-      // line - otherwise the query process matches itself and the count is
-      // never zero. Exactly what the bracket does for grep below; without it
-      // the check failed before the child under test had even been spawned.
-      const head = marker.slice(0, 1);
-      const tail = marker.slice(1);
-      const script =
-        `$m = '${head}' + '${tail}'; ` +
-        "@(Get-CimInstance Win32_Process | " +
-        "Where-Object { $_.CommandLine -like \"*$m*\" }).Count";
-      const out = execFileSync(
-        "powershell",
-        ["-NoProfile", "-NonInteractive", "-Command", script],
-        { encoding: "utf8" },
-      );
-      return Number(out.trim()) || 0;
-    }
-    // The bracket keeps grep from matching its own command line.
-    const out = execSync(`ps -A -o command= | grep -c '[${marker[0]}]${marker.slice(1)}'`, {
-      encoding: "utf8",
-    });
-    return Number(out.trim()) || 0;
-  } catch {
-    // grep exits 1 when nothing matches, which is the answer rather than a fault.
-    return 0;
-  }
+export async function countProcessesMatching(
+  marker: string,
+  readTable: () => Promise<string> = readProcessTable,
+): Promise<number> {
+  const table = await readTable();
+  return table.split(/\r?\n/).filter((line) => line.includes(marker)).length;
+}
+
+const execFileAsync = promisify(execFile);
+async function readProcessTable(): Promise<string> {
+  const { stdout } = WINDOWS
+    ? await execFileAsync("powershell", [
+        "-NoProfile", "-NonInteractive", "-Command",
+        "$ErrorActionPreference = 'Stop'; Get-CimInstance Win32_Process | " +
+        "ForEach-Object { $_.CommandLine -replace '[\\r\\n]', ' ' }",
+      ], { encoding: "utf8", timeout: 20_000, maxBuffer: 8 * 1024 * 1024 })
+    : await execFileAsync("ps", ["-A", "-o", "command="], {
+        encoding: "utf8", timeout: 20_000, maxBuffer: 8 * 1024 * 1024,
+      });
+  return stdout;
 }

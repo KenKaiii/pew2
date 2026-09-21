@@ -50,7 +50,7 @@ const liveChildren = () => countProcessesMatching(MARK);
 async function settle(deadlineMs = 15_000): Promise<number> {
   const until = Date.now() + deadlineMs;
   for (;;) {
-    const alive = liveChildren();
+    const alive = await liveChildren();
     if (alive === 0 || Date.now() > until) return alive;
     await new Promise((r) => setTimeout(r, 250));
   }
@@ -106,7 +106,7 @@ function provider(script: string): LoadedProvider {
 
 test("an agent that never answers the handshake is killed, not abandoned", async () => {
   const script = await stallingAgent("handshake");
-  expect(liveChildren()).toBe(0);
+  expect(await liveChildren()).toBe(0);
 
   const report = await verifyProvider(provider(script), { timeoutMs: 2000 });
   expect(report.status).toBe("failed");
@@ -114,10 +114,10 @@ test("an agent that never answers the handshake is killed, not abandoned", async
   // Generous, because killing is asynchronous — but bounded, because "it exits
   // eventually" is exactly what was untrue before.
   expect(await settle()).toBe(0);
-  // 30s, because Bun's 5s default is not a budget anyone chose: a cold spawn on
-  // a Windows runner plus the deliberate 2s stall and the kill wait runs past
-  // it, and a timeout here would read as a leak rather than a slow machine.
-}, 30_000);
+  // The cleanup deadline stays 15s. Leave room around it for two process-table
+  // queries (each bounded at 20s), plus the deliberate 2s agent timeout. Cold
+  // PowerShell scans on CI took ~16s each before any cleanup could be measured.
+}, 60_000);
 
 test("an agent that stalls after the handshake is killed too", async () => {
   // The ordinary not-signed-in shape: the agent comes up fine and then never
@@ -135,13 +135,13 @@ test("an agent that stalls after the handshake is killed too", async () => {
   // Whichever of the two fires, the rule holds and is the thing worth pinning:
   // when verification returns, nothing it started is still running.
   const script = await stallingAgent("session");
-  expect(liveChildren()).toBe(0);
+  expect(await liveChildren()).toBe(0);
 
   const report = await verifyProvider(provider(script), { timeoutMs: 2000 });
   expect(report.status).toBe("failed");
 
   expect(await settle()).toBe(0);
-  // 30s, because Bun's 5s default is not a budget anyone chose: a cold spawn on
-  // a Windows runner plus the deliberate 2s stall and the kill wait runs past
-  // it, and a timeout here would read as a leak rather than a slow machine.
-}, 30_000);
+  // The cleanup deadline stays 15s. Leave room around it for two process-table
+  // queries (each bounded at 20s), plus the deliberate 2s agent timeout. Cold
+  // PowerShell scans on CI took ~16s each before any cleanup could be measured.
+}, 60_000);
