@@ -93,6 +93,16 @@ function state(sessionId = "a") {
   const row: Session = { id: "a", providerId: "gg", title: "New conversation", startedAt: 1, turns: [], configOptions: [] };
   return { sessionId, turns: [] as Turn[], sessions: [row], activity: IDLE_ACTIVITY, busy: false, activeStream: undefined as LiveStreamIdentity | undefined };
 }
+test("queued follow-ups do not end the active response's streaming identity", () => {
+  const current = foldStreamBatch(state(), [event("First")], 4);
+  const queued: Turn = { id: "queued", key: "queued", role: "user", text: "Next", queued: true, queuedForTurn: true };
+  const cancelled: Turn = { id: "cancelled", role: "user", text: "Not sent", cancelled: true };
+  const next = foldStreamBatch({ ...current, turns: [...current.turns, queued, cancelled] }, [event(" more", 2)], 4);
+  expect(next.turns.map((turn) => turn.text)).toEqual(["First more", "Next", "Not sent"]);
+  expect(next.activeStream).toEqual(current.activeStream);
+  expect(next.sessions[0]?.turns).toEqual(next.turns);
+});
+
 test("fold preserves chunk seams, latest state and updater replay without mutation", () => {
   const original = state();
   const chunks = [event("First."), event("Second", 2), event(" word", 3)];

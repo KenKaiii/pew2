@@ -109,7 +109,8 @@ export function foldStreamBatch<S extends StreamState>(state: S, events: readonl
   }
   const capped = capTurns(turns);
   const sessions = state.sessions.map((row) => row.id === first.sessionId ? { ...row, turns: capped } : row);
-  const last = capped.at(-1);
+  // Local follow-ups sit below the response but are not part of its stream.
+  const last = capped.findLast((turn) => !turn.queued && !turn.cancelled);
   const activeStream = last?.role === "agent"
     ? { sessionId: first.sessionId, turnKey: last.key ?? last.id, generation }
     : undefined;

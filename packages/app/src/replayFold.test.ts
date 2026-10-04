@@ -5,9 +5,37 @@ import {
   foldCatchUp,
   foldSessionEvents,
   isOptimistic,
+  applyChunk,
+  withError,
 } from "./replayFold";
 import { currentTool, IDLE_ACTIVITY } from "./activity";
 import type { PermissionRequest, Session, Turn } from "./useDaemon";
+
+test("a terminal failure and later output stay before unsent follow-ups", () => {
+  const queued: Turn = { id: "local:next", role: "user", text: "Next", queued: true, queuedForTurn: true };
+  const cancelled: Turn = { id: "local:cancelled", role: "user", text: "Keep me", cancelled: true };
+  const turns: Turn[] = [{ id: "s1:0", role: "user", text: "First" }, queued, cancelled];
+  const failed = withError(turns, "err-1", "Agent failed");
+  expect(failed.map((turn) => turn.id)).toEqual(["s1:0", "err-1", "local:next", "local:cancelled"]);
+  applyChunk(failed, "s1:2", { role: "agent", text: "Closing output" });
+  expect(failed.map((turn) => turn.id)).toEqual(["s1:0", "err-1", "s1:2", "local:next", "local:cancelled"]);
+  expect(failed.slice(-2)).toEqual([queued, cancelled]);
+  expect(turns).toHaveLength(3);
+});
+
+test("a repeated failure is promoted before the queue, not shown twice", () => {
+  const queued: Turn = { id: "local:next", role: "user", text: "Agent failed", queued: true };
+  const failed = withError([
+    { id: "s1:0", role: "user", text: "First" },
+    { id: "s1:1", role: "agent", text: "Agent failed" },
+    queued,
+  ], "err-1", "Agent failed");
+  expect(failed).toEqual([
+    { id: "s1:0", role: "user", text: "First" },
+    { id: "s1:1", role: "system", text: "Agent failed" },
+    queued,
+  ]);
+});
 
 const user = (seq: number, text: string) => ({
   sessionId: "s1",
@@ -122,6 +150,32 @@ test("a queued prompt stops saying so once the daemon echoes it back", () => {
   const next = foldSessionEvents(state([waiting], [sessionStub]), [user(0, "Hello")]);
 
   expect(next.turns[0]?.queued).toBeUndefined();
+});
+
+test("streaming continues before queued follow-ups without splitting the reply", () => {
+  const queued: Turn = { id: "local:q", role: "user", text: "Then add tests", queued: true };
+  const turns: Turn[] = [{ id: "s1:1", role: "agent", text: "Working " }, queued];
+  const next = foldSessionEvents(state(turns, [sessionStub]), [agent(2, "on it"), agent(3, " now")]);
+  expect(next.turns).toEqual([
+    { id: "s1:1", role: "agent", text: "Working on it now" },
+    queued,
+  ]);
+});
+
+test("an earlier echo does not consume an identical follow-up waiting for its turn", () => {
+  const queued: Turn = { id: "local:q", key: "local:q", role: "user", text: "Again", queued: true, queuedForTurn: true };
+  const next = foldSessionEvents(state([queued], [sessionStub]), [user(0, "Again")]);
+  expect(next.turns).toEqual([{ id: "s1:0", role: "user", text: "Again" }, queued]);
+});
+
+test("cancelled messages remain copyable but never absorb a matching live echo", () => {
+  const cancelled: Turn = { id: "local:q", role: "user", text: "Again", cancelled: true };
+  const next = foldSessionEvents(state([cancelled], [sessionStub]), [user(0, "Again"), agent(1, "Done")]);
+  expect(next.turns).toEqual([
+    { id: "s1:0", role: "user", text: "Again" },
+    { id: "s1:1", role: "agent", text: "Done" },
+    cancelled,
+  ]);
 });
 
 test("a replay is history: it never marks the session busy", () => {

@@ -25,6 +25,8 @@ import {
 } from "./pendingSession";
 import {
   enqueue,
+  cancelQueued,
+  markCancelled,
   markSent,
   partitionOutbox,
   pendingStartFor,
@@ -33,6 +35,7 @@ import {
   type OutboxEntry,
 } from "./outbox";
 import { rememberConfigs, visibleConfigs, withChoice } from "./configTruth";
+import { PromptGate } from "./promptGate";
 import {
   beginActivity,
   foldActivity,
@@ -43,7 +46,6 @@ import {
   type TurnReceipt,
 } from "./activity";
 import { advance, alreadySeen, type Cursors } from "./cursors";
-import { findDuplicateError } from "./errorDedup";
 import { isEmptyChunk, readChunk } from "./chunks";
 import type { ChatImage } from "./images";
 import { emptyImageCache, putImage, type ImageCache } from "./imageCache";
@@ -74,6 +76,7 @@ import {
   foldCatchUp,
   foldSessionEvents,
   isOptimistic,
+  withError,
   type ReplayEvent,
 } from "./replayFold";
 import { readPermissionRequest } from "./permissions";
@@ -135,6 +138,10 @@ export interface Turn {
    * bubble can never keep the label after the agent has the message.
    */
   queued?: boolean;
+  /** Not yet sent: an earlier turn's matching echo must not claim this message. */
+  queuedForTurn?: boolean;
+  /** An unsent follow-up cancelled by the user; retained so its content is not lost. */
+  cancelled?: boolean;
 }
 
 /**
@@ -678,7 +685,8 @@ export function useDaemon(
   // not touch state, and it is deliberately not persisted — it holds attachment
   // bytes, and a queue that survives a force-quit would deliver a message the
   // user has long stopped expecting to send.
-  const outbox = useRef<OutboxEntry[]>([]);
+  const outbox = useRef<readonly OutboxEntry[]>([]);
+  const promptGate = useRef(new PromptGate());
   // The `session.start` this client is waiting on, if any. Held outside state
   // because the message handler must read it without a render having happened,
   // and matched against the `requestId` echoed back so the answer adopts the
@@ -957,7 +965,7 @@ export function useDaemon(
           }
           // A conversation with no id yet is early rather than undeliverable:
           // `session.started` re-addresses this entry the moment it is named.
-          if (isPendingSession(entry.sessionId)) return false;
+          if (isPendingSession(entry.sessionId) || !promptGate.current.canSend(entry.sessionId)) return false;
           // An undefined `activeSessions` is an older daemon saying nothing,
           // which `needsResume` reads as live.
           if (liveSessions.current === undefined || liveSessions.current.has(entry.sessionId))
@@ -1012,7 +1020,10 @@ export function useDaemon(
           // A request alone marks nothing: the conversation is not working
           // until the message it was started for has actually gone, which is a
           // separate entry addressed to it.
-          if (entry.kind === "prompt") sent.add(entry.turnKey);
+          if (entry.kind === "prompt") {
+            promptGate.current.started(entry.sessionId);
+            sent.add(entry.turnKey);
+          }
         }
         if (sent.size === 0) return;
 
@@ -1048,6 +1059,9 @@ export function useDaemon(
       ws.onopen = () => {
         clearTimeout(deadline);
         attempts.current = 0;
+        // Do not flush prompts on `providers` until catch-up tells us whether
+        // each existing chat is still working or awaiting an approval.
+        promptGate.current.reconnect(Object.keys(cursors.current));
         // A request written to the socket that died is never answered, and its
         // entry would hold the drawer in a skeleton forever. Dropping them here
         // also lets the open project be asked for again.
@@ -1162,6 +1176,9 @@ export function useDaemon(
         // loading; each batch is still folded in one state update, avoiding the
         // quadratic event-by-event array copies that caused multi-second stalls.
         if (message.t === "session.replay" && Array.isArray(message.events)) {
+          if (message.catchUp === true) {
+            promptGate.current.catchUp(message.sessionId, message.working, message.permissions);
+          }
           if (message.sessionId !== sessionRef.current) {
             // Another conversation's missed events, folded into the transcript
             // that conversation carries. Not rendered now — the user is reading
@@ -1192,6 +1209,7 @@ export function useDaemon(
                   message.permissions,
                 ),
               );
+              flushOutbox();
             }
             return;
           }
@@ -1271,6 +1289,7 @@ export function useDaemon(
               ),
             };
           });
+          if (message.catchUp === true) flushOutbox();
           return;
         }
 
@@ -1337,6 +1356,7 @@ export function useDaemon(
           const pending = claimsScreen ? queued.current : undefined;
           if (pending) queued.current = undefined;
           if (pending) {
+            promptGate.current.started(message.sessionId);
             ws.send(
               JSON.stringify(
                 secure.seal(
@@ -1363,6 +1383,13 @@ export function useDaemon(
         // twice — appending twice would duplicate the text.
         if (message.t === "session.event") {
           const chunk = readChunk(message.payload);
+          const update = message.payload?.update?.sessionUpdate;
+          const permission = readPermissionRequest(message.payload);
+          if (permission) promptGate.current.waitForPermission(message.sessionId);
+          if ((chunk && chunk.role !== "system") || permission ||
+              update === "tool_call" || update === "tool_call_update") {
+            promptGate.current.started(message.sessionId);
+          }
           if (chunk?.role === "agent" && chunk.text) {
             const seen = turnText.current.get(message.sessionId) ?? "";
             // Only the opening line is ever shown, so a long turn must not
@@ -1380,7 +1407,8 @@ export function useDaemon(
         // `session.idle` is deliberately absent: it is the only signal that a
         // conversation left running has finished, which is precisely the one
         // nobody is looking at. It is applied per session instead.
-        const scoped = message.t === "session.event" || message.t === "session.config";
+        const scoped = message.t === "session.event" || message.t === "session.config" ||
+          (message.t === "error" && typeof message.sessionId === "string");
         if (scoped && message.sessionId !== sessionRef.current) {
           // Not on screen, but it is still someone's conversation. Its chunks go
           // into the transcript that session carries, so switching away from a
@@ -1398,12 +1426,22 @@ export function useDaemon(
                 message.payload,
               ),
             );
+          } else if (message.t === "error") {
+            setState((prev) => ({
+              ...prev,
+              sessions: prev.sessions.map((session) => session.id !== message.sessionId ? session : {
+                ...session, busy: false, activity: IDLE_ACTIVITY,
+                turns: withError(session.turns, `err-${session.turns.length}-${Date.now()}`, message.message),
+              }),
+            }));
+            flushOutbox();
           }
           return;
         }
 
         let completedTurn: TurnFinished | undefined;
         if (message.t === "session.idle") {
+          promptGate.current.finished(message.sessionId);
           const finished: string = message.sessionId;
           const lastText = turnText.current.get(finished);
           // One turn's worth: the next prompt in this session starts empty.
@@ -1445,6 +1483,12 @@ export function useDaemon(
         // before the announcement that would otherwise still call it stale.
         if (message.t === "session.started" && message.sessionId) {
           liveSessions.current = new Set(liveSessions.current ?? []).add(message.sessionId);
+          // Ask for state on reconnect even if no transcript event has arrived
+          // yet. -1 means nothing has been seen; never rewind an existing cursor.
+          cursors.current = {
+            ...cursors.current,
+            [message.sessionId]: cursors.current[message.sessionId] ?? -1,
+          };
 
           // This conversation has a real id now, so the messages waiting on the
           // name it used to have are addressed to it and can go. Two names lead
@@ -1543,6 +1587,7 @@ export function useDaemon(
           }
           if (Array.isArray(message.activeSessions)) {
             liveSessions.current = new Set<string>(message.activeSessions);
+            promptGate.current.retain(liveSessions.current);
             // The conversation on screen may have died with a previous daemon
             // process. Reopen it from the agent's own copy rather than leaving
             // a thread that answers "Unknown session" on the next prompt.
@@ -1999,28 +2044,11 @@ export function useDaemon(
               // the turn, so the same sentence arrives twice. Promote the copy
               // already on screen instead of appending a second one: the user
               // sees it once, and in the colour that says it failed.
-              const duplicate = findDuplicateError(prev.turns, message.message);
-              if (duplicate >= 0) {
-                const turns = [...prev.turns];
-                // Keep the agent's own wording, which may carry more context
-                // than the rejection; only its severity was wrong.
-                turns[duplicate] = { ...turns[duplicate]!, role: "system" };
-                return { ...prev, busy: false, loadingSession: false, turns };
-              }
               return {
                 ...prev,
                 busy: false,
                 loadingSession: false,
-                turns: capTurns([
-                  ...prev.turns,
-                  // Date.now() collides when two errors land in the same
-                  // millisecond; the length keeps it unique within the thread.
-                  {
-                    id: `err-${prev.turns.length}-${Date.now()}`,
-                    role: "system",
-                    text: message.message,
-                  },
-                ]),
+                turns: withError(prev.turns, `err-${prev.turns.length}-${Date.now()}`, message.message),
               };
             }
 
@@ -2028,6 +2056,8 @@ export function useDaemon(
               return prev;
           }
         });
+        // The idle fold must precede the next turn's busy/clock update.
+        if (message.t === "session.idle") flushOutbox();
       };
 
       const scheduleReconnect = () => {
@@ -2233,10 +2263,16 @@ export function useDaemon(
       // conversation with no id yet cannot be addressed at all, so it does not
       // even try: `session.started` re-addresses this entry later.
       const wire = toWireAttachments(attachments);
+      const waitingForTurn = isPendingSession(sessionId) || !promptGate.current.canSend(sessionId) ||
+        outbox.current.some((entry) => entry.kind === "prompt" && entry.sessionId === sessionId);
       const sent =
-        !isPendingSession(sessionId) &&
+        !isPendingSession(sessionId) && !waitingForTurn &&
         post({ t: "session.prompt", sessionId, text, attachments: wire });
-      const turn = localTurn(localSeq.current++, text, attachmentImages(attachments), !sent);
+      if (sent) promptGate.current.started(sessionId);
+      const turn: Turn = {
+        ...localTurn(localSeq.current++, text, attachmentImages(attachments), !sent),
+        ...(!sent && waitingForTurn ? { queuedForTurn: true } : {}),
+      };
       if (!sent) {
         const queue = enqueue(outbox.current, {
           kind: "prompt",
@@ -2308,9 +2344,12 @@ export function useDaemon(
         // Offline that is the ordinary case rather than a race — without it,
         // every message typed in a tunnel would open its own thread and spawn
         // its own agent the moment the signal came back.
-        const waiting = initialText ? pendingStartFor(outbox.current, providerId) : undefined;
-        if (waiting) {
-          return deliverPrompt(pendingSessionKey(waiting.requestId), initialText!, attachments);
+        const waiting = initialText ? pendingStartFor(outbox.current, providerId)?.requestId : undefined;
+        const livePending = pendingStart.current &&
+          viewingRef.current === pendingSessionKey(pendingStart.current) ? pendingStart.current : undefined;
+        const pendingId = waiting ?? livePending;
+        if (pendingId && initialText) {
+          return deliverPrompt(pendingSessionKey(pendingId), initialText, attachments);
         }
         queued.current = initialText ? { text: initialText, attachments } : undefined;
         // Named, so the answer can be matched to this request rather than to
@@ -2350,6 +2389,7 @@ export function useDaemon(
               ? enqueue(request, {
                   kind: "prompt",
                   turnKey: turn.key!,
+                  initialPrompt: true,
                   sessionId: pendingSessionKey(requestId),
                   text: initialText!,
                   attachments: toWireAttachments(attachments),
@@ -2421,6 +2461,19 @@ export function useDaemon(
           if (!target || needsResume(target, liveSessions.current)) return false;
         }
         return deliverPrompt(sessionId, text, attachments);
+      },
+
+      cancelQueued: (turnKey: string) => {
+        const next = cancelQueued(outbox.current, turnKey);
+        if (next === outbox.current) return;
+        outbox.current = next;
+        setState((s) => ({
+          ...s,
+          turns: markCancelled(s.turns, turnKey),
+          sessions: s.sessions.map((session) => ({
+            ...session, turns: markCancelled(session.turns, turnKey),
+          })),
+        }));
       },
 
       cancel: () => {

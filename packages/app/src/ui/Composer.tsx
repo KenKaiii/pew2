@@ -6,6 +6,7 @@ import { Pressable, StyleSheet, Text, TextInput, useWindowDimensions, View } fro
 import Ionicons from "@expo/vector-icons/Ionicons";
 import { theme } from "../theme";
 import { haptics } from "./haptics";
+import { composerAction } from "./composerAction";
 import { CommandToken } from "./CommandToken";
 import { splitCommand } from "../slashCommands";
 import { AttachmentChips } from "./AttachmentChips";
@@ -71,9 +72,10 @@ function ComposerView({
   const maxTextHeight = Math.max(minTextHeight, Math.min(8 * theme.line.body * fontScale, viewportHeight * 0.25));
   const split = splitCommand(value);
   const canSend = editable && !dictation?.listening && (value.trim().length > 0 || attachments.length > 0);
+  const primaryAction = composerAction(busy, canSend);
   const showMic = !busy && (!canSend || !!dictation?.listening);
-  const sendDisabled = busy ? !onStop : showMic ? !dictation?.available || !editable : !canSend;
-  const actionLabel = busy ? "Stop generating" : showMic ? dictation?.listening ? "Stop dictating" : dictation?.available ? "Dictate a message" : "Voice input unavailable" : "Send message";
+  const sendDisabled = primaryAction === "stop" ? !onStop : showMic ? !dictation?.available || !editable : !canSend;
+  const actionLabel = primaryAction === "stop" ? "Stop generating" : primaryAction === "queue" ? "Queue message" : showMic ? dictation?.listening ? "Stop dictating" : dictation?.available ? "Dictate a message" : "Voice input unavailable" : "Send message";
   return (
     <View style={styles.stack}>
       {attachments.length > 0 && <AttachmentChips attachments={attachments} onRemove={onRemoveAttachment} />}
@@ -106,7 +108,7 @@ function ComposerView({
               const capped = nativeEvent.contentSize.height >= maxTextHeight;
               if (capped !== atCeiling) setAtCeiling(capped);
             }}
-            placeholder={placeholder} placeholderTextColor={theme.composer.placeholder}
+            placeholder={busy ? "Queue a follow-up…" : placeholder} placeholderTextColor={theme.composer.placeholder}
             multiline editable={editable} accessibilityLabel="Message"
             submitBehavior="newline" scrollEnabled={atCeiling}
           />
@@ -123,18 +125,28 @@ function ComposerView({
           <View style={styles.selectors} pointerEvents="box-none">
             {selectors.map((selector) => <Selector key={selector.id} {...selector} />)}
           </View>
+          {primaryAction === "queue" && onStop && (
+            <Pressable
+              style={({ pressed }) => [styles.iconTarget, pressed && styles.pressed]}
+              accessibilityRole="button" accessibilityLabel="Stop current response"
+              onPress={() => { haptics.warned(); onStop(); }}
+            >
+              <Ionicons name="square" size={13} color={theme.composer.ink} />
+            </Pressable>
+          )}
           <Pressable
             style={({ pressed }) => [styles.iconTarget, pressed && styles.pressed]}
             accessibilityRole="button" accessibilityLabel={actionLabel}
+            accessibilityHint={primaryAction === "queue" ? "Sends after the current response finishes" : undefined}
             accessibilityState={{ disabled: sendDisabled }} disabled={sendDisabled}
             onPress={() => {
-              if (busy) { haptics.warned(); onStop?.(); }
+              if (primaryAction === "stop") { haptics.warned(); onStop?.(); }
               else if (showMic) dictation?.toggle();
               else { haptics.sent(); onSend(); }
             }}
           >
             <View style={[styles.sendPill, ((!showMic && !sendDisabled) || dictation?.listening) && styles.selected]}>
-              <Ionicons name={busy ? "square" : showMic ? dictation?.listening ? "mic" : "mic-outline" : "arrow-up"} size={busy ? 13 : 18} color={(!showMic && !sendDisabled) || dictation?.listening ? theme.color.bg : theme.composer.ink} />
+              <Ionicons name={primaryAction === "stop" ? "square" : showMic ? dictation?.listening ? "mic" : "mic-outline" : "arrow-up"} size={primaryAction === "stop" ? 13 : 18} color={(!showMic && !sendDisabled) || dictation?.listening ? theme.color.bg : theme.composer.ink} />
             </View>
           </Pressable>
         </View>

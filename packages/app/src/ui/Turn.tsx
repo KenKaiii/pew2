@@ -52,6 +52,7 @@ interface TurnProps {
   retryPrompt?: string;
   /** Sends it. Must be stable: cells memo on it. */
   onRetry?: (text: string) => void;
+  onCancelQueued?: (turnKey: string) => void;
 }
 
 /**
@@ -87,7 +88,7 @@ interface TurnProps {
  * paragraph of it. That is what the Copy button under an agent turn is for —
  * a button, not a hold, so it takes nothing away from the gesture above it.
  */
-function TurnView({ turn, onOpenThought, retryPrompt, onRetry, liveIdentity }: TurnProps) {
+function TurnView({ turn, onOpenThought, retryPrompt, onRetry, onCancelQueued, liveIdentity }: TurnProps) {
   const images = turn.images ?? [];
   // A turn with pictures and no words is normal: an image generation tool's
   // result arrives as content alone. Only a turn with neither renders nothing.
@@ -126,15 +127,19 @@ function TurnView({ turn, onOpenThought, retryPrompt, onRetry, liveIdentity }: T
           )}
           <ChatImages images={images} />
         </View>
-        {/* A message typed with no signal. Shown as what it is — sent, waiting
-            on the network — rather than as an error, because nothing has
-            failed: the reconnect delivers it. Under the bubble and quiet, so a
-            thread queued up offline reads as a conversation rather than as a
-            column of warnings. */}
-        {turn.queued && (
+        {(turn.queued || turn.cancelled) && (
           <View style={styles.queuedRow}>
-            <Ionicons name="time-outline" size={12} color={theme.color.textDim} />
-            <Text style={styles.queuedLabel}>Sends when you're back online</Text>
+            <Ionicons name={turn.cancelled ? "close-circle-outline" : "time-outline"} size={12} color={theme.color.textDim} />
+            <Text style={styles.queuedLabel}>{turn.cancelled ? "Not sent" : turn.queuedForTurn ? "Queued · sends after this response" : "Sends when you're back online"}</Text>
+            {turn.queued && turn.queuedForTurn && onCancelQueued && (
+              <Pressable
+                accessibilityRole="button" accessibilityLabel="Cancel queued message"
+                onPress={() => onCancelQueued(turn.key ?? turn.id)}
+                style={({ pressed }) => [styles.cancelQueue, pressed && styles.thoughtPressed]}
+              >
+                <Text style={styles.queuedLabel}>Cancel</Text>
+              </Pressable>
+            )}
           </View>
         )}
       </View>
@@ -246,11 +251,14 @@ export const Turn = memo(
     // whole transcript and only changes on the tail.
     before.retryPrompt === after.retryPrompt &&
     before.onRetry === after.onRetry &&
+    before.onCancelQueued === after.onCancelQueued &&
     before.turn.text === after.turn.text &&
     before.turn.role === after.turn.role &&
     // The one flag that is drawn: without it the label would outlive the
     // message going out, which is the moment it stops being true.
     before.turn.queued === after.turn.queued &&
+    before.turn.queuedForTurn === after.turn.queuedForTurn &&
+    before.turn.cancelled === after.turn.cancelled &&
     // Identity is enough: images are only ever appended as a new array, and
     // comparing sources would walk megabytes of inline base64 per render.
     before.turn.images === after.turn.images,
@@ -273,6 +281,7 @@ const styles = StyleSheet.create({
     paddingRight: theme.space(1),
   },
   queuedLabel: { color: theme.color.textDim, fontSize: theme.font.small },
+  cancelQueue: { minHeight: theme.size.touch, justifyContent: "center", paddingHorizontal: theme.space(2) },
   // Stacked rather than inline: instructions are markdown and may run to
   // several lines, which would not wrap cleanly beside the token.
   commandPrompt: { gap: theme.space(1) },

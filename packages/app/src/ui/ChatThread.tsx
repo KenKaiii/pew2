@@ -66,6 +66,7 @@ type Props = {
   onOpenThought: (text: string) => void;
   /** Sends a failed prompt again. Must be stable: cells memo on it. */
   onRetry: (text: string) => void;
+  onCancelQueued?: (turnKey: string) => void;
 };
 
 function ChatThreadView(
@@ -83,6 +84,7 @@ function ChatThreadView(
     onAtBottomChange,
     onOpenThought,
     onRetry,
+    onCancelQueued,
   }: Props,
   ref: React.Ref<ChatThreadRef>,
 ) {
@@ -114,11 +116,12 @@ function ChatThreadView(
             onOpenThought={onOpenThought}
             retryPrompt={keyExtractor(item) === retryKey ? retryPrompt : undefined}
             onRetry={onRetry}
+            onCancelQueued={onCancelQueued}
           />
         </View>
       );
     },
-    [onOpenThought, onRetry, retryKey, retryPrompt, activeStream],
+    [onOpenThought, onRetry, onCancelQueued, retryKey, retryPrompt, activeStream],
   );
 
   // Mirrored into a ref so the inset effect below can read "is the reader at the

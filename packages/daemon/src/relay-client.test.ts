@@ -589,13 +589,13 @@ test("a reconnecting phone is answered with everything it missed", async () => {
     role: "app",
     deviceId: "Kens-iPhone",
     proof: app.proof("Kens-iPhone"),
-    // A fractional seq and a negative one are junk: `hello` is read before the
-    // channel exists, so it is never schema-validated as a whole.
-    cursors: { s1: 41, s2: 2.5, s3: -1 },
+    // -1 requests current state before any event arrived. Lower and fractional
+    // cursors are junk even though hello is read before the channel exists.
+    cursors: { s1: 41, s2: 2.5, s3: -1, s4: -2 },
   });
   await new Promise((r) => setTimeout(r, 20));
 
-  expect(cursorsSeen).toEqual([{ s1: 41 }]);
+  expect(cursorsSeen).toEqual([{ s1: 41, s3: -1 }]);
   const frames = socket.sent.map((raw) => app.open(JSON.parse(raw)));
   expect(frames).toContainEqual(missed);
   relay.stop();

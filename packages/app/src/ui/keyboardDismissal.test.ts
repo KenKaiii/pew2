@@ -57,12 +57,13 @@ test("tapping the transcript takes the keyboard down", () => {
   // the platform's now, the wrapper is gone, and the rule works unaided.
   //
   // What may remain is a *control*: a button occupying its own row, next to the
-  // message rather than over it. Two of them — the thought row, and the retry
-  // under a failed turn — plus the copy button, which is `CopyButton` and not
-  // written here at all. The count is asserted so that a third one has to be a
+  // message rather than over it. Three of them: the thought row, the retry
+  // under a failed turn, and cancel under a queued message. The copy button
+  // is `CopyButton` and not written here. A fourth control must be a
   // deliberate addition; what it must never become again is a wrapper.
   const turn = source("Turn.tsx");
-  expect(turn.match(/<Pressable/g) ?? []).toHaveLength(2);
+  expect(turn.match(/<Pressable/g) ?? []).toHaveLength(3);
+  expect(turn).toContain("Cancel queued message");
   expect(turn).toContain("Show thought process");
   expect(turn).toContain("Send this message again");
 

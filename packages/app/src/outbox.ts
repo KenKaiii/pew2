@@ -31,6 +31,8 @@ import type { Turn } from "./useDaemon";
 export interface QueuedPrompt {
   kind: "prompt";
   turnKey: string;
+  /** The offline start's initial prompt, protected until the session is created. */
+  initialPrompt?: boolean;
   /**
    * Where it goes. May be a `pending:` key while the conversation carrying it
    * has itself not been created yet — `remapSession` re-addresses it once the
@@ -164,7 +166,14 @@ export function partitionOutbox(
 ): { ready: OutboxEntry[]; held: OutboxEntry[] } {
   const ready: OutboxEntry[] = [];
   const held: OutboxEntry[] = [];
-  for (const entry of queue) (deliverable(entry) ? ready : held).push(entry);
+  const seen = new Set<string>();
+  for (const entry of queue) {
+    // ACP agents cannot accept overlapping prompts. A held prompt also owns
+    // its place, so a later one never overtakes it within the same chat.
+    const blocked = entry.kind === "prompt" && seen.has(entry.sessionId);
+    if (entry.kind === "prompt") seen.add(entry.sessionId);
+    (blocked || !deliverable(entry) ? held : ready).push(entry);
+  }
   return { ready, held };
 }
 
@@ -208,18 +217,27 @@ export function pendingStartFor(
   );
 }
 
+/** Only unsent prompt entries can be cancelled; a sent turn is never removed. */
+export function cancelQueued(queue: readonly OutboxEntry[], turnKey: string): readonly OutboxEntry[] {
+  const prompt = queue.find((entry) => entry.kind === "prompt" && entry.turnKey === turnKey);
+  if (!prompt || prompt.kind !== "prompt") return queue;
+  // The start can leave the outbox before its response arrives. Track its
+  // initial prompt explicitly: online starts keep theirs outside this queue.
+  if (isPendingSession(prompt.sessionId) && prompt.initialPrompt) return queue;
+  return queue.filter((entry) => entry.kind !== "prompt" || entry.turnKey !== turnKey);
+}
+
+/** Keep cancelled text/images visible and copyable instead of discarding them. */
+export function markCancelled(turns: Turn[], turnKey: string): Turn[] {
+  if (!turns.some((turn) => (turn.key ?? turn.id) === turnKey && turn.queued)) return turns;
+  return turns.map((turn) => (turn.key ?? turn.id) === turnKey && turn.queued
+    ? { ...turn, queued: false, queuedForTurn: false, cancelled: true }
+    : turn);
+}
+
 /**
- * Take the waiting mark off the turns that have just gone out.
- *
- * Matched by `key`, not `id`: the id is swapped for the daemon's the moment the
- * echo arrives, and the echo can land before this runs.
- *
- * Returns the same array when nothing changed, and that identity is load
- * bearing rather than a render optimisation — it is how the caller knows which
- * conversation these messages were in. A queued prompt's row may still be a
- * `pending:` request about to be renamed by `session.started`, so "does this
- * transcript hold one of the turns" is a question that survives the rename,
- * where "does this id match" does not.
+ * Clear waiting marks by stable render key, even if the echo renamed the id.
+ * The same-array return when unchanged tells the caller which chat was sent.
  */
 export function markSent(turns: Turn[], keys: ReadonlySet<string>): Turn[] {
   if (keys.size === 0) return turns;
@@ -227,7 +245,7 @@ export function markSent(turns: Turn[], keys: ReadonlySet<string>): Turn[] {
   const next = turns.map((turn) => {
     if (!turn.queued || !turn.key || !keys.has(turn.key)) return turn;
     changed = true;
-    const { queued: _queued, ...rest } = turn;
+    const { queued: _queued, queuedForTurn: _queuedForTurn, ...rest } = turn;
     return rest;
   });
   return changed ? next : turns;

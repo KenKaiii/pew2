@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import {
   MAX_QUEUED,
   enqueue,
+  cancelQueued,
   markSent,
   outboxSession,
   partitionOutbox,
@@ -87,6 +88,18 @@ test("a prompt for a conversation that must be reopened waits instead of failing
   expect(held).toEqual([queue[1]!]);
 });
 
+test("only one prompt per chat is released, without blocking another chat", () => {
+  const queue = [prompt("a", "s1"), prompt("b", "s1"), prompt("c", "s2")];
+  const { ready, held } = partitionOutbox(queue, () => true);
+  expect(ready).toEqual([queue[0]!, queue[2]!]);
+  expect(held).toEqual([queue[1]!]);
+});
+
+test("a later prompt cannot pass a held prompt in the same chat", () => {
+  const queue = [prompt("a", "s1"), prompt("b", "s1")];
+  expect(partitionOutbox(queue, (entry) => entry.kind === "prompt" && entry.turnKey === "b").ready).toEqual([]);
+});
+
 test("pending rows with something queued are named so the reconnect keeps them", () => {
   const queue = [start("req-1"), prompt("b", "pending:req-1"), prompt("c", "s2")];
   expect(queuedPendingSessions(queue)).toEqual(new Set(["pending:req-1"]));
@@ -97,6 +110,32 @@ test("a second message joins the conversation already starting on the same agent
   expect(pendingStartFor(queue, "codex")?.requestId).toBe("req-1");
   // A different agent is a different conversation.
   expect(pendingStartFor(queue, "claude-code")).toBeUndefined();
+});
+
+test("the first follow-up can be cancelled while an online session start is in flight", () => {
+  // start() has already sent session.start and holds its initial prompt in
+  // queued.current. Only follow-ups enter the outbox in this online path.
+  const followUp = prompt("follow-up", "pending:online-start");
+  const later = prompt("later-follow-up", "pending:online-start");
+
+  for (const queue of [[followUp], [followUp, later]]) {
+    const before = [...queue];
+    expect(cancelQueued(queue, "follow-up")).toEqual(
+      queue.filter((entry) => entry !== followUp),
+    );
+    expect(queue).toEqual(before);
+  }
+});
+
+test("offline startup protects its initial prompt but allows later cancellation", () => {
+  const request = start("offline-start");
+  const initial = { ...prompt("initial", "pending:offline-start"), initialPrompt: true };
+  const followUp = prompt("follow-up", "pending:offline-start");
+  const queue = [request, initial, followUp];
+
+  expect(cancelQueued(queue, "initial")).toBe(queue);
+  expect(cancelQueued(queue, "follow-up")).toEqual([request, initial]);
+  expect(queue).toEqual([request, initial, followUp]);
 });
 
 test("delivered messages stop saying they are waiting", () => {

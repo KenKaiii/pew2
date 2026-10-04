@@ -1371,6 +1371,7 @@ function Pew2({ pairing, onUnpair }: { pairing: Pairing; onUnpair: () => void })
             onAtBottomChange={setAtBottom}
             onOpenThought={openThought}
             onRetry={retrySend}
+            onCancelQueued={daemon.cancelQueued}
           />
         ) : !daemon.loadingSession ? (
           // Cancels half the pane's lift, so the greeting settles in the middle

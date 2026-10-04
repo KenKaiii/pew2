@@ -31,14 +31,14 @@ export const WIRE_VERSION = 2;
  * A `hello` is read before the channel exists, so it is never schema-validated
  * as a whole: whatever the socket sent is a plain `unknown`. Both transports
  * answer these cursors with a catch-up replay, and both must reject junk the
- * same way — a negative or fractional seq here would make `since()` slice from
- * the wrong end and re-send a whole session.
+ * same way. -1 means no event has arrived yet, matching SessionLog.since(-1).
+ * Lower values and fractional cursors are malformed.
  */
 export function readCursors(value: unknown): Record<string, number> {
   if (typeof value !== "object" || value === null) return {};
   const cursors: Record<string, number> = {};
   for (const [sessionId, seq] of Object.entries(value as Record<string, unknown>)) {
-    if (typeof seq !== "number" || !Number.isInteger(seq) || seq < 0) continue;
+    if (typeof seq !== "number" || !Number.isInteger(seq) || seq < -1) continue;
     cursors[sessionId] = seq;
   }
   return cursors;
@@ -78,8 +78,8 @@ export const Hello = z.object({
   wire: z.number().int(),
   role: Role,
   deviceId: z.string().min(1),
-  /** Highest seq the client already has, per session. Enables gap-free resume. */
-  cursors: z.record(z.string(), z.number().int().nonnegative()).default({}),
+  /** Highest seq received; -1 requests a session with no received events yet. */
+  cursors: z.record(z.string(), z.number().int().min(-1)).default({}),
   /**
    * An envelope proving the sender holds the pairing key.
    *

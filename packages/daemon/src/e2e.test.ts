@@ -22,6 +22,8 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { AppClient } from "./testing/app-client.js";
 import { startDaemon, type RunningDaemon } from "./testing/daemon-process.js";
+import { PromptGate } from "../../app/src/promptGate.js";
+import { partitionOutbox, type OutboxEntry } from "../../app/src/outbox.js";
 
 /**
  * Per-test budget, comfortably above the client's own eight-second wait.
@@ -130,6 +132,68 @@ test("a prompt runs end to end: agent spawned, chunks streamed, turn closed", as
   // ordered on the wire rather than merely present.
   expect(events.map((f) => f.seq)).toEqual(events.map((_, at) => at));
   app.close();
+}, TEST_TIMEOUT);
+
+test("follow-ups drain in FIFO order through a real agent without overlapping turns", async () => {
+  const { app, sessionId } = await withSession("r-queue");
+  const gate = new PromptGate();
+  let queue: OutboxEntry[] = ["first", "second", "third"].map((text) => ({
+    kind: "prompt", turnKey: text, sessionId, text, attachments: [],
+  }));
+  try {
+    for (const text of ["first", "second", "third"]) {
+      const { ready, held } = partitionOutbox(queue, (entry) =>
+        entry.kind === "prompt" && gate.canSend(entry.sessionId));
+      expect(ready).toHaveLength(1);
+      const entry = ready[0];
+      if (!entry || entry.kind !== "prompt") throw new Error("Expected a queued prompt");
+      expect(entry.text).toBe(text);
+      queue = held;
+      const before = app.frames.length;
+      gate.started(sessionId);
+      app.send({ t: "session.prompt", sessionId, text: entry.text });
+      expect(partitionOutbox(queue, () => gate.canSend(sessionId)).ready).toEqual([]);
+      await app.waitFor((frame) => frame.t === "session.idle" && frame.sessionId === sessionId &&
+        app.frames.indexOf(frame) >= before, `idle after ${text}`);
+      // The real agent replies in ACP text chunks, not a synthetic user_echo.
+      // Assert the completed reply before releasing the next queued prompt.
+      const reply = app.frames.slice(before).filter((frame) =>
+        frame.t === "session.event" && frame.sessionId === sessionId &&
+        frame.payload?.update?.sessionUpdate === "agent_message_chunk",
+      ).map((frame) => frame.payload.update.content.text).join("").trim();
+      expect(reply).toBe(`You said: ${text}`);
+      gate.finished(sessionId);
+    }
+    expect(queue).toEqual([]);
+    expect(app.all("session.idle").filter((frame) => frame.sessionId === sessionId)).toHaveLength(3);
+    expect(app.all("error")).toEqual([]);
+  } finally {
+    app.close();
+  }
+}, TEST_TIMEOUT);
+
+test("a reconnect before the first received event releases queued prompts from current state", async () => {
+  const { app, sessionId } = await withSession("r-queue-no-events");
+  const gate = new PromptGate();
+  gate.reconnect([sessionId]);
+  app.close();
+  const reconnected = await AppClient.connect(daemon, {
+    deviceId: DEVICE, cursors: { [sessionId]: -1 },
+  });
+  try {
+    const replay = await reconnected.waitFor((frame) =>
+      frame.t === "session.replay" && frame.sessionId === sessionId && frame.catchUp === true,
+    "catch-up before the first event");
+    expect(gate.canSend(sessionId)).toBe(false);
+    expect(replay.working).toBe(false);
+    gate.catchUp(sessionId, replay.working, replay.permissions);
+    expect(gate.canSend(sessionId)).toBe(true);
+    reconnected.send({ t: "session.prompt", sessionId, text: "after reconnect" });
+    await reconnected.waitFor((frame) => frame.t === "session.idle" && frame.sessionId === sessionId, "idle");
+    expect(reconnected.all("error")).toEqual([]);
+  } finally {
+    reconnected.close();
+  }
 }, TEST_TIMEOUT);
 
 test("session.started carries the request id that asked for it", async () => {
