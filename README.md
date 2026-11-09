@@ -12,7 +12,7 @@
   <a href="https://github.com/KenKaiii/pew2/releases/latest"><img src="https://img.shields.io/github/v/release/KenKaiii/pew2?style=for-the-badge&label=CLI&color=d97757" alt="Latest release"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-AGPL%203.0-blue.svg?style=for-the-badge" alt="AGPL-3.0 License"></a>
   <a href="https://youtube.com/@kenkaidoesai"><img src="https://img.shields.io/badge/YouTube-FF0000?style=for-the-badge&logo=youtube&logoColor=white" alt="YouTube"></a>
-  <a href="https://skool.com/kenkai"><img src="https://img.shields.io/badge/Skool-Community-7C3AED?style=for-the-badge" alt="Skool"></a>
+  <a href="https://www.skool.com/raid"><img src="https://img.shields.io/badge/Skool-Free%20community-7C3AED?style=for-the-badge" alt="Free Skool community"></a>
 </p>
 
 ---
@@ -26,6 +26,9 @@ write while you're getting coffee.
 
 **Nothing runs in the cloud.** No API keys leave your machine. The agent is the
 one you already installed, running on your own hardware, on your own files.
+
+> [!TIP]
+> **Want the step-by-step guide?** The full pew2 setup, a free 7-day build challenge and 20+ more projects are in my free community: **[skool.com/raid](https://www.skool.com/raid)**
 
 ---
 
@@ -285,7 +288,7 @@ Being straight with you:
 ## 👥 Community
 
 - [YouTube @kenkaidoesai](https://youtube.com/@kenkaidoesai), tutorials and demos
-- [Skool community](https://skool.com/kenkai), come hang out
+- [Free Skool community](https://www.skool.com/raid): a 7-day build challenge and 20+ step-by-step projects
 
 ---
 
