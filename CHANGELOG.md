@@ -11,6 +11,17 @@ installs them separately, and what an app and a daemon must agree on is
 
 Dates are the day the tag was cut.
 
+## Unreleased
+
+### Fixed
+
+- **Holding Ken launches a goal on Android.** On the last step of a new goal,
+  holding Ken did nothing at all: no ring, no caption change, and Close and
+  Back did not respond either. The launch effect drawn over the screen was
+  taking every touch, which only happens on Android. The calling glow and the
+  home screen's burst use the same layer and are fixed the same way. Needs the
+  new phone app.
+
 ## 0.9.29 — 2026-10-22
 
 ### Added

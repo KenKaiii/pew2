@@ -9,7 +9,7 @@
  * most 60 times a second.
  */
 import { useCallback, useMemo } from "react";
-import { StyleSheet } from "react-native";
+import { StyleSheet, View } from "react-native";
 import {
   Canvas,
   Picture,
@@ -188,6 +188,24 @@ function Ticker({
   return null;
 }
 
+/**
+ * The full-screen canvas every effect here draws on, touch-through.
+ *
+ * A plain View owns the touch-through: Skia's Android view does not honour
+ * `pointerEvents`, so a bare full-screen Canvas took every touch on the screen.
+ * Over the launch step that meant holding Ken did nothing and Close and Back
+ * were dead too (iOS was fine, which is how it shipped).
+ */
+function FxCanvas({ picture }: { picture: SharedValue<SkPicture> }) {
+  return (
+    <View style={StyleSheet.absoluteFill} pointerEvents="none">
+      <Canvas style={StyleSheet.absoluteFill} pointerEvents="none">
+        <Picture picture={picture} />
+      </Canvas>
+    </View>
+  );
+}
+
 /** Full-screen, touch-through. Mount it only while the launch step is up. */
 export function LaunchFx({
   scene,
@@ -211,9 +229,7 @@ export function LaunchFx({
   return (
     <>
       <Ticker scene={scene} palette={palette} values={values} picture={picture} />
-      <Canvas style={StyleSheet.absoluteFill} pointerEvents="none">
-        <Picture picture={picture as SharedValue<SkPicture>} />
-      </Canvas>
+      <FxCanvas picture={picture} />
     </>
   );
 }
@@ -256,11 +272,7 @@ export function CallingFx({ scene, color, on }: { scene: FxScene; color: string;
     [scene, palette, clock, strength, target, sinceDraw, picture],
   );
   useFrameCallback(tick, true);
-  return (
-    <Canvas style={StyleSheet.absoluteFill} pointerEvents="none">
-      <Picture picture={picture as SharedValue<SkPicture>} />
-    </Canvas>
-  );
+  return <FxCanvas picture={picture} />;
 }
 
 /**
@@ -315,9 +327,5 @@ export function PopFx({
     [scene, palette, b, sinceDraw, done, picture, onDone],
   );
   useFrameCallback(tick, true);
-  return (
-    <Canvas style={StyleSheet.absoluteFill} pointerEvents="none">
-      <Picture picture={picture as SharedValue<SkPicture>} />
-    </Canvas>
-  );
+  return <FxCanvas picture={picture} />;
 }

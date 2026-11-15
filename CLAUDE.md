@@ -44,6 +44,7 @@ Mobile remote control for **desktop coding agents** (Claude Code, Codex, Gemini 
 - **Context % comes from optional ACP `usage_update`** — an agent that sends none gets **no reading, not 0%**; the window is per model, so readings don't compare across a switch.
 - **The transcript is FlashList v2 and owns its scroll** (`ui/ChatThread.tsx`): `maintainVisibleContentPosition` + `startRenderingFromBottom` is the whole mechanism. Never scroll imperatively from `onLayout`/`onContentSizeChange`; the `threadBottom` catch-up is grow-only and unanimated (the dock resizes around the keyboard, and two curves = the thread re-seating). Cells recycle, so a mount is not a new message.
 - **`@pew2/protocol` imports work only because `metro.config.js` maps the `.js` suffix back to `.ts`.** If a bundle dies on "Unable to resolve", suspect that shim first.
+- **A full-screen Skia Canvas needs a plain `View pointerEvents="none"` around it** (`ui/LaunchFx.tsx`, `FxCanvas`) — Skia's Android view ignores `pointerEvents`, so a bare one takes every touch on the screen. That shipped once: on Android, holding Ken to launch a goal did nothing and Close and Back were dead, while iOS was fine.
 - **Pure modules stay Expo-free** (`pairingLink.ts`, `hapticsPolicy.ts`, `notificationPolicy.ts`, `transcription.ts`, `permissions.ts`); native binding lives in the `ui/` twin. Importing `expo-*` into the pure half breaks `bun test`, which cannot parse React Native's Flow syntax.
 
 ## Workflows
