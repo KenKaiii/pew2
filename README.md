@@ -12,7 +12,6 @@
   <a href="https://github.com/KenKaiii/pew2/releases/latest"><img src="https://img.shields.io/github/v/release/KenKaiii/pew2?style=for-the-badge&label=CLI&color=d97757" alt="Latest release"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-AGPL%203.0-blue.svg?style=for-the-badge" alt="AGPL-3.0 License"></a>
   <a href="https://youtube.com/@kenkaidoesai"><img src="https://img.shields.io/badge/YouTube-FF0000?style=for-the-badge&logo=youtube&logoColor=white" alt="YouTube"></a>
-  <a href="https://www.skool.com/raid"><img src="https://img.shields.io/badge/Skool-Free%20community-7C3AED?style=for-the-badge" alt="Free Skool community"></a>
   <a href="https://www.skool.com/kenkai"><img src="https://img.shields.io/badge/Skool-Raid%2B-7C3AED?style=for-the-badge" alt="Raid+ on Skool"></a>
   <a href="https://www.kenkais.com"><img src="https://img.shields.io/badge/Website-kenkais.com-7C3AED?style=for-the-badge" alt="kenkais.com"></a>
 </p>
@@ -31,7 +30,6 @@ one you already installed, running on your own hardware, on your own files.
 
 > [!TIP]
 > **Want the step-by-step guide?**
-> - **Free community:** the full pew2 setup, a 7-day build challenge and 20+ projects: [skool.com/raid](https://www.skool.com/raid)
 > - **Raid+:** make money with AI, a sellable app in 30 days, live every Thursday: [skool.com/kenkai](https://www.skool.com/kenkai)
 > - **Want it built for you?** [work.kenkais.com](https://work.kenkais.com/)
 
@@ -293,7 +291,6 @@ Being straight with you:
 ## 👥 Community
 
 - [YouTube @kenkaidoesai](https://youtube.com/@kenkaidoesai), tutorials and demos
-- [Free Skool community](https://www.skool.com/raid): a 7-day build challenge and 20+ step-by-step projects
 - [Raid+](https://www.skool.com/kenkai): make money with AI, a sellable app in 30 days, live every Thursday
 - [work.kenkais.com](https://work.kenkais.com/): want it built for you?
 
