@@ -3,9 +3,10 @@ import { ggStrips, goalDrawerRow, isGoalsProvider, suggestGoalName } from "./goa
 
 describe("ggStrips", () => {
   test("never shows autopilot/checklist/plan for gg-goals", () => {
-    expect(ggStrips("gg-goals", { autopilot: true, checklist: true }, true)).toEqual({
+    expect(ggStrips("gg-goals", { autopilot: true, checklist: true, tasks: true }, true)).toEqual({
       autopilot: false,
       checklist: false,
+      tasks: false,
       plan: false,
     });
   });
@@ -13,12 +14,17 @@ describe("ggStrips", () => {
     expect(ggStrips("ggcoder", { autopilot: true }, true)).toEqual({
       autopilot: true,
       checklist: false,
+      tasks: false,
       plan: true,
     });
     expect(ggStrips("ggcoder", undefined, true).autopilot).toBe(false);
+    // An older daemon never says `tasks`, so it gets no Tasks chip.
+    expect(ggStrips("ggcoder", { checklist: true }, true).tasks).toBe(false);
+    expect(ggStrips("ggcoder", { tasks: true }, true).tasks).toBe(true);
   });
   test("nothing without a session", () => {
     expect(ggStrips("ggcoder", { autopilot: true, checklist: true }, false).autopilot).toBe(false);
+    expect(ggStrips("ggcoder", { tasks: true }, false).tasks).toBe(false);
   });
   test("isGoalsProvider", () => {
     expect(isGoalsProvider("gg-goals")).toBe(true);

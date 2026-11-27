@@ -10,7 +10,7 @@ import { readConfigPrefs, type ConfigPrefs } from "../config-prefs.js";
 import { readSessionPrefs, writeSessionPrefs } from "../session-prefs.js";
 import { readCommandDirs } from "../commands/from-disk.js";
 import { DaemonPromptQueue } from "./prompt-queue.js";
-import { GG_GOALS_ID, type ActiveSession } from "./types.js";
+import { GG_GOALS_ID, type ActiveSession, type SessionCallbacks } from "./types.js";
 
 export abstract class DaemonConnectSession extends DaemonPromptQueue {
   /**
@@ -86,18 +86,13 @@ export abstract class DaemonConnectSession extends DaemonPromptQueue {
   }
 
   /**
-   * Connect a session to its agent, warm when possible.
+   * Everything the agent's process reports for this session, routed into it.
    *
-   * A dead spare (the process exited while idle) falls back to a cold spawn
-   * rather than failing the open.
+   * Shared by the first connect and `resetContext`, so a fresh context on the
+   * same process records, notifies and publishes exactly as the first one did.
    */
-  protected async connectSession(
-    session: ActiveSession,
-    provider: LoadedProvider,
-    cwd: string,
-    loadSessionId: string | undefined,
-  ): Promise<void> {
-    const callbacks = {
+  protected sessionCallbacks(session: ActiveSession): SessionCallbacks {
+    return {
       onUpdate: (payload: unknown) => this.record(session, payload),
       onPermissionRequest: ({ requestId, params }: { requestId: string; params: unknown }) => {
         // Held before the event goes out, for the same reason the resolver is
@@ -160,6 +155,21 @@ export abstract class DaemonConnectSession extends DaemonPromptQueue {
         this.publishConfigOptions(session, configOptions),
       onExit: (code: number | null) => this.record(session, { kind: "exit", code }),
     };
+  }
+
+  /**
+   * Connect a session to its agent, warm when possible.
+   *
+   * A dead spare (the process exited while idle) falls back to a cold spawn
+   * rather than failing the open.
+   */
+  protected async connectSession(
+    session: ActiveSession,
+    provider: LoadedProvider,
+    cwd: string,
+    loadSessionId: string | undefined,
+  ): Promise<void> {
+    const callbacks = this.sessionCallbacks(session);
 
     // Paint local JSONL history immediately for providers whose ACP load path
     // scans or initializes before replay. Suppress only that duplicate history;

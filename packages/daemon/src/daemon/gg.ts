@@ -1,16 +1,80 @@
 /**
  * GG Coder's ACP extensions: plan review, Autopilot, the project checklist,
- * goal state, and the goals themselves (`_gg/goals/*`, `_gg/goal/*`).
+ * goal state, and the goals themselves (`_gg/goals/*`, `_gg/goal/*`), plus the
+ * project task list, which GG Coder keeps only on disk.
  */
-import { isAvailable, unavailableReason } from "../providers/registry.js";
-import { connectProvider, type AcpSessionHandle } from "../acp/connect.js";
-import { resolve as __resolve } from "node:path";
+import { isAvailable, unavailableReason, type LoadedProvider } from "../providers/registry.js";
+import { connectProvider, type AcpSessionHandle, type ConfigOption } from "../acp/connect.js";
+import type { ConfigPrefs } from "../config-prefs.js";
+import { readSessionPrefs, writeSessionPrefs } from "../session-prefs.js";
+import { homedir } from "node:os";
+import { join, resolve as __resolve } from "node:path";
 import { resolveWorkspace } from "../workspace.js";
+import { readTasks, runPromptFor, toTaskRow } from "../gg-tasks.js";
 import { wire } from "@pew2/protocol";
 import { DaemonProjects } from "./projects.js";
-import { AUTOPILOT_PHASES, GG_GOALS_ID, GG_PROVIDER_ID, type ActiveSession } from "./types.js";
+import {
+  AUTOPILOT_PHASES,
+  GG_GOALS_ID,
+  GG_PROVIDER_ID,
+  type ActiveSession,
+  type SessionCallbacks,
+  type TaskRun,
+} from "./types.js";
 
 export abstract class DaemonGg extends DaemonProjects {
+  /** Where GG Coder keeps per-project task lists; a field so tests can point it elsewhere. */
+  protected ggTasksBase = join(homedir(), ".gg-tasks", "projects");
+
+  protected abstract sessionCallbacks(session: ActiveSession): SessionCallbacks;
+  protected abstract applyPrefs(
+    session: ActiveSession,
+    providerId: string,
+    prefs: ConfigPrefs,
+  ): Promise<ConfigPrefs>;
+  protected abstract publishConfigOptions(
+    session: ActiveSession,
+    configOptions: ConfigOption[],
+  ): void;
+  protected abstract announceDiskCommands(
+    session: ActiveSession,
+    provider: LoadedProvider,
+    cwd: string,
+  ): Promise<void>;
+
+  /**
+   * Give a session a fresh agent context on the process it already has, as
+   * GG Coder's own task runner does with `newSession()`.
+   *
+   * A second `session/new` on a running GG Coder disposes the old session and
+   * opens a new on-disk one, so the conversation keeps its pew2 id while the
+   * agent forgets everything before it. Returns the new agent session id.
+   */
+  protected async resetContext(session: ActiveSession): Promise<string> {
+    await session.ready;
+    const handle = session.handle;
+    if (!handle) throw new Error("The agent isn't connected.");
+    const previous = session.agentSessionId;
+    // A new session comes back on the agent's defaults; the chat keeps what it was running.
+    const selectors: ConfigPrefs = Object.fromEntries(
+      handle.configOptions.map((option) => [option.id, option.currentValue]),
+    );
+    await handle.adopt({ cwd: session.cwd, ...this.sessionCallbacks(session) });
+    session.agentSessionId = handle.sessionId;
+    // A plan pending in the old context can no longer be decided.
+    if (session.plan) this.applyPlanState(session, { planMode: false, pending: null });
+    await this.applyPrefs(session, session.providerId, selectors);
+    this.publishConfigOptions(session, handle.configOptions);
+    const provider = this.providers.find((p) => p.manifest.id === session.providerId);
+    if (provider) await this.announceDiskCommands(session, provider, session.cwd);
+    if (previous) {
+      void readSessionPrefs(session.providerId, previous)
+        .then((prefs) => writeSessionPrefs(session.providerId, handle.sessionId, prefs))
+        .catch(() => {});
+    }
+    return handle.sessionId;
+  }
+
   /** `_gg/plan_state`: the plan sheet's state, broadcast and kept for catch-up. */
   protected applyPlanState(session: ActiveSession, params: unknown) {
     const raw = params as { planMode?: unknown; pending?: unknown } | null;
@@ -117,6 +181,50 @@ export abstract class DaemonGg extends DaemonProjects {
     return {
       ...(typeof raw?.staleAfterDays === "number" ? { staleAfterDays: raw.staleAfterDays } : {}),
       items,
+    };
+  }
+
+  /** The GG Coder session a task request is about, or why there is none. */
+  private taskSession(sessionId: string): ActiveSession {
+    const session = this.require(sessionId);
+    if (session.providerId !== GG_PROVIDER_ID)
+      throw new Error("Tasks are for GG Coder conversations.");
+    return session;
+  }
+
+  /** `tasks`: the session's project task list, read from GG Coder's file. */
+  async tasks(sessionId: string): Promise<wire.TaskRow[]> {
+    const session = this.taskSession(sessionId);
+    return (await readTasks(this.ggTasksBase, session.cwd)).map(toTaskRow);
+  }
+
+  /**
+   * `task.start`: check a task can run in this conversation now.
+   *
+   * Nothing is written here: `prompt` resets the context and marks the task in
+   * progress as the turn starts. The list comes back as it will be once it has.
+   */
+  async claimTask(
+    sessionId: string,
+    taskId: string,
+  ): Promise<{ run: TaskRun; items: wire.TaskRow[] }> {
+    const session = this.taskSession(sessionId);
+    const busy = "The agent is still working; run the task when it stops.";
+    if (session.working) throw new Error(busy);
+    const tasks = await readTasks(this.ggTasksBase, session.cwd);
+    const task = tasks.find((t) => t.id === taskId);
+    if (!task) throw new Error("That task no longer exists.");
+    const prompt = runPromptFor(task);
+    if (prompt === null) {
+      throw new Error(
+        task.status === "done" ? "That task is already done." : "That task is already running.",
+      );
+    }
+    // Again after the read: a prompt may have started while the file was open.
+    if (session.working) throw new Error(busy);
+    return {
+      run: { id: task.id, title: task.title, prompt },
+      items: tasks.map((t) => toTaskRow(t.id === task.id ? { ...t, status: "in-progress" } : t)),
     };
   }
 

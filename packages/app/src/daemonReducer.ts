@@ -7,12 +7,13 @@ import type { RefObject } from "react";
 import { mergeAgentSessions, replaceAgentSessionStub } from "./agentHistory";
 import { recordReceipt } from "./turnReceipts";
 import { adoptPendingSession } from "./pendingSession";
-import { foldActivity, summariseActivity, IDLE_ACTIVITY } from "./activity";
+import { beginActivity, foldActivity, summariseActivity, IDLE_ACTIVITY } from "./activity";
 import { findDuplicateError } from "./errorDedup";
 import { isEmptyChunk, readChunk } from "./chunks";
 import { readAvailableCommands } from "./slashCommands";
 import { readUsage } from "./contextUsage";
-import { applyChunk, capTurns, isOptimistic } from "./replayFold";
+import { applyChunk, capTurns, isOptimistic, resetRow, resetTurns } from "./replayFold";
+import { readContextReset } from "./ggTasks";
 import { readPlanAcceptedSession } from "./ggReview";
 import { readPermissionRequest } from "./permissions";
 import type { Session } from "./daemonTypes";
@@ -279,6 +280,26 @@ export function reduceMessage(prev: State, message: any, scope: MessageScope): S
           sessions: base.sessions.map((session) =>
             session.id === message.sessionId ? { ...session, permission } : session,
           ),
+        };
+      }
+
+      // A task started in this chat on a fresh agent context: the transcript
+      // restarts from its note, and the task's turn is already under way.
+      const reset = readContextReset(payload);
+      if (reset) {
+        const turns = resetTurns(`${message.sessionId}:${message.seq}`, reset);
+        const sessions = base.sessions.map((row) =>
+          row.id === message.sessionId ? { ...resetRow(row, turns, reset), busy: true } : row,
+        );
+        if (message.sessionId !== sessionRef.current) return { ...base, sessions };
+        return {
+          ...base,
+          turns,
+          sessions,
+          usage: undefined,
+          busy: true,
+          activity: beginActivity(now),
+          receipt: undefined,
         };
       }
 

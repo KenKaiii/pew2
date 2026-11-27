@@ -549,6 +549,56 @@ test("an event for a conversation the drawer does not hold changes nothing", () 
   ).toBe(before);
 });
 
+const contextReset = (seq: number, sessionId = "s1") => ({
+  sessionId,
+  seq,
+  payload: { kind: "context_reset", reason: "task", title: "Fix login", agentSessionId: "gg_2" },
+});
+
+test("a replayed task reset clears the turns before it and moves the row to the new agent session", () => {
+  const row: Session = { ...sessionStub, agentSessionId: "gg_1", usage: { used: 5, size: 10 } };
+  const next = foldSessionEvents({ ...state([], [row]), usage: row.usage }, [
+    user(1, "old question"),
+    agent(2, "old answer"),
+    contextReset(3),
+    agent(4, "on it"),
+  ]);
+  expect(next.turns.map((t) => [t.role, t.text])).toEqual([
+    ["note", "Task: Fix login"],
+    ["agent", "on it"],
+  ]);
+  expect(next.usage).toBeUndefined();
+  expect(next.sessions[0]).toMatchObject({ agentSessionId: "gg_2", title: "Fix login" });
+  expect(next.sessions[0]!.usage).toBeUndefined();
+  expect(next.sessions[0]!.turns).toBe(next.turns);
+  // Still history: a replay never starts the spinner.
+  expect(next.busy).toBe(true);
+  expect(foldSessionEvents({ ...state(), busy: false }, [contextReset(1)]).busy).toBe(false);
+});
+
+test("a task reset in a background chat clears its turns and marks it working", () => {
+  const row: Session = {
+    ...sessionStub,
+    id: "s2",
+    agentSessionId: "gg_1",
+    turns: [{ id: "s2:1", role: "user", text: "old" }],
+  };
+  const other: Session = { ...sessionStub, turns: [{ id: "s1:1", role: "user", text: "keep" }] };
+  const reset = contextReset(5, "s2");
+  let next = foldBackgroundEvent(state([], [other, row]), "s2", "s2:5", reset.payload);
+  next = foldBackgroundEvent(next, "s2", "s2:6", s2Agent(6, "on it").payload);
+  expect(next.sessions[1]!.turns.map((t) => [t.id, t.role, t.text, t.task])).toEqual([
+    ["s2:5", "note", "Task: Fix login", "Fix login"],
+    ["s2:6", "agent", "on it", undefined],
+  ]);
+  expect(next.sessions[1]).toMatchObject({
+    agentSessionId: "gg_2",
+    title: "Fix login",
+    busy: true,
+  });
+  expect(next.sessions[0]).toBe(other);
+});
+
 const planAccepted = (seq: number, sessionId = "s1") => ({
   sessionId,
   seq,

@@ -30,6 +30,7 @@ import {
   applyQueue,
   applyReplayExtras,
   applyReviewMessage,
+  applyTasksMessage,
 } from "./ggState";
 import type { StreamChunk } from "./streamBatch";
 import type { ConfigOption, Workspace, WorkspaceEntry } from "./daemonTypes";
@@ -143,13 +144,21 @@ export function handleSealedFrame(
     setGg((g) => applyReviewMessage(g, message));
     return;
   }
-  // A finished turn may have changed the project checklist: an open
-  // checklist sheet re-asks. Not a filter on idle — it still falls through.
+  if (message.t === "tasks") {
+    setGg((g) => applyTasksMessage(g, message));
+    return;
+  }
+  // A finished turn may have changed the project checklist or task list: an
+  // open sheet re-asks. Not a filter on idle — it still falls through.
   if (message.t === "provider.capabilities" && message.extensions) {
     setGg((g) => applyReviewMessage(g, message));
   }
   if (message.t === "session.idle") {
-    setGg((g) => ({ ...g, checklistNonce: g.checklistNonce + 1 }));
+    setGg((g) => ({
+      ...g,
+      checklistNonce: g.checklistNonce + 1,
+      tasksNonce: g.tasksNonce + 1,
+    }));
   }
   // Live state a replay restates (absent = an older daemon said nothing).
   // Only these fields: a logged `ask_user` in `events` is history and

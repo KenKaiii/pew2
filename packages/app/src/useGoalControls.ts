@@ -1,6 +1,6 @@
 /**
  * GG Coder and GG Goals on the main screen: the queue, ask_user, plan review,
- * autopilot, the checklist, and the goal actions and their sheets.
+ * autopilot, the checklist, the task list, and the goal actions and their sheets.
  */
 import {
   useCallback,
@@ -50,6 +50,7 @@ export function useGoalControls({
     decidePlan: decidePlanDaemon,
     setAutopilot: setAutopilotDaemon,
     requestChecklist,
+    requestTasks,
     refreshGoals,
     createGoal,
     goalAction,
@@ -111,6 +112,9 @@ export function useGoalControls({
   const [checklistOpen, setChecklistOpen] = useState(() => devSheet === "checklist");
   const openChecklist = useCallback(() => setChecklistOpen(true), []);
   const checklistHere = openSessionId ? gg.checklists[openSessionId] : undefined;
+  const [tasksOpen, setTasksOpen] = useState(() => devSheet === "tasks");
+  const openTasks = useCallback(() => setTasksOpen(true), []);
+  const tasksHere = openSessionId ? gg.tasks[openSessionId] : undefined;
   const decidePlan = useCallback(
     (generation: number, action: "accept" | "feedback" | "reject", feedback?: string) => {
       if (openSessionId) decidePlanDaemon(openSessionId, generation, action, feedback);
@@ -143,6 +147,10 @@ export function useGoalControls({
   useEffect(() => {
     if (checklistOpen && openSessionId) requestChecklist(openSessionId);
   }, [checklistOpen, openSessionId, gg.checklistNonce, requestChecklist]);
+  // Same for tasks: open asks, and any session.idle (a turn may have ticked one off) re-asks.
+  useEffect(() => {
+    if (tasksOpen && openSessionId) requestTasks(openSessionId);
+  }, [tasksOpen, openSessionId, gg.tasksNonce, requestTasks]);
   const answerAsk = useCallback(
     (requestId: string, result: AskResult) => {
       if (openSessionId) answerAskDaemon(openSessionId, requestId, result);
@@ -233,6 +241,10 @@ export function useGoalControls({
     setChecklistOpen,
     openChecklist,
     checklistHere,
+    tasksOpen,
+    setTasksOpen,
+    openTasks,
+    tasksHere,
     decidePlan,
     ggAgent,
     autopilotOffered,

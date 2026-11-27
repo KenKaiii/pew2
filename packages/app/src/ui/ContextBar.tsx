@@ -21,6 +21,8 @@ export interface ContextBarProps {
   onDetails: () => void;
   /** GG Coder: the checklist chip, when this conversation has one. */
   onChecklist?: () => void;
+  /** GG Coder: the project task list chip, when this conversation has one. */
+  onTasks?: () => void;
   /** GG Coder: the agent is in plan mode. */
   planMode?: boolean;
 }
@@ -31,6 +33,7 @@ function ContextBarView({
   onCommands,
   onDetails,
   onChecklist,
+  onTasks,
   planMode,
 }: ContextBarProps) {
   const details = contextDetails(workspace, usage);
@@ -72,6 +75,14 @@ function ContextBarView({
           label="Checklist"
           accessibilityLabel="Checklist"
           onPress={onChecklist}
+          leading={<Pixel kind="unread" />}
+        />
+      )}
+      {onTasks && (
+        <StageChip
+          label="Tasks"
+          accessibilityLabel="Tasks"
+          onPress={onTasks}
           leading={<Pixel kind="unread" />}
         />
       )}

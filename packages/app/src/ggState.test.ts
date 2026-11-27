@@ -4,12 +4,14 @@ import {
   applyLiveEvent,
   applyQueue,
   applyReplayExtras,
+  applyTasksMessage,
   closeAsk,
   dropQueued,
   EMPTY_GG,
   elapsedLabel,
   goalForSession,
   lastActiveLabel,
+  markTaskStarted,
   sortGoals,
   workerElapsed,
   type GoalState,
@@ -107,4 +109,46 @@ test("goal lookup and labels", () => {
   expect(
     workerElapsed({ id: "w", name: "w", state: "completed", startedAt: 1000, elapsedMs: 7 }, 4000),
   ).toBe(7);
+});
+
+test("tasks frames replace the session's list, drop malformed rows, and carry errors", () => {
+  const row = {
+    id: "a",
+    title: "A",
+    prompt: "do a",
+    status: "pending" as const,
+    runPrompt: "do a!",
+  };
+  let g = applyTasksMessage(EMPTY_GG, {
+    t: "tasks",
+    requestId: "r1",
+    sessionId: "s",
+    items: [row, { id: "b", title: "B", prompt: "x", status: "blocked", runPrompt: null }, "junk"],
+  });
+  expect(g.tasks.s).toEqual({ items: [row], error: undefined, requestId: "r1" });
+  g = applyTasksMessage(g, { t: "tasks", sessionId: "s", error: "Unknown session 's'" });
+  expect(g.tasks.s).toEqual({
+    items: undefined,
+    error: "Unknown session 's'",
+    requestId: undefined,
+  });
+  expect(applyTasksMessage(EMPTY_GG, { t: "tasks", items: [row] })).toBe(EMPTY_GG);
+  expect(applyTasksMessage(EMPTY_GG, { t: "checklist", sessionId: "s" })).toBe(EMPTY_GG);
+});
+
+test("a started task shows in progress at once and can no longer be run", () => {
+  const g = applyTasksMessage(EMPTY_GG, {
+    t: "tasks",
+    sessionId: "s",
+    items: [
+      { id: "a", title: "A", prompt: "do a", status: "pending", runPrompt: "do a!" },
+      { id: "b", title: "B", prompt: "do b", status: "pending", runPrompt: "do b!" },
+    ],
+  });
+  const started = markTaskStarted(g, "s", "a");
+  expect(started.tasks.s?.items?.map((t) => [t.status, t.runPrompt])).toEqual([
+    ["in-progress", null],
+    ["pending", "do b!"],
+  ]);
+  expect(markTaskStarted(EMPTY_GG, "s", "a")).toBe(EMPTY_GG);
 });

@@ -6,15 +6,16 @@
  * `testing/gg-agent.ts`, a real ACP peer that advertises `_meta.gg`.
  */
 import { afterEach, expect, test } from "bun:test";
-import { mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { Daemon } from "./index.js";
 import { handleMessage } from "./handler.js";
 import { SessionLog } from "./session/log.js";
 import type { AcpSessionHandle } from "./acp/connect.js";
 import type { LoadedProvider } from "./providers/registry.js";
 import { fileURLToPath } from "node:url";
+import { taskFilePath } from "./gg-tasks.js";
 
 async function until<T>(read: () => T | undefined, what: string, ms = 8000): Promise<T> {
   const deadline = Date.now() + ms;
@@ -546,6 +547,7 @@ test("extensions seen on any connection fill a capabilities answer that lost the
   expect((await daemon.capabilitiesFor("ggcoder")).extensions).toEqual({
     autopilot: true,
     checklist: true,
+    tasks: true,
   });
   // The probe's own answer still wins when it has one.
   (daemon as any).probeProvider = async () => ({ ...caps, extensions: { goals: true } });
@@ -585,4 +587,126 @@ test("gg-goals: goal sessions split from ggcoder, goal cwd required, no autopilo
     false,
   );
   setEnv("GG_AGENT_DIR", undefined);
+});
+
+/** A GG Coder session in a project whose task file holds `tasks`. */
+async function ggTaskSession(tasks: object[]) {
+  const harness = await ggDaemon();
+  const id = await harness.daemon.startSession("ggcoder", harness.root);
+  harness.daemon.markLive(id);
+  const base = join(harness.root, "gg-tasks");
+  (harness.daemon as any).ggTasksBase = base;
+  const path = taskFilePath(base, (harness.daemon as any).sessions.get(id).cwd);
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, JSON.stringify(tasks));
+  return { ...harness, id, path };
+}
+
+test("tasks: a GG Coder session lists its project's tasks with their run prompts", async () => {
+  const { sent, send, id } = await ggTaskSession([
+    { id: "aaaaaaaa-1", title: "Fix login", prompt: "fix it", status: "pending" },
+    { id: "bbbbbbbb-2", title: "Docs", prompt: "write docs", status: "done" },
+  ]);
+  await send({ t: "tasks", requestId: "t1", sessionId: id });
+  const listed = sent.find((m) => m.t === "tasks" && m.requestId === "t1");
+  expect(listed).toMatchObject({ sessionId: id, replied: true });
+  expect(listed.items.map((t: any) => [t.id, t.status, t.runPrompt !== null])).toEqual([
+    ["aaaaaaaa-1", "pending", true],
+    ["bbbbbbbb-2", "done", false],
+  ]);
+  expect(listed.items[0].runPrompt).toStartWith("fix it\n\n---");
+  expect(listed.items[0].runPrompt).toEndWith('tasks({ action: "done", id: "aaaaaaaa" })');
+});
+
+test("tasks: task.start runs the task in the same chat on a fresh agent context", async () => {
+  const { daemon, sent, send, id, path } = await ggTaskSession([
+    { id: "aaaaaaaa-1", title: "Fix login", prompt: "fix it", status: "pending", createdAt: "x" },
+  ]);
+  const before = daemon.agentSessionId(id);
+  expect(before).toStartWith("gg_");
+
+  await send({ t: "task.start", requestId: "t1", sessionId: id, taskId: "aaaaaaaa-1" });
+  const started = sent.find((m) => m.t === "tasks" && m.requestId === "t1");
+  expect(started.error).toBeUndefined();
+  expect(started.items[0]).toMatchObject({ status: "in-progress", runPrompt: null });
+  // The test agent asks a question for any prompt containing "ask", which "tasks(" does.
+  const ask = await until(
+    () => sent.find((m) => m.t === "session.event" && m.payload?.kind === "ask_user"),
+    "ask",
+  );
+  daemon.answerAsk(id, ask.payload.requestId, { action: "cancel" });
+  await until(() => sent.find((m) => m.t === "session.idle" && m.sessionId === id), "task idle");
+
+  // The same pew2 conversation, now on a new agent session.
+  expect((daemon as any).sessions.size).toBe(1);
+  expect(sent.filter((m) => m.t === "session.started")).toHaveLength(0);
+  const after = daemon.agentSessionId(id);
+  expect(after).toStartWith("gg_");
+  expect(after).not.toBe(before);
+
+  const events = sent.filter((m) => m.t === "session.event" && m.sessionId === id);
+  const reset = events.findIndex((m) => m.payload?.kind === "context_reset");
+  expect(events[reset]?.payload).toEqual({
+    kind: "context_reset",
+    reason: "task",
+    title: "Fix login",
+    agentSessionId: after,
+  });
+  // The task prompt reached the new session, after the marker, with no user bubble.
+  const heard = events.findIndex((m) => m.payload?.update?.content?.text?.startsWith("heard: "));
+  expect(heard).toBeGreaterThan(reset);
+  expect(events[heard].payload.sessionId).toBe(after);
+  expect(events[heard].payload.update.content.text).toStartWith("heard: fix it");
+  expect(userMessages(sent)).toEqual([]);
+
+  expect(JSON.parse(await readFile(path, "utf8"))).toEqual([
+    {
+      id: "aaaaaaaa-1",
+      title: "Fix login",
+      prompt: "fix it",
+      status: "in-progress",
+      createdAt: "x",
+    },
+  ]);
+});
+
+test("tasks: task.start is refused while working or for a task not to do, file untouched", async () => {
+  const { daemon, sent, send, id, path } = await ggTaskSession([
+    { id: "aaaaaaaa-1", title: "Fix login", prompt: "fix it", status: "pending" },
+    { id: "bbbbbbbb-2", title: "Docs", prompt: "write docs", status: "done" },
+    { id: "cccccccc-3", title: "Run", prompt: "run it", status: "in-progress" },
+  ]);
+  const file = await readFile(path, "utf8");
+  const before = daemon.agentSessionId(id);
+  const answer = (requestId: string) =>
+    sent.find((m) => m.t === "tasks" && m.requestId === requestId);
+
+  const hold = daemon.prompt(id, "hold");
+  await Bun.sleep(20);
+  await send({ t: "task.start", requestId: "busy", sessionId: id, taskId: "aaaaaaaa-1" });
+  expect(answer("busy")).toMatchObject({
+    error: "The agent is still working; run the task when it stops.",
+  });
+  await hold;
+
+  await send({ t: "task.start", requestId: "done", sessionId: id, taskId: "bbbbbbbb-2" });
+  expect(answer("done")).toMatchObject({ error: "That task is already done." });
+  await send({ t: "task.start", requestId: "running", sessionId: id, taskId: "cccccccc-3" });
+  expect(answer("running")).toMatchObject({ error: "That task is already running." });
+  await send({ t: "task.start", requestId: "gone", sessionId: id, taskId: "gone" });
+  expect(answer("gone")).toMatchObject({ error: "That task no longer exists." });
+
+  for (const id of ["busy", "done", "running", "gone"]) expect(answer(id).items).toBeUndefined();
+  expect(await readFile(path, "utf8")).toBe(file);
+  expect(daemon.agentSessionId(id)).toBe(before);
+  expect(sent.some((m) => m.payload?.kind === "context_reset")).toBe(false);
+});
+
+test("tasks: any other agent's session is refused with an error, not a list", async () => {
+  const { daemon, sent, send } = await ggDaemon();
+  plantControlledSession(daemon, "s1");
+  await send({ t: "tasks", requestId: "t1", sessionId: "s1" });
+  const answer = sent.find((m) => m.t === "tasks" && m.requestId === "t1");
+  expect(answer).toMatchObject({ sessionId: "s1", error: "Tasks are for GG Coder conversations." });
+  expect(answer.items).toBeUndefined();
 });

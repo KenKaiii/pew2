@@ -1,12 +1,14 @@
 /**
  * The topmost sheets: New goal and goal settings, then everything the agent
- * is blocked on (approval, ask_user, plan review) and the checklist.
+ * is blocked on (approval, ask_user, plan review), the checklist and tasks.
  */
+import { useEffect, useState } from "react";
 import { NewGoalSheet } from "./NewGoalSheet";
 import { GoalSettingsSheet } from "./GoalSettingsSheet";
 import { ApprovalSheet } from "./ApprovalSheet";
 import { AskUserSheet } from "./AskUserSheet";
 import { ChecklistSheet, PlanReviewSheet } from "./GgReview";
+import { TasksSheet } from "./TasksSheet";
 import type { useDaemon } from "../useDaemon";
 import { inboxItemId } from "../voiceCall";
 import type { useGoalControls } from "../useGoalControls";
@@ -42,6 +44,9 @@ export function GoalSheets({
     checklistOpen,
     setChecklistOpen,
     checklistHere,
+    tasksOpen,
+    setTasksOpen,
+    tasksHere,
     decidePlan,
     answerAsk,
     closeNewGoal,
@@ -49,6 +54,19 @@ export function GoalSheets({
     goalSettingsOpen,
     closeGoalSettings,
   } = goals;
+  // A Run is answered by the daemon: one it refused (busy, or the task deleted or
+  // finished at the desk) reopens the sheet saying why. Accepted, this chat clears and runs it.
+  const [pendingRun, setPendingRun] = useState<{ requestId: string; sessionId: string }>();
+  // Held apart from the list: reopening re-asks, and that fresh answer carries no error.
+  const [runError, setRunError] = useState<string>();
+  const runAnswer = pendingRun ? gg.tasks[pendingRun.sessionId] : undefined;
+  useEffect(() => {
+    if (!pendingRun || runAnswer?.requestId !== pendingRun.requestId) return;
+    setPendingRun(undefined);
+    if (!runAnswer.error) return;
+    setRunError(runAnswer.error);
+    setTasksOpen(true);
+  }, [pendingRun, runAnswer, setTasksOpen]);
   // "Talk it through" focuses the call on the inbox item this sheet shows.
   const talkSession = daemon.sessionId;
   const talkAbout = (kind: "approval" | "question") =>
@@ -106,6 +124,26 @@ export function GoalSheets({
         onRun={(prompt) => {
           setChecklistOpen(false);
           send(prompt);
+        }}
+      />
+      <TasksSheet
+        visible={tasksOpen}
+        items={tasksHere?.items}
+        error={runError ?? tasksHere?.error}
+        online={daemon.status === "online"}
+        busy={daemon.busy}
+        onClose={() => {
+          setRunError(undefined);
+          setTasksOpen(false);
+        }}
+        onRun={(task) => {
+          setRunError(undefined);
+          const sessionId = daemon.sessionId;
+          if (!task.runPrompt || !sessionId) return;
+          const requestId = daemon.startTask(sessionId, task.id);
+          if (!requestId) return;
+          setPendingRun({ requestId, sessionId });
+          setTasksOpen(false);
         }}
       />
     </>

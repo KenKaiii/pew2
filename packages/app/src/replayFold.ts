@@ -14,6 +14,7 @@ import { isEmptyChunk, readChunk, type Chunk } from "./chunks";
 import { joinChunks } from "./chunkJoin";
 import { readUsage, type ContextUsage } from "./contextUsage";
 import { readPlanAcceptedSession } from "./ggReview";
+import { contextResetText, readContextReset, type ContextReset } from "./ggTasks";
 import { dedupeImages } from "./images";
 import { pendingPermission, readPermissionRequest } from "./permissions";
 import type { PermissionRequest, Session, Turn } from "./useDaemon";
@@ -134,6 +135,35 @@ export function turnFromChunk(id: string, chunk: Chunk): Turn {
     text: chunk.text,
     ...(chunk.images ? { images: chunk.images } : {}),
     ...(chunk.ken ? { ken: chunk.ken } : {}),
+  };
+}
+
+/**
+ * The transcript after a task started in this chat: the agent's context is
+ * fresh, so the earlier turns are no longer what it knows, and the chat
+ * restarts from one note, as GG Coder's own window clears on `session_reset`.
+ */
+export function resetTurns(key: string, reset: ContextReset): Turn[] {
+  return [
+    {
+      id: key,
+      role: "note",
+      text: contextResetText(reset),
+      ...(reset.title ? { task: reset.title } : {}),
+    },
+  ];
+}
+
+/** A conversation's row after a reset: the new agent session, the task's title, no meter. */
+export function resetRow(session: Session, turns: Turn[], reset: ContextReset): Session {
+  return {
+    ...session,
+    turns,
+    title: reset.title || session.title,
+    agentSessionId: reset.agentSessionId ?? session.agentSessionId,
+    // The old context's reading and receipt describe a context that is gone.
+    usage: undefined,
+    receipt: undefined,
   };
 }
 
@@ -271,6 +301,14 @@ export function foldBackgroundEvent<S extends { sessions: Session[] }>(
   if (!sessionId) return prev;
   const permission = readPermissionRequest(payload);
   if (permission) return recordPermission(prev, sessionId, permission);
+  const reset = readContextReset(payload);
+  if (reset) {
+    // The task's turn starts right behind the marker.
+    const sessions = prev.sessions.map((row) =>
+      row.id === sessionId ? { ...resetRow(row, resetTurns(key, reset), reset), busy: true } : row,
+    );
+    return { ...prev, sessions };
+  }
   const chunk = readChunk(payload);
   if (!chunk || isEmptyChunk(chunk)) return prev;
   const at = prev.sessions.findIndex((session) => session.id === sessionId);
@@ -365,6 +403,15 @@ export function foldSessionEvents<S extends FoldState>(prev: S, events: readonly
       // Also on the conversation's row, so reopening it later shows it.
       const row = message.sessionId ? byId.get(message.sessionId) : undefined;
       if (row) byId.set(row.id, { ...row, usage: replayedUsage });
+      continue;
+    }
+    const reset = readContextReset(payload);
+    if (reset) {
+      // In place: the rows below share this working copy.
+      turns.splice(0, turns.length, ...resetTurns(`${message.sessionId}:${message.seq}`, reset));
+      usage = undefined;
+      const row = message.sessionId ? byId.get(message.sessionId) : undefined;
+      if (row) byId.set(row.id, resetRow(row, turns, reset));
       continue;
     }
     const chunk = readChunk(payload);
