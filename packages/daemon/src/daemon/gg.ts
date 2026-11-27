@@ -61,6 +61,11 @@ export abstract class DaemonGg extends DaemonProjects {
     );
     await handle.adopt({ cwd: session.cwd, ...this.sessionCallbacks(session) });
     session.agentSessionId = handle.sessionId;
+    // GG Coder drops the old session's questions without telling the client.
+    for (const requestId of [...(session.asks?.keys() ?? [])]) {
+      handle.answerAsk(requestId, { action: "cancel" });
+      this.closeAsk(session, requestId);
+    }
     // A plan pending in the old context can no longer be decided.
     if (session.plan) this.applyPlanState(session, { planMode: false, pending: null });
     await this.applyPrefs(session, session.providerId, selectors);

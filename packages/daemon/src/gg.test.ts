@@ -670,6 +670,32 @@ test("tasks: task.start runs the task in the same chat on a fresh agent context"
   ]);
 });
 
+test("tasks: task.start closes a question the old context left open", async () => {
+  const { daemon, sent, send, id } = await ggTaskSession([
+    { id: "aaaaaaaa-1", title: "Fix login", prompt: "fix it", status: "pending" },
+  ]);
+  const session = (daemon as any).sessions.get(id);
+  session.asks = new Map([["ask_old", []]]);
+
+  await send({ t: "task.start", requestId: "t1", sessionId: id, taskId: "aaaaaaaa-1" });
+  const ask = await until(
+    () => sent.find((m) => m.t === "session.event" && m.payload?.kind === "ask_user"),
+    "ask",
+  );
+  daemon.answerAsk(id, ask.payload.requestId, { action: "cancel" });
+  await until(() => sent.find((m) => m.t === "session.idle" && m.sessionId === id), "task idle");
+
+  expect(
+    sent.find(
+      (m) =>
+        m.t === "session.event" &&
+        m.payload?.kind === "ask_user_closed" &&
+        m.payload.requestId === "ask_old",
+    )?.payload,
+  ).toEqual({ kind: "ask_user_closed", requestId: "ask_old" });
+  expect(session.asks.has("ask_old")).toBe(false);
+});
+
 test("tasks: task.start is refused while working or for a task not to do, file untouched", async () => {
   const { daemon, sent, send, id, path } = await ggTaskSession([
     { id: "aaaaaaaa-1", title: "Fix login", prompt: "fix it", status: "pending" },
