@@ -431,7 +431,7 @@ export function Pew2({
   // `EXPO_PUBLIC_DEV_SHEET=<name>` (development only) starts with that sheet
   // or overlay open, so each can be checked on the simulator without a tap:
   // attach, connection, context, model, commands, newchat, thought, carousel,
-  // checklist, goalsettings.
+  // checklist, tasks, goalsettings.
   const devSheet = __DEV__ ? process.env.EXPO_PUBLIC_DEV_SHEET : undefined;
   const {
     attachments,
@@ -1213,6 +1213,7 @@ export function Pew2({
     planHere,
     stripsHere,
     openChecklist,
+    openTasks,
     ggAgent,
     autopilotOffered,
     autopilotOn,
@@ -1577,6 +1578,7 @@ export function Pew2({
                     onCommands={openCommands}
                     onProjectDetails={openContext}
                     onChecklist={stripsHere.checklist ? openChecklist : undefined}
+                    onTasks={stripsHere.tasks ? openTasks : undefined}
                     planMode={stripsHere.plan && planHere?.planMode === true}
                     selectors={composerSelectors}
                     onSend={send}

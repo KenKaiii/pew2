@@ -511,6 +511,30 @@ export async function handleMessage(raw: string, ctx: HandlerContext): Promise<v
         break;
       }
 
+      case "tasks": {
+        const { requestId, sessionId } = message;
+        try {
+          reply({ t: "tasks", requestId, sessionId, items: await daemon.tasks(sessionId) });
+        } catch (error) {
+          reply({ t: "tasks", requestId, sessionId, error: humanError(error) });
+        }
+        break;
+      }
+
+      case "task.start": {
+        // Run in this conversation, on a fresh context, as GG Coder's own task
+        // runner does. A turn on the normal prompt path, so busy/idle hold.
+        const { requestId, sessionId } = message;
+        try {
+          const { run, items } = await daemon.claimTask(sessionId, message.taskId);
+          runTurn(ctx, sessionId, daemon.prompt(sessionId, "", [], { taskRun: run }));
+          reply({ t: "tasks", requestId, sessionId, items });
+        } catch (error) {
+          reply({ t: "tasks", requestId, sessionId, error: humanError(error) });
+        }
+        break;
+      }
+
       case "goals": {
         // A missing or too-old GG Coder is an answer, not a failure.
         try {

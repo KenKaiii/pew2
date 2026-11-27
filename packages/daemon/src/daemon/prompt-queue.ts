@@ -4,6 +4,7 @@
  */
 import type { PromptOptions } from "../acp/connect.js";
 import { attachmentLimitError, storeAttachments, type StoredAttachment } from "../attachments.js";
+import { markInProgress } from "../gg-tasks.js";
 import type { wire } from "@pew2/protocol";
 import { DaemonGg } from "./gg.js";
 import {
@@ -12,7 +13,11 @@ import {
   type ActiveSession,
   type PromptOutcome,
   type QueueEntry,
+  type TaskRun,
 } from "./types.js";
+
+/** A task run is one more kind of turn with no user words of its own. */
+type TurnOptions = PromptOptions & { taskRun?: TaskRun };
 
 export abstract class DaemonPromptQueue extends DaemonGg {
   /**
@@ -29,13 +34,15 @@ export abstract class DaemonPromptQueue extends DaemonGg {
     sessionId: string,
     text: string,
     attachments: wire.PromptAttachment[] = [],
-    options: PromptOptions = {},
+    options: TurnOptions = {},
   ): Promise<PromptOutcome> {
     const session = this.require(sessionId);
     if (session.working) {
       if (options.goalTurn) throw new Error("GG Goals is already working on this goal.");
       if (options.planDecision)
         throw new Error("The agent is still working; decide the plan when it stops.");
+      if (options.taskRun)
+        throw new Error("The agent is still working; run the task when it stops.");
       this.enqueue(session, text, attachments);
       return "queued";
     }
@@ -62,12 +69,15 @@ export abstract class DaemonPromptQueue extends DaemonGg {
             texts: { text: string; stored: StoredAttachment[] }[];
             goalTurn?: PromptOptions["goalTurn"];
             planDecision?: PromptOptions["planDecision"];
+            taskRun?: TaskRun;
           }
         | undefined = options.goalTurn
         ? { texts: [], goalTurn: options.goalTurn }
         : options.planDecision
           ? { texts: [], planDecision: options.planDecision }
-          : { texts: [{ text, stored: await storeAttachments(sessionId, attachments) }] };
+          : options.taskRun
+            ? { texts: [], taskRun: options.taskRun }
+            : { texts: [{ text, stored: await storeAttachments(sessionId, attachments) }] };
       try {
         while (next) {
           // A new turn, so the previous turn's closing words must not be what
@@ -87,10 +97,21 @@ export abstract class DaemonPromptQueue extends DaemonGg {
             });
           }
           await session.ready;
+          if (next.taskRun) {
+            const { id, title } = next.taskRun;
+            const agentSessionId = await this.resetContext(session);
+            // Logged before the task file is touched: the context is already
+            // fresh, and every screen should say so even if marking it fails.
+            // It stands in for the user turn, which the task prompt never is.
+            this.record(session, { kind: "context_reset", reason: "task", title, agentSessionId });
+            await markInProgress(this.ggTasksBase, session.cwd, id);
+          }
           if (next.goalTurn) {
             await session.handle!.prompt("", [], { goalTurn: next.goalTurn });
           } else if (next.planDecision) {
             await session.handle!.prompt("", [], { planDecision: next.planDecision });
+          } else if (next.taskRun) {
+            await session.handle!.prompt(next.taskRun.prompt);
           } else {
             await session.handle!.prompt(
               next.texts.map((entry) => entry.text).join("\n\n"),

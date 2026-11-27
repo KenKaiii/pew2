@@ -13,6 +13,8 @@ import { foldActivity, IDLE_ACTIVITY, type Activity } from "./activity";
 import { isEmptyChunk, readChunk, type Chunk } from "./chunks";
 import { joinChunks } from "./chunkJoin";
 import { readUsage, type ContextUsage } from "./contextUsage";
+import { readPlanAcceptedSession } from "./ggReview";
+import { contextResetText, readContextReset, type ContextReset } from "./ggTasks";
 import { dedupeImages } from "./images";
 import { pendingPermission, readPermissionRequest } from "./permissions";
 import type { PermissionRequest, Session, Turn } from "./useDaemon";
@@ -133,6 +135,35 @@ export function turnFromChunk(id: string, chunk: Chunk): Turn {
     text: chunk.text,
     ...(chunk.images ? { images: chunk.images } : {}),
     ...(chunk.ken ? { ken: chunk.ken } : {}),
+  };
+}
+
+/**
+ * The transcript after a task started in this chat: the agent's context is
+ * fresh, so the earlier turns are no longer what it knows, and the chat
+ * restarts from one note, as GG Coder's own window clears on `session_reset`.
+ */
+export function resetTurns(key: string, reset: ContextReset): Turn[] {
+  return [
+    {
+      id: key,
+      role: "note",
+      text: contextResetText(reset),
+      ...(reset.title ? { task: reset.title } : {}),
+    },
+  ];
+}
+
+/** A conversation's row after a reset: the new agent session, the task's title, no meter. */
+export function resetRow(session: Session, turns: Turn[], reset: ContextReset): Session {
+  return {
+    ...session,
+    turns,
+    title: reset.title || session.title,
+    agentSessionId: reset.agentSessionId ?? session.agentSessionId,
+    // The old context's reading and receipt describe a context that is gone.
+    usage: undefined,
+    receipt: undefined,
   };
 }
 
@@ -270,6 +301,14 @@ export function foldBackgroundEvent<S extends { sessions: Session[] }>(
   if (!sessionId) return prev;
   const permission = readPermissionRequest(payload);
   if (permission) return recordPermission(prev, sessionId, permission);
+  const reset = readContextReset(payload);
+  if (reset) {
+    // The task's turn starts right behind the marker.
+    const sessions = prev.sessions.map((row) =>
+      row.id === sessionId ? { ...resetRow(row, resetTurns(key, reset), reset), busy: true } : row,
+    );
+    return { ...prev, sessions };
+  }
   const chunk = readChunk(payload);
   if (!chunk || isEmptyChunk(chunk)) return prev;
   const at = prev.sessions.findIndex((session) => session.id === sessionId);
@@ -279,10 +318,12 @@ export function foldBackgroundEvent<S extends { sessions: Session[] }>(
   const turns = [...session.turns];
   applyChunk(turns, key, chunk);
   const sessions = [...prev.sessions];
+  const moved = readPlanAcceptedSession(payload);
   sessions[at] = {
     ...session,
     turns: capTurns(turns),
     title: titledBy(session, chunk),
+    ...(moved ? { agentSessionId: moved } : {}),
     // A system chunk is a failure notice, not work in progress — the same rule
     // the visible path applies, so the drawer dot and the spinner agree.
     // Ken's verdicts say nothing about whether the agent is working.
@@ -364,6 +405,15 @@ export function foldSessionEvents<S extends FoldState>(prev: S, events: readonly
       if (row) byId.set(row.id, { ...row, usage: replayedUsage });
       continue;
     }
+    const reset = readContextReset(payload);
+    if (reset) {
+      // In place: the rows below share this working copy.
+      turns.splice(0, turns.length, ...resetTurns(`${message.sessionId}:${message.seq}`, reset));
+      usage = undefined;
+      const row = message.sessionId ? byId.get(message.sessionId) : undefined;
+      if (row) byId.set(row.id, resetRow(row, turns, reset));
+      continue;
+    }
     const chunk = readChunk(payload);
     if (!chunk || isEmptyChunk(chunk)) continue;
 
@@ -372,7 +422,16 @@ export function foldSessionEvents<S extends FoldState>(prev: S, events: readonly
     // Mirror into history so the sidebar can reopen this later, and title the
     // session from its first user message.
     const entry = message.sessionId ? byId.get(message.sessionId) : undefined;
-    if (entry) byId.set(entry.id, { ...entry, turns, title: titledBy(entry, chunk) });
+    // An accepted plan keeps its transcript but moves to the implementation's session.
+    const moved = readPlanAcceptedSession(payload);
+    if (entry) {
+      byId.set(entry.id, {
+        ...entry,
+        turns,
+        title: titledBy(entry, chunk),
+        ...(moved ? { agentSessionId: moved } : {}),
+      });
+    }
   }
 
   return {

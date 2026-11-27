@@ -22,6 +22,7 @@ export type GoalSummary = wire.GoalSummary;
 export type GoalState = wire.GoalState;
 export type GoalWorker = wire.GoalWorker;
 export type GoalResult = wire.GoalResult;
+export type TaskItem = wire.TaskRow;
 
 export interface ReturnedMessages {
   sessionId: string;
@@ -46,6 +47,9 @@ export interface GgState {
   /** Last checklist answer per session; `changed` nudges bump `checklistNonce`. */
   checklists: Record<string, { items?: ChecklistItem[]; error?: string; staleAfterDays?: number }>;
   checklistNonce: number;
+  /** Last task-list answer per session; a finished turn bumps `tasksNonce` so an open sheet re-asks. */
+  tasks: Record<string, { items?: TaskItem[]; error?: string; requestId?: string }>;
+  tasksNonce: number;
   /** GG extensions per provider id, from `provider.capabilities` (absent = none). */
   extensions: Record<string, wire.ProviderExtensions>;
 }
@@ -60,6 +64,8 @@ export const EMPTY_GG: GgState = {
   autopilot: {},
   checklists: {},
   checklistNonce: 0,
+  tasks: {},
+  tasksNonce: 0,
   extensions: {},
 };
 
@@ -321,4 +327,57 @@ export function applyReviewMessage(
     };
   }
   return state;
+}
+
+const TASK_STATUSES = new Set<string>(["pending", "in-progress", "done"]);
+
+function isTask(value: unknown): value is TaskItem {
+  if (typeof value !== "object" || value === null) return false;
+  const t = value as Record<string, unknown>;
+  return (
+    typeof t.id === "string" &&
+    typeof t.title === "string" &&
+    typeof t.prompt === "string" &&
+    typeof t.status === "string" &&
+    TASK_STATUSES.has(t.status) &&
+    (typeof t.runPrompt === "string" || t.runPrompt === null)
+  );
+}
+
+/** A `tasks` frame: the answer to `tasks` or `task.start`, replacing that session's list. */
+export function applyTasksMessage(
+  state: GgState,
+  message: { t: string } & Record<string, unknown>,
+): GgState {
+  const sessionId = message.sessionId;
+  if (message.t !== "tasks" || typeof sessionId !== "string") return state;
+  return {
+    ...state,
+    tasks: {
+      ...state.tasks,
+      [sessionId]: {
+        items: Array.isArray(message.items) ? message.items.filter(isTask) : undefined,
+        error: typeof message.error === "string" ? message.error : undefined,
+        requestId: typeof message.requestId === "string" ? message.requestId : undefined,
+      },
+    },
+  };
+}
+
+/** Show a task as started the moment Run is tapped; the daemon's answer then replaces it. */
+export function markTaskStarted(state: GgState, sessionId: string, taskId: string): GgState {
+  const here = state.tasks[sessionId];
+  if (!here?.items) return state;
+  return {
+    ...state,
+    tasks: {
+      ...state.tasks,
+      [sessionId]: {
+        ...here,
+        items: here.items.map((t) =>
+          t.id === taskId ? { ...t, status: "in-progress" as const, runPrompt: null } : t,
+        ),
+      },
+    },
+  };
 }

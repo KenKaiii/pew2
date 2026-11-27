@@ -13,23 +13,25 @@ export function isGoalsProvider(providerId: string | undefined): boolean {
 interface StripExtensions {
   autopilot?: boolean;
   checklist?: boolean;
+  tasks?: boolean;
 }
 
 /**
- * Which GG Coder strips a conversation shows. Autopilot, Checklist and the
- * plan sheet are strictly GG Coder's: never for a goal, whatever the
+ * Which GG Coder strips a conversation shows. Autopilot, Checklist, Tasks and
+ * the plan sheet are strictly GG Coder's: never for a goal, whatever the
  * extensions claim; otherwise only what the provider advertises.
  */
 export function ggStrips(
   providerId: string | undefined,
   extensions: StripExtensions | undefined,
   hasSession: boolean,
-): { autopilot: boolean; checklist: boolean; plan: boolean } {
+): { autopilot: boolean; checklist: boolean; tasks: boolean; plan: boolean } {
   if (!hasSession || isGoalsProvider(providerId))
-    return { autopilot: false, checklist: false, plan: false };
+    return { autopilot: false, checklist: false, tasks: false, plan: false };
   return {
     autopilot: extensions?.autopilot === true,
     checklist: extensions?.checklist === true,
+    tasks: extensions?.tasks === true,
     plan: true,
   };
 }

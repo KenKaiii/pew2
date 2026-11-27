@@ -41,6 +41,8 @@ export interface PermissionRequest {
 
 export interface Turn {
   id: string;
+  /** Only on a task's opening note: the title, drawn as GG Coder's "Task:" row. */
+  task?: string;
   /**
    * Stable React identity, fixed for the life of the message.
    *

@@ -63,6 +63,8 @@ interface Props {
   onProjectDetails: () => void;
   /** GG Coder's checklist chip, joined onto the context row when present. */
   onChecklist?: () => void;
+  /** GG Coder's task list chip, beside the checklist. */
+  onTasks?: () => void;
   /** GG Coder is in plan mode: a lit chip on the context row. */
   planMode?: boolean;
   /**
@@ -107,6 +109,7 @@ function ComposerDockView(
     onCommands,
     onProjectDetails,
     onChecklist,
+    onTasks,
     planMode,
     onSend,
     busy,
@@ -196,6 +199,7 @@ function ComposerDockView(
           onCommands={onCommands}
           onDetails={onProjectDetails}
           onChecklist={onChecklist}
+          onTasks={onTasks}
           planMode={planMode}
         />
       )}

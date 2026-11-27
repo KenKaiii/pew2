@@ -6,6 +6,7 @@
 import type { LoadedProvider } from "../providers/registry.js";
 import type {
   AcpSessionHandle,
+  AdoptOptions,
   AgentSession,
   AvailableCommand,
   ConfigOption,
@@ -19,6 +20,17 @@ import type { StoredAttachment } from "../attachments.js";
 import type { AgentProject } from "../projects.js";
 import { SESSION_HISTORY_LIMIT } from "../session-history.js";
 import type { wire } from "@pew2/protocol";
+
+/** A project task to run in a fresh context: what `task.start` claimed. */
+export interface TaskRun {
+  id: string;
+  title: string;
+  /** The task's prompt plus GG Coder's mark-it-done hint. */
+  prompt: string;
+}
+
+/** The per-session receivers an agent connection reports into. */
+export type SessionCallbacks = Omit<AdoptOptions, "cwd" | "loadSessionId" | "haveHistory">;
 
 export interface ActiveSession {
   handle?: AcpSessionHandle;
@@ -222,6 +234,8 @@ export function readExtensions(
   const keys = ["queue", "askUser", "goals", "planReview", "autopilot", "checklist"] as const;
   const out: wire.ProviderExtensions = {};
   for (const key of keys) if (gg[key] !== undefined) out[key] = Boolean(gg[key]);
+  // The daemon reads the task file itself, so any GG Coder has a task list.
+  out.tasks = true;
   return out;
 }
 

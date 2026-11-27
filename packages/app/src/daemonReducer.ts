@@ -7,12 +7,14 @@ import type { RefObject } from "react";
 import { mergeAgentSessions, replaceAgentSessionStub } from "./agentHistory";
 import { recordReceipt } from "./turnReceipts";
 import { adoptPendingSession } from "./pendingSession";
-import { foldActivity, summariseActivity, IDLE_ACTIVITY } from "./activity";
+import { beginActivity, foldActivity, summariseActivity, IDLE_ACTIVITY } from "./activity";
 import { findDuplicateError } from "./errorDedup";
 import { isEmptyChunk, readChunk } from "./chunks";
 import { readAvailableCommands } from "./slashCommands";
 import { readUsage } from "./contextUsage";
-import { applyChunk, capTurns, isOptimistic } from "./replayFold";
+import { applyChunk, capTurns, isOptimistic, resetRow, resetTurns } from "./replayFold";
+import { readContextReset } from "./ggTasks";
+import { readPlanAcceptedSession } from "./ggReview";
 import { readPermissionRequest } from "./permissions";
 import type { Session } from "./daemonTypes";
 import { firstUserText, type State, type TurnFinished } from "./daemonState";
@@ -281,6 +283,26 @@ export function reduceMessage(prev: State, message: any, scope: MessageScope): S
         };
       }
 
+      // A task started in this chat on a fresh agent context: the transcript
+      // restarts from its note, and the task's turn is already under way.
+      const reset = readContextReset(payload);
+      if (reset) {
+        const turns = resetTurns(`${message.sessionId}:${message.seq}`, reset);
+        const sessions = base.sessions.map((row) =>
+          row.id === message.sessionId ? { ...resetRow(row, turns, reset), busy: true } : row,
+        );
+        if (message.sessionId !== sessionRef.current) return { ...base, sessions };
+        return {
+          ...base,
+          turns,
+          sessions,
+          usage: undefined,
+          busy: true,
+          activity: beginActivity(now),
+          receipt: undefined,
+        };
+      }
+
       const chunk = readChunk(payload);
       if (!chunk || isEmptyChunk(chunk)) return base;
 
@@ -293,6 +315,8 @@ export function reduceMessage(prev: State, message: any, scope: MessageScope): S
       // place a turn is added to the visible transcript, and it runs for
       // every chunk of every streamed answer.
       const capped = capTurns(turns);
+      // An accepted plan keeps its transcript but moves to the implementation's session.
+      const moved = readPlanAcceptedSession(payload);
       // Mirror into history so the sidebar can reopen this later, and
       // title the session from its first user message.
       const sessions = prev.sessions.map((session) =>
@@ -304,6 +328,7 @@ export function reduceMessage(prev: State, message: any, scope: MessageScope): S
                 session.title === "New conversation" && chunk.role === "user"
                   ? chunk.text.trim().slice(0, 60)
                   : session.title,
+              ...(moved ? { agentSessionId: moved } : {}),
             }
           : session,
       );

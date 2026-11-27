@@ -151,6 +151,16 @@ function TurnBody({ turn, onOpenThought, retryPrompt, onRetry, liveIdentity }: T
     );
   }
 
+  if (turn.role === "note" && turn.task) {
+    // GG Coder's task row: "Task:" muted, then the title, left-aligned above the run.
+    return (
+      <Text style={styles.taskRow} accessibilityRole="header">
+        <Text style={styles.taskLabel}>Task: </Text>
+        {turn.task}
+      </Text>
+    );
+  }
+
   if (turn.role === "note") {
     return (
       <View style={styles.noteRow} accessibilityRole="text">
@@ -255,6 +265,7 @@ export const Turn = memo(
     before.onRetry === after.onRetry &&
     before.turn.text === after.turn.text &&
     before.turn.role === after.turn.role &&
+    before.turn.task === after.turn.task &&
     before.turn.ken?.phase === after.turn.ken?.phase &&
     // The one flag that is drawn: without it the label would outlive the
     // message going out, which is the moment it stops being true.
@@ -274,6 +285,13 @@ const styles = StyleSheet.create({
     gap: theme.space(3),
     paddingVertical: theme.space(1),
   },
+  taskRow: {
+    color: theme.color.text,
+    fontSize: theme.font.body,
+    fontWeight: "600",
+    paddingVertical: theme.space(1),
+  },
+  taskLabel: { color: theme.color.textDim, fontWeight: "400" },
   noteRule: { flex: 1, height: StyleSheet.hairlineWidth, backgroundColor: theme.color.border },
   noteText: {
     color: theme.color.textDim,

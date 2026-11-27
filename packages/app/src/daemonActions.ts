@@ -17,7 +17,7 @@ import {
   type WireAttachment,
 } from "./attachments";
 import { capTurns } from "./replayFold";
-import { closeAsk, dropQueued } from "./ggState";
+import { closeAsk, dropQueued, markTaskStarted } from "./ggState";
 import { decidedPlan, type PlanInfo } from "./ggReview";
 import { sendsToQueue } from "./queue";
 import type { AskResult } from "./askUser";
@@ -415,6 +415,19 @@ export function createActions(refs: ActionRefs, deps: ActionDeps) {
     /** Ask for the project checklist of an open GG Coder session. */
     requestChecklist: (sessionId: string) => {
       post({ t: "checklist", requestId: `checklist_${++goalCounter.current}`, sessionId });
+    },
+
+    /** Ask for the task list of an open GG Coder session's project. */
+    requestTasks: (sessionId: string) => {
+      post({ t: "tasks", requestId: `tasks_${++goalCounter.current}`, sessionId });
+    },
+
+    /** Run a task in this chat on a fresh context. Returns the request id to watch in `tasks`, or undefined when nothing could be sent. */
+    startTask: (sessionId: string, taskId: string): string | undefined => {
+      const requestId = `tasks_${++goalCounter.current}`;
+      if (!post({ t: "task.start", requestId, sessionId, taskId })) return undefined;
+      setGg((g) => markTaskStarted(g, sessionId, taskId));
+      return requestId;
     },
 
     /** Ask for the goal list (GG Coder). */

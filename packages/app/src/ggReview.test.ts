@@ -5,6 +5,7 @@ import {
   groupChecklist,
   readGgEvent,
   readPlan,
+  readPlanAcceptedSession,
   type ChecklistItem,
 } from "./ggReview";
 import { applyReplayExtras, applyReviewMessage, EMPTY_GG } from "./ggState";
@@ -116,4 +117,14 @@ test("Ken rows keep their own role and never coalesce", async () => {
   applyChunk(turns, "s:1", ken);
   applyChunk(turns, "s:2", capped);
   expect(turns.map((t) => t.ken?.phase)).toEqual(["done", "capped"]);
+});
+
+test("readPlanAcceptedSession reads the implementation's agent session from plan_accepted only", () => {
+  expect(readPlanAcceptedSession({ kind: "plan_accepted", agentSessionId: "gg_impl" })).toBe(
+    "gg_impl",
+  );
+  expect(readPlanAcceptedSession({ kind: "plan_accepted", planTotal: 3 })).toBeUndefined();
+  expect(readPlanAcceptedSession({ kind: "plan_accepted", agentSessionId: "" })).toBeUndefined();
+  expect(readPlanAcceptedSession({ kind: "context_reset", agentSessionId: "x" })).toBeUndefined();
+  expect(readPlanAcceptedSession(null)).toBeUndefined();
 });

@@ -1357,7 +1357,10 @@ export const PlanState = z.object({
 /**
  * App -> daemon. Decide a pending plan.
  *  - `accept`: implement it. GG Coder starts a fresh context with the plan
- *    baked in (same daemon session; the transcript gets a divider).
+ *    baked in (same daemon session; the transcript gets a divider). Logged as
+ *    `{ kind: "plan_accepted", planTotal?, agentSessionId? }`; `agentSessionId`
+ *    is the implementation's on-disk session, which resume must reopen
+ *    (absent from older daemons).
  *  - `feedback`: revise it read-only with `feedback`, then submit again.
  *  - `reject`: drop it; the agent leaves plan mode and waits.
  * Logged as `{ kind: "plan_decision", action, feedback? }`.
@@ -1438,6 +1441,51 @@ export const Checklist = z.object({
   error: z.string().optional(),
 });
 
+// ── Project tasks (GG Coder) ───────────────────────────────
+
+export const TaskRow = z.object({
+  id: z.string(),
+  title: z.string(),
+  prompt: z.string(),
+  status: z.enum(["pending", "in-progress", "done"]),
+  /** What running the task sends the agent; null unless it is still to do. */
+  runPrompt: z.string().nullable(),
+});
+
+/** App -> daemon. Read the task list of an open GG Coder session's project. */
+export const TasksRequest = z.object({
+  t: z.literal("tasks"),
+  requestId: z.string(),
+  sessionId: z.string(),
+});
+
+/**
+ * App -> daemon. Run a task in this conversation: the agent's context is reset,
+ * the task marked in progress, and its prompt sent, as GG Coder's runner does.
+ *
+ * The reset is logged as a session event `{ kind: "context_reset", reason:
+ * "task", title, agentSessionId }`, before the task file is marked in progress,
+ * so every client shows the fresh context even if marking it fails. It means
+ * the agent remembers nothing before it: clients restart the transcript from a
+ * "Task: <title>" note and move the chat's row to `agentSessionId`, the new
+ * on-disk session that resume must reopen.
+ */
+export const TaskStart = z.object({
+  t: z.literal("task.start"),
+  requestId: z.string(),
+  sessionId: z.string(),
+  taskId: z.string(),
+});
+
+/** Daemon -> app. Answer to `tasks`, and to `task.start` (the list with it in progress, or why not). */
+export const Tasks = z.object({
+  t: z.literal("tasks"),
+  requestId: z.string().optional(),
+  sessionId: z.string(),
+  items: z.array(TaskRow).optional(),
+  error: z.string().optional(),
+});
+
 /**
  * Which GG Coder extensions this provider speaks, from its ACP
  * `agentCapabilities._meta.gg`. Carried on `ProviderCapabilities.extensions`;
@@ -1450,6 +1498,8 @@ export const ProviderExtensions = z.object({
   planReview: z.boolean().optional(),
   autopilot: z.boolean().optional(),
   checklist: z.boolean().optional(),
+  /** The project task list; read by the daemon, so set whenever `_meta.gg` is present. */
+  tasks: z.boolean().optional(),
 });
 
 export const ErrorMessage = z.object({
@@ -1507,6 +1557,8 @@ export const ClientMessage = z.discriminatedUnion("t", [
   PlanDecide,
   AutopilotSet,
   ChecklistRequest,
+  TasksRequest,
+  TaskStart,
   VoiceStatusRequest,
   VoiceLogin,
   VoiceSessionRequest,
@@ -1540,6 +1592,7 @@ export const ServerMessage = z.discriminatedUnion("t", [
   PlanState,
   AutopilotState,
   Checklist,
+  Tasks,
   VoiceStatus,
   VoiceInbox,
   VoiceBoard,
@@ -1631,4 +1684,8 @@ export type AutopilotSet = z.output<typeof AutopilotSet>;
 export type ChecklistItemRow = z.output<typeof ChecklistItemRow>;
 export type ChecklistRequest = z.output<typeof ChecklistRequest>;
 export type Checklist = z.output<typeof Checklist>;
+export type TaskRow = z.output<typeof TaskRow>;
+export type TasksRequest = z.output<typeof TasksRequest>;
+export type TaskStart = z.output<typeof TaskStart>;
+export type Tasks = z.output<typeof Tasks>;
 export type ProviderExtensions = z.output<typeof ProviderExtensions>;
