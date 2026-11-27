@@ -13,6 +13,7 @@ import { isEmptyChunk, readChunk } from "./chunks";
 import { readAvailableCommands } from "./slashCommands";
 import { readUsage } from "./contextUsage";
 import { applyChunk, capTurns, isOptimistic } from "./replayFold";
+import { readPlanAcceptedSession } from "./ggReview";
 import { readPermissionRequest } from "./permissions";
 import type { Session } from "./daemonTypes";
 import { firstUserText, type State, type TurnFinished } from "./daemonState";
@@ -293,6 +294,8 @@ export function reduceMessage(prev: State, message: any, scope: MessageScope): S
       // place a turn is added to the visible transcript, and it runs for
       // every chunk of every streamed answer.
       const capped = capTurns(turns);
+      // An accepted plan keeps its transcript but moves to the implementation's session.
+      const moved = readPlanAcceptedSession(payload);
       // Mirror into history so the sidebar can reopen this later, and
       // title the session from its first user message.
       const sessions = prev.sessions.map((session) =>
@@ -304,6 +307,7 @@ export function reduceMessage(prev: State, message: any, scope: MessageScope): S
                 session.title === "New conversation" && chunk.role === "user"
                   ? chunk.text.trim().slice(0, 60)
                   : session.title,
+              ...(moved ? { agentSessionId: moved } : {}),
             }
           : session,
       );

@@ -110,6 +110,13 @@ export function readGgEvent(payload: unknown): GgEventRow | undefined {
   return undefined;
 }
 
+/** The agent session a logged `plan_accepted` moved the chat to; undefined from an older daemon. */
+export function readPlanAcceptedSession(payload: unknown): string | undefined {
+  const p = obj(payload);
+  if (p?.kind !== "plan_accepted") return undefined;
+  return typeof p.agentSessionId === "string" && p.agentSessionId ? p.agentSessionId : undefined;
+}
+
 // ── Checklist ───────────────────────────────────────────────
 
 export const CHECKLIST_STATUS_LABEL: Record<ChecklistItem["status"], string> = {

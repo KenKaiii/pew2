@@ -1357,7 +1357,10 @@ export const PlanState = z.object({
 /**
  * App -> daemon. Decide a pending plan.
  *  - `accept`: implement it. GG Coder starts a fresh context with the plan
- *    baked in (same daemon session; the transcript gets a divider).
+ *    baked in (same daemon session; the transcript gets a divider). Logged as
+ *    `{ kind: "plan_accepted", planTotal?, agentSessionId? }`; `agentSessionId`
+ *    is the implementation's on-disk session, which resume must reopen
+ *    (absent from older daemons).
  *  - `feedback`: revise it read-only with `feedback`, then submit again.
  *  - `reject`: drop it; the agent leaves plan mode and waits.
  * Logged as `{ kind: "plan_decision", action, feedback? }`.

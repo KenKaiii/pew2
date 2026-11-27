@@ -13,6 +13,7 @@ import { foldActivity, IDLE_ACTIVITY, type Activity } from "./activity";
 import { isEmptyChunk, readChunk, type Chunk } from "./chunks";
 import { joinChunks } from "./chunkJoin";
 import { readUsage, type ContextUsage } from "./contextUsage";
+import { readPlanAcceptedSession } from "./ggReview";
 import { dedupeImages } from "./images";
 import { pendingPermission, readPermissionRequest } from "./permissions";
 import type { PermissionRequest, Session, Turn } from "./useDaemon";
@@ -279,10 +280,12 @@ export function foldBackgroundEvent<S extends { sessions: Session[] }>(
   const turns = [...session.turns];
   applyChunk(turns, key, chunk);
   const sessions = [...prev.sessions];
+  const moved = readPlanAcceptedSession(payload);
   sessions[at] = {
     ...session,
     turns: capTurns(turns),
     title: titledBy(session, chunk),
+    ...(moved ? { agentSessionId: moved } : {}),
     // A system chunk is a failure notice, not work in progress — the same rule
     // the visible path applies, so the drawer dot and the spinner agree.
     // Ken's verdicts say nothing about whether the agent is working.
@@ -372,7 +375,16 @@ export function foldSessionEvents<S extends FoldState>(prev: S, events: readonly
     // Mirror into history so the sidebar can reopen this later, and title the
     // session from its first user message.
     const entry = message.sessionId ? byId.get(message.sessionId) : undefined;
-    if (entry) byId.set(entry.id, { ...entry, turns, title: titledBy(entry, chunk) });
+    // An accepted plan keeps its transcript but moves to the implementation's session.
+    const moved = readPlanAcceptedSession(payload);
+    if (entry) {
+      byId.set(entry.id, {
+        ...entry,
+        turns,
+        title: titledBy(entry, chunk),
+        ...(moved ? { agentSessionId: moved } : {}),
+      });
+    }
   }
 
   return {

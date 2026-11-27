@@ -548,3 +548,45 @@ test("an event for a conversation the drawer does not hold changes nothing", () 
     foldBackgroundEvent(before, "s1", "s1:0", { update: { sessionUpdate: "tool_call" } }),
   ).toBe(before);
 });
+
+const planAccepted = (seq: number, sessionId = "s1") => ({
+  sessionId,
+  seq,
+  payload: { kind: "plan_accepted", planTotal: 3, agentSessionId: "gg_1_impl" },
+});
+
+test("a replayed plan accept moves the row to the implementation's session and keeps its turns", () => {
+  const row: Session = { ...sessionStub, agentSessionId: "gg_1" };
+  const next = foldSessionEvents(state([], [row]), [
+    user(1, "plan it"),
+    planAccepted(2),
+    agent(3, "on it"),
+  ]);
+  expect(next.turns.map((t) => [t.role, t.text])).toEqual([
+    ["user", "plan it"],
+    ["note", "Plan accepted · fresh context · 3 steps"],
+    ["agent", "on it"],
+  ]);
+  expect(next.sessions[0]!.agentSessionId).toBe("gg_1_impl");
+  expect(next.sessions[0]!.turns).toBe(next.turns);
+  // An older daemon logs no id: the row keeps the one it had.
+  const old = foldSessionEvents(state([], [row]), [
+    { sessionId: "s1", seq: 1, payload: { kind: "plan_accepted" } },
+  ]);
+  expect(old.sessions[0]!.agentSessionId).toBe("gg_1");
+});
+
+test("a plan accept in a background chat moves its row and keeps its turns", () => {
+  const row: Session = {
+    ...sessionStub,
+    id: "s2",
+    agentSessionId: "gg_1",
+    turns: [{ id: "s2:1", role: "user", text: "plan it" }],
+  };
+  const next = foldBackgroundEvent(state([], [row]), "s2", "s2:2", planAccepted(2, "s2").payload);
+  expect(next.sessions[0]!.turns.map((t) => [t.role, t.text])).toEqual([
+    ["user", "plan it"],
+    ["note", "Plan accepted · fresh context · 3 steps"],
+  ]);
+  expect(next.sessions[0]!.agentSessionId).toBe("gg_1_impl");
+});

@@ -36,6 +36,10 @@ export abstract class DaemonGg extends DaemonProjects {
     this.record(session, {
       kind: "plan_accepted",
       ...(typeof raw?.planTotal === "number" ? { planTotal: raw.planTotal } : {}),
+      // So the app's row reopens the implementation after a daemon restart too.
+      ...(typeof raw?.agentSessionId === "string" && raw.agentSessionId
+        ? { agentSessionId: raw.agentSessionId }
+        : {}),
     });
   }
 

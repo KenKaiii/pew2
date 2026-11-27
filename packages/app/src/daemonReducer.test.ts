@@ -71,3 +71,34 @@ describe("heard: the computer has answered, not merely connected", () => {
     expect(state.heard).toBe(true);
   });
 });
+
+describe("an accepted plan", () => {
+  it("moves the row to the implementation's agent session and keeps the transcript", () => {
+    const row = {
+      id: "s1",
+      providerId: "ggcoder",
+      title: "Plan chat",
+      startedAt: 0,
+      turns: [{ id: "s1:1", role: "user" as const, text: "plan it" }],
+      configOptions: [],
+      agentSessionId: "gg_1",
+    };
+    const before: State = { ...start(), sessionId: "s1", turns: row.turns, sessions: [row] };
+    const next = reduceMessage(
+      before,
+      {
+        t: "session.event",
+        sessionId: "s1",
+        seq: 5,
+        payload: { kind: "plan_accepted", planTotal: 3, agentSessionId: "gg_1_impl" },
+      },
+      { ...scope([]), sessionRef: { current: "s1" }, now: 1000 },
+    );
+    expect(next.turns.map((t) => [t.role, t.text])).toEqual([
+      ["user", "plan it"],
+      ["note", "Plan accepted · fresh context · 3 steps"],
+    ]);
+    expect(next.sessions[0]).toMatchObject({ agentSessionId: "gg_1_impl", title: "Plan chat" });
+    expect(next.sessions[0]!.turns).toBe(next.turns);
+  });
+});

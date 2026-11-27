@@ -482,9 +482,11 @@ test("plan review: state is live + caught up, a decision is a logged turn, accep
     .map((m) => m.payload?.kind)
     .filter(Boolean);
   expect(kinds).toContain("plan_decision");
-  expect(sent.find((m) => m.payload?.kind === "plan_accepted")?.payload).toEqual({
+  const accepted = sent.find((m) => m.payload?.kind === "plan_accepted")?.payload;
+  expect(accepted).toEqual({
     kind: "plan_accepted",
     planTotal: 3,
+    agentSessionId: daemon.agentSessionId(id),
   });
   expect(daemon.agentSessionId(id)).toEndWith("_impl");
   expect(daemon.catchUp({ [id]: 0 })[0]?.plan?.pending).toBeNull();
